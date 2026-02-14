@@ -54,10 +54,63 @@ def tmux_pane_active(pane: str) -> bool:
     return rc.returncode == 0 and rc.stdout.strip() == "1"
 
 
-def tmux_send(pane: str, msg: str) -> bool:
-    a = subprocess.run(["tmux", "send-keys", "-t", pane, "-l", msg], check=False)
-    b = subprocess.run(["tmux", "send-keys", "-t", pane, "C-m"], check=False)
-    return a.returncode == 0 and b.returncode == 0
+def tmux_pane_in_mode(pane: str) -> bool:
+    rc = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return rc.returncode == 0 and rc.stdout.strip() == "1"
+
+
+def tmux_cancel_mode_if_needed(pane: str) -> None:
+    if tmux_pane_in_mode(pane):
+        subprocess.run(["tmux", "send-keys", "-t", pane, "-X", "cancel"], check=False)
+
+
+def _tmux_send_once(pane: str, msg: str) -> tuple[bool, str]:
+    send_text = subprocess.run(
+        ["tmux", "send-keys", "-t", pane, "-l", msg],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    send_enter = subprocess.run(
+        ["tmux", "send-keys", "-t", pane, "C-m"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ok = send_text.returncode == 0 and send_enter.returncode == 0
+    detail_parts = []
+    if send_text.returncode != 0:
+        detail_parts.append(f"send-text rc={send_text.returncode}")
+    if send_enter.returncode != 0:
+        detail_parts.append(f"send-enter rc={send_enter.returncode}")
+    for label, proc in (("send-text", send_text), ("send-enter", send_enter)):
+        for stream_name, stream in (("stderr", proc.stderr), ("stdout", proc.stdout)):
+            text = (stream or "").strip()
+            if text:
+                detail_parts.append(f"{label} {stream_name}={text}")
+    return ok, "; ".join(detail_parts)
+
+
+def tmux_send(pane: str, msg: str) -> tuple[bool, str]:
+    # If user is browsing scrollback, leave copy mode before injecting text.
+    tmux_cancel_mode_if_needed(pane)
+    ok, detail = _tmux_send_once(pane, msg)
+    if ok:
+        return True, ""
+
+    # One retry after a best-effort mode cancel handles transient mode races.
+    tmux_cancel_mode_if_needed(pane)
+    ok_retry, detail_retry = _tmux_send_once(pane, msg)
+    if ok_retry:
+        return True, ""
+    if detail and detail_retry:
+        return False, f"{detail}; retry: {detail_retry}"
+    return False, detail_retry or detail
 
 
 def read_state(path: Path) -> dict:
@@ -210,7 +263,7 @@ def main() -> int:
                 append_log(watch_log, f"skip: cooldown turn={turn_id}")
                 continue
 
-            ok = tmux_send(args.pane, msg)
+            ok, send_error = tmux_send(args.pane, msg)
             if ok:
                 last_send_time = tnow
                 last_sent_turn = turn_id
@@ -221,7 +274,19 @@ def main() -> int:
                 write_state(state_file, state)
                 append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
             else:
-                append_log(watch_log, f"error: tmux send failed turn={turn_id} thread={thread_id}")
+                if send_error:
+                    append_log(
+                        watch_log,
+                        (
+                            "error: tmux send failed "
+                            f"turn={turn_id} thread={thread_id} detail={send_error}"
+                        ),
+                    )
+                else:
+                    append_log(
+                        watch_log,
+                        f"error: tmux send failed turn={turn_id} thread={thread_id}",
+                    )
 
         time.sleep(0.2)
 

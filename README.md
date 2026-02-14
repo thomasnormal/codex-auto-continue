@@ -36,7 +36,13 @@ cd /path/to/your/project
 /path/to/codex-auto-continue/bin/auto_continue_watchd.sh status
 ```
 
-If you run the command from a different directory, set:
+Project root detection defaults to:
+1. `AUTO_CONTINUE_PROJECT_CWD` (if set)
+2. current Git repo root (if inside a repo)
+3. parent directory when run from a `.codex/` folder
+4. current directory
+
+If that is not what you want, set:
 
 ```bash
 AUTO_CONTINUE_PROJECT_CWD=/path/to/your/project
@@ -47,6 +53,7 @@ AUTO_CONTINUE_PROJECT_CWD=/path/to/your/project
 ```bash
 auto_continue_watchd.sh start <pane> [thread-id|auto] [--message TEXT | --message-file FILE]
 auto_continue_watchd.sh stop [pane]
+auto_continue_watchd.sh restart <pane> [thread-id|auto] [--message TEXT | --message-file FILE]
 auto_continue_watchd.sh pause <pane>
 auto_continue_watchd.sh resume <pane>
 auto_continue_watchd.sh status [pane]
@@ -55,6 +62,7 @@ auto_continue_watchd.sh run <pane> [thread-id|auto] [--message TEXT | --message-
 
 Notes:
 - `start` enforces one live watcher per pane.
+- `restart` stops and starts a pane watcher (reuses the pane's previous message/thread by default).
 - `run` is foreground mode (useful for debugging).
 - `pause`/`resume` are pane-local and immediate.
 - If a global pause file exists at `<project>/.codex/AUTO_CONTINUE_PAUSE`, all panes are paused.

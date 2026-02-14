@@ -3,7 +3,36 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROJECT_CWD="${AUTO_CONTINUE_PROJECT_CWD:-$PWD}"
+resolve_project_cwd() {
+  if [[ -n "${AUTO_CONTINUE_PROJECT_CWD:-}" ]]; then
+    if [[ -d "$AUTO_CONTINUE_PROJECT_CWD" ]]; then
+      (
+        cd "$AUTO_CONTINUE_PROJECT_CWD"
+        pwd -P
+      )
+      return
+    fi
+    printf '%s\n' "$AUTO_CONTINUE_PROJECT_CWD"
+    return
+  fi
+
+  local pwd_real git_root
+  pwd_real="$(pwd -P)"
+  git_root="$(git -C "$pwd_real" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$git_root" ]]; then
+    printf '%s\n' "$git_root"
+    return
+  fi
+
+  if [[ "$(basename "$pwd_real")" == ".codex" ]]; then
+    printf '%s\n' "$(dirname "$pwd_real")"
+    return
+  fi
+
+  printf '%s\n' "$pwd_real"
+}
+
+PROJECT_CWD="$(resolve_project_cwd)"
 STATE_DIR="$PROJECT_CWD/.codex"
 SCRIPT="$SCRIPT_DIR/auto_continue_logwatch.py"
 DEFAULT_MSG_FILE="$STATE_DIR/auto_continue.message.txt"
@@ -16,6 +45,7 @@ THREAD_ID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 PARSED_THREAD_ARG=""
 PARSED_MESSAGE_MODE=""
 PARSED_MESSAGE_VALUE=""
+PARSED_MESSAGE_EXPLICIT=""
 
 mkdir -p "$STATE_DIR"
 
@@ -274,6 +304,7 @@ parse_thread_and_message_args() {
   PARSED_THREAD_ARG=""
   PARSED_MESSAGE_MODE="file"
   PARSED_MESSAGE_VALUE="$DEFAULT_MSG_FILE"
+  PARSED_MESSAGE_EXPLICIT="0"
 
   if [[ $# -gt 0 && "$1" != --* ]]; then
     PARSED_THREAD_ARG="$1"
@@ -289,6 +320,7 @@ parse_thread_and_message_args() {
         fi
         PARSED_MESSAGE_MODE="inline"
         PARSED_MESSAGE_VALUE="$2"
+        PARSED_MESSAGE_EXPLICIT="1"
         shift 2
         ;;
       --message-file)
@@ -298,6 +330,7 @@ parse_thread_and_message_args() {
         fi
         PARSED_MESSAGE_MODE="file"
         PARSED_MESSAGE_VALUE="$2"
+        PARSED_MESSAGE_EXPLICIT="1"
         shift 2
         ;;
       *)
@@ -315,7 +348,7 @@ parse_thread_and_message_args() {
 
 watcher_rows() {
   local pane_filter="${1:-}"
-  ps -eo pid=,args= 2>/dev/null | awk -v root="$PROJECT_CWD" -v pane_filter="$pane_filter" '
+  ps -ww -eo pid=,args= 2>/dev/null | awk -v root="$PROJECT_CWD" -v pane_filter="$pane_filter" '
     {
       pid=$1
       pane=""; thread=""; state=""; watch=""; cwd=""; msg_file=""; msg_inline=""
@@ -337,6 +370,78 @@ watcher_rows() {
       if (pane_filter != "" && pane != pane_filter) next
       print pid "\t" pane "\t" thread "\t" state "\t" watch "\t" msg_file "\t" msg_inline
     }'
+}
+
+collect_known_keys() {
+  local row pid pane_id thread_id state_path watch_path msg_file msg_inline
+  local file base key
+
+  while IFS=$'\t' read -r pid pane_id thread_id state_path watch_path msg_file msg_inline; do
+    [[ -n "$pane_id" ]] || continue
+    key="$(key_from_pane "$pane_id")"
+    [[ -n "$key" ]] && echo "$key"
+  done < <(watcher_rows)
+
+  shopt -s nullglob
+  for file in \
+    "$STATE_DIR"/auto_continue_logwatch.*.state.local.json \
+    "$STATE_DIR"/auto_continue_logwatch.*.pid; do
+    base="$(basename "$file")"
+    key="${base#auto_continue_logwatch.}"
+    key="${key%.state.local.json}"
+    key="${key%.pid}"
+    [[ -n "$key" && "$key" != "$base" ]] && echo "$key"
+  done
+  shopt -u nullglob
+}
+
+read_message_meta_for_key() {
+  local key="$1"
+  local meta_file
+  local mode=""
+  local value=""
+  meta_file="$(message_meta_file_for_key "$key")"
+  [[ -f "$meta_file" ]] || return 1
+
+  while IFS='=' read -r mkey mval; do
+    case "$mkey" in
+      mode) mode="$mval" ;;
+      value) value="$mval" ;;
+    esac
+  done < "$meta_file"
+
+  if [[ "$mode" == "inline" || "$mode" == "file" ]]; then
+    printf '%s\t%s' "$mode" "$value"
+    return 0
+  fi
+  return 1
+}
+
+thread_from_running_watcher_for_pane() {
+  local pane="$1"
+  local row pid pane_id thread_id state_path watch_path msg_file msg_inline
+  row="$(watcher_rows "$pane" | head -n 1 || true)"
+  [[ -n "$row" ]] || return 1
+  IFS=$'\t' read -r pid pane_id thread_id state_path watch_path msg_file msg_inline <<< "$row"
+  if is_thread_id "$thread_id"; then
+    printf '%s' "${thread_id,,}"
+    return 0
+  fi
+  return 1
+}
+
+thread_from_state_file_for_key() {
+  local key="$1"
+  local state_file tid
+  state_file="$(state_file_for_key "$key")"
+  [[ -f "$state_file" ]] || return 1
+
+  tid="$(sed -nE "s/.*\"thread_id\"[[:space:]]*:[[:space:]]*\"($THREAD_ID_RE)\".*/\1/p" "$state_file" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+  if is_thread_id "$tid"; then
+    printf '%s' "$tid"
+    return 0
+  fi
+  return 1
 }
 
 watcher_pids_for_pane() {
@@ -504,27 +609,34 @@ stop_pid_file() {
   fi
 }
 
-cmd_stop() {
-  local pane="${1:-}"
+stop_pane_watchers() {
+  local pane="$1"
   local key pid_file
   local -a pane_pids=()
   local pid
 
-  if [[ -n "$pane" ]]; then
-    key="$(key_from_pane "$pane")"
-    pid_file="$(pid_file_for_key "$key")"
-    mapfile -t pane_pids < <(watcher_pids_for_pane "$pane")
-    if (( ${#pane_pids[@]} == 0 )); then
-      [[ -f "$pid_file" ]] && rm -f "$pid_file"
-      echo "not running: pane=$pane"
-      exit 0
-    fi
+  key="$(key_from_pane "$pane")"
+  pid_file="$(pid_file_for_key "$key")"
+  mapfile -t pane_pids < <(watcher_pids_for_pane "$pane")
+  if (( ${#pane_pids[@]} == 0 )); then
+    [[ -f "$pid_file" ]] && rm -f "$pid_file"
+    echo "not running: pane=$pane"
+    return 0
+  fi
 
-    for pid in "${pane_pids[@]}"; do
-      kill "$pid" 2>/dev/null || true
-      echo "stopped: pane=$pane pid=$pid"
-    done
-    rm -f "$pid_file"
+  for pid in "${pane_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+    echo "stopped: pane=$pane pid=$pid"
+  done
+  rm -f "$pid_file"
+  return 0
+}
+
+cmd_stop() {
+  local pane="${1:-}"
+
+  if [[ -n "$pane" ]]; then
+    stop_pane_watchers "$pane"
     return 0
   fi
 
@@ -556,6 +668,68 @@ cmd_stop() {
   if [[ "$had_any" -eq 0 ]]; then
     echo "not running"
   fi
+}
+
+cmd_restart() {
+  local pane key
+  local thread_arg message_mode message_value message_explicit
+  local meta_data meta_mode meta_value
+  local -a start_args=()
+
+  if [[ $# -gt 0 && "$1" != --* ]]; then
+    pane="$1"
+    shift
+  else
+    pane="${TMUX_PANE:-}"
+  fi
+  if [[ -z "$pane" ]]; then
+    echo "usage: $0 restart <tmux-pane-id> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+    exit 2
+  fi
+
+  parse_thread_and_message_args "$@"
+  thread_arg="$PARSED_THREAD_ARG"
+  message_mode="$PARSED_MESSAGE_MODE"
+  message_value="$PARSED_MESSAGE_VALUE"
+  message_explicit="$PARSED_MESSAGE_EXPLICIT"
+
+  key="$(key_from_pane "$pane")"
+
+  if [[ "$message_explicit" != "1" ]]; then
+    meta_data="$(read_message_meta_for_key "$key" || true)"
+    if [[ -n "$meta_data" ]]; then
+      IFS=$'\t' read -r meta_mode meta_value <<< "$meta_data"
+      if [[ "$meta_mode" == "inline" || "$meta_mode" == "file" ]]; then
+        message_mode="$meta_mode"
+        message_value="$meta_value"
+      fi
+    fi
+  fi
+
+  if [[ "$message_mode" == "file" && ! -f "$message_value" ]]; then
+    message_value="$DEFAULT_MSG_FILE"
+  fi
+
+  if [[ -z "$thread_arg" ]]; then
+    thread_arg="$(thread_from_running_watcher_for_pane "$pane" || true)"
+    if [[ -z "$thread_arg" ]]; then
+      thread_arg="$(thread_from_state_file_for_key "$key" || true)"
+    fi
+  fi
+
+  stop_pane_watchers "$pane"
+
+  start_args=("$pane")
+  if [[ -n "$thread_arg" ]]; then
+    start_args+=("$thread_arg")
+  fi
+  if [[ "$message_mode" == "inline" ]]; then
+    start_args+=(--message "$message_value")
+  else
+    start_args+=(--message-file "$message_value")
+  fi
+
+  cmd_start "${start_args[@]}"
 }
 
 cmd_pause() {
@@ -712,19 +886,26 @@ cleanup_stale_pid_files() {
 }
 
 cleanup_stale_log_files() {
-  declare -A keep_watch_logs=()
-  local row pid pane_id thread_id state_path watch_path msg_file msg_inline
+  declare -A keep_logs=()
+  declare -A keep_keys=()
+  local key
   local log_file
 
-  while IFS=$'\t' read -r pid pane_id thread_id state_path watch_path msg_file msg_inline; do
-    [[ -n "$watch_path" ]] && keep_watch_logs["$watch_path"]=1
-  done < <(watcher_rows)
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    keep_keys["$key"]=1
+  done < <(collect_known_keys)
+
+  for key in "${!keep_keys[@]}"; do
+    keep_logs["$(watch_log_for_key "$key")"]=1
+    keep_logs["$(run_log_for_key "$key")"]=1
+  done
 
   shopt -s nullglob
   for log_file in \
     "$STATE_DIR"/auto_continue_logwatch*.log \
     "$STATE_DIR"/auto_continue_logwatch*.runner.log; do
-    if [[ -n "${keep_watch_logs[$log_file]+x}" ]]; then
+    if [[ -n "${keep_logs[$log_file]+x}" ]]; then
       continue
     fi
     rm -f "$log_file"
@@ -734,14 +915,18 @@ cleanup_stale_log_files() {
 
 cleanup_stale_message_meta_files() {
   declare -A keep_meta_files=()
-  local row pid pane_id thread_id state_path watch_path msg_file msg_inline
+  declare -A keep_keys=()
   local key meta_file
 
-  while IFS=$'\t' read -r pid pane_id thread_id state_path watch_path msg_file msg_inline; do
-    key="$(key_from_pane "$pane_id")"
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    keep_keys["$key"]=1
+  done < <(collect_known_keys)
+
+  for key in "${!keep_keys[@]}"; do
     meta_file="$(message_meta_file_for_key "$key")"
     keep_meta_files["$meta_file"]=1
-  done < <(watcher_rows)
+  done
 
   shopt -s nullglob
   for meta_file in "$STATE_DIR"/auto_continue_logwatch.*.message.local.txt; do
@@ -762,11 +947,12 @@ case "$subcmd" in
   run) cmd_run "$@" ;;
   start) cmd_start "$@" ;;
   stop) cmd_stop "$@" ;;
+  restart) cmd_restart "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   status) cmd_status "$@" ;;
   *)
-    echo "usage: $0 {start|stop|pause|resume|status|run} [pane] [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+    echo "usage: $0 {start|stop|restart|pause|resume|status|run} [pane] [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
     exit 2
     ;;
 esac
