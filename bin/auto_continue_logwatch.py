@@ -23,6 +23,57 @@ EVENT_RE = re.compile(
     r"turn_id=([^ ]+).*needs_follow_up=(true|false)"
 )
 
+SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+
+ROLLOUT_RE = re.compile(
+    r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
+)
+
+
+def find_rollout_file(thread_id: str, sessions_dir: Path) -> Optional[Path]:
+    """Glob for the rollout JSONL file matching *thread_id*."""
+    if not sessions_dir.is_dir():
+        return None
+    pattern = f"*/*/*/rollout-*-{thread_id}.jsonl"
+    matches = list(sessions_dir.glob(pattern))
+    if not matches:
+        return None
+    # Most recent first (there should normally be exactly one).
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
+def parse_rollout_event(line: str) -> Optional[str]:
+    """Parse a JSONL line; return *turn_id* if it is a ``task_complete`` event."""
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if obj.get("type") != "event_msg":
+        return None
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "task_complete":
+        return None
+    return payload.get("turn_id")
+
+
+def find_latest_rollout(sessions_dir: Path) -> Optional[tuple[str, Path]]:
+    """Find the most recently modified rollout file; return ``(thread_id, path)``."""
+    if not sessions_dir.is_dir():
+        return None
+    matches = list(sessions_dir.glob("*/*/*/rollout-*.jsonl"))
+    if not matches:
+        return None
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in matches[:5]:
+        m = ROLLOUT_RE.search(path.name)
+        if m:
+            return m.group(1), path
+    return None
+
 
 def now_ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -137,31 +188,17 @@ def discover_thread_id(log_path: Path) -> Optional[str]:
     try:
         lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
-        return None
+        lines = []
     # Pick most recent thread id with a post-sampling line.
     for line in reversed(lines[-4000:]):
         m = EVENT_RE.search(line)
         if m:
             return m.group(1)
+    # Fallback: discover from rollout session files (new-codex path).
+    result = find_latest_rollout(SESSIONS_DIR)
+    if result:
+        return result[0]
     return None
-
-
-def tail_lines(path: Path, start_at_end: bool = True):
-    with path.open("r", encoding="utf-8", errors="ignore") as f:
-        if start_at_end:
-            f.seek(0, os.SEEK_END)
-        while True:
-            line = f.readline()
-            if line:
-                yield line
-                continue
-            time.sleep(0.2)
-            # If file rotated/truncated, reopen.
-            try:
-                if f.tell() > path.stat().st_size:
-                    break
-            except FileNotFoundError:
-                break
 
 
 def pane_key(pane: str) -> str:
@@ -220,17 +257,83 @@ def main() -> int:
     last_send_time = 0.0
     watched_last_event_at = 0.0
 
+    codex_fh = None
+    rollout_fh = None
+    rollout_path: Optional[Path] = None
+    last_rollout_scan = 0.0
+
+    # Try to locate the rollout file for the initial thread right away.
+    if watched_thread:
+        rollout_path = find_rollout_file(watched_thread, SESSIONS_DIR)
+        if rollout_path:
+            append_log(watch_log, f"rollout: watching {rollout_path.name}")
+
     while True:
-        if not codex_log.exists():
-            time.sleep(0.5)
-            continue
+        events: list[tuple[str, str, str]] = []
+        tnow = time.time()
 
-        for line in tail_lines(codex_log, start_at_end=True):
-            m = EVENT_RE.search(line)
-            if not m:
-                continue
+        # --- Poll codex-tui.log ---
+        if codex_log.exists():
+            if codex_fh is None:
+                codex_fh = codex_log.open("r", encoding="utf-8", errors="ignore")
+                codex_fh.seek(0, os.SEEK_END)
+            while True:
+                line = codex_fh.readline()
+                if not line:
+                    break
+                m = EVENT_RE.search(line)
+                if m:
+                    events.append((m.group(1), m.group(2), m.group(3)))
+            # Detect truncation/rotation.
+            try:
+                if codex_fh.tell() > codex_log.stat().st_size:
+                    codex_fh.close()
+                    codex_fh = None
+            except FileNotFoundError:
+                codex_fh.close()
+                codex_fh = None
 
-            thread_id, turn_id, needs_follow_up = m.group(1), m.group(2), m.group(3)
+        # --- Discover/refresh rollout file periodically ---
+        if rollout_path is None and tnow - last_rollout_scan > 5.0:
+            last_rollout_scan = tnow
+            if watched_thread:
+                found = find_rollout_file(watched_thread, SESSIONS_DIR)
+                if found:
+                    rollout_path = found
+                    append_log(watch_log, f"rollout: watching {rollout_path.name}")
+            elif auto_mode:
+                result = find_latest_rollout(SESSIONS_DIR)
+                if result:
+                    watched_thread, rollout_path = result
+                    watched_last_event_at = tnow
+                    append_log(
+                        watch_log,
+                        f"watch: auto-selected thread_id={watched_thread} from rollout",
+                    )
+
+        # --- Poll rollout JSONL ---
+        if rollout_path is not None and rollout_path.exists():
+            if rollout_fh is None:
+                rollout_fh = rollout_path.open("r", encoding="utf-8", errors="ignore")
+                rollout_fh.seek(0, os.SEEK_END)
+            while True:
+                line = rollout_fh.readline()
+                if not line:
+                    break
+                turn_id = parse_rollout_event(line)
+                if turn_id and watched_thread:
+                    events.append((watched_thread, turn_id, "false"))
+            # Detect truncation/rotation.
+            try:
+                if rollout_fh.tell() > rollout_path.stat().st_size:
+                    rollout_fh.close()
+                    rollout_fh = None
+            except FileNotFoundError:
+                rollout_fh.close()
+                rollout_fh = None
+
+        # --- Process collected events ---
+        for thread_id, turn_id, needs_follow_up in events:
             tnow = time.time()
 
             if auto_mode:
@@ -244,6 +347,12 @@ def main() -> int:
                     prev = watched_thread
                     watched_thread = thread_id
                     watched_last_event_at = tnow
+                    # Reset rollout tracking for the new thread.
+                    if rollout_fh is not None:
+                        rollout_fh.close()
+                        rollout_fh = None
+                    rollout_path = None
+                    last_rollout_scan = 0.0
                     append_log(
                         watch_log,
                         (
