@@ -35,6 +35,8 @@ resolve_project_cwd() {
 PROJECT_CWD="$(resolve_project_cwd)"
 STATE_DIR="$PROJECT_CWD/.codex"
 SCRIPT="$SCRIPT_DIR/auto_continue_logwatch.py"
+SEND_DELAY_SECS="${AUTO_CONTINUE_SEND_DELAY_SECS:-0.25}"
+ENTER_DELAY_SECS="${AUTO_CONTINUE_ENTER_DELAY_SECS:-0.15}"
 DEFAULT_MSG_FILE="$STATE_DIR/auto_continue.message.txt"
 if [[ ! -f "$DEFAULT_MSG_FILE" ]]; then
   DEFAULT_MSG_FILE="$REPO_ROOT/examples/messages/default_continue_message.txt"
@@ -58,6 +60,145 @@ sanitize_key() {
 key_from_pane() {
   local pane="$1"
   sanitize_key "$pane"
+}
+
+is_pane_id() {
+  local maybe="$1"
+  [[ "$maybe" =~ ^%[0-9]+$ ]]
+}
+
+tmux_capture() {
+  local out
+  local -a cmd=(tmux)
+  if [[ -n "${AUTO_CONTINUE_TMUX_SOCKET:-}" ]]; then
+    cmd+=(-S "$AUTO_CONTINUE_TMUX_SOCKET")
+  fi
+  if out="$("${cmd[@]}" "$@" 2>/dev/null)"; then
+    printf '%s' "$out"
+    return 0
+  fi
+  if [[ -z "${AUTO_CONTINUE_TMUX_SOCKET:-}" && -n "${TMUX:-}" ]]; then
+    if out="$(env -u TMUX -u TMUX_PANE tmux "$@" 2>/dev/null)"; then
+      printf '%s' "$out"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+resolve_pane_from_window_target() {
+  local target="$1"
+  local requested_session=""
+  local requested_window=""
+  local row session_name window_index pane_id pane_active window_active pane_index
+  local -a rows=()
+  local tmux_listing=""
+  local -A session_seen=()
+
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    requested_window="$target"
+  elif [[ "$target" =~ ^([^:]+):([0-9]+)$ ]]; then
+    requested_session="${BASH_REMATCH[1]}"
+    requested_window="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+
+  if ! tmux_listing="$(tmux_capture list-panes -a -F $'#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{pane_index}')"; then
+    echo "error: tmux server is unavailable; cannot resolve window target '$target'" >&2
+    echo "hint: start/reconnect tmux, or use a pane id if you already know it (for example '%6')" >&2
+    return 1
+  fi
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    IFS=$'\t' read -r session_name window_index pane_id pane_active window_active pane_index <<< "$row"
+    [[ -n "$pane_id" ]] || continue
+    [[ "$window_index" == "$requested_window" ]] || continue
+    if [[ -n "$requested_session" && "$session_name" != "$requested_session" ]]; then
+      continue
+    fi
+    rows+=("$session_name"$'\t'"$window_index"$'\t'"$pane_id"$'\t'"$pane_active"$'\t'"$window_active"$'\t'"$pane_index")
+    session_seen["$session_name"]=1
+  done <<< "$tmux_listing"
+
+  if (( ${#rows[@]} == 0 )); then
+    return 1
+  fi
+
+  if [[ -z "$requested_session" && ${#session_seen[@]} -gt 1 ]]; then
+    local active_session=""
+    local active_conflict=0
+    for row in "${rows[@]}"; do
+      IFS=$'\t' read -r session_name window_index pane_id pane_active window_active pane_index <<< "$row"
+      [[ "$window_active" == "1" ]] || continue
+      if [[ -z "$active_session" ]]; then
+        active_session="$session_name"
+      elif [[ "$active_session" != "$session_name" ]]; then
+        active_conflict=1
+        break
+      fi
+    done
+
+    if [[ -n "$active_session" && "$active_conflict" -eq 0 ]]; then
+      requested_session="$active_session"
+    else
+      local sessions_csv
+      sessions_csv="$(printf '%s\n' "${!session_seen[@]}" | sort | paste -sd ',' -)"
+      echo "error: window '$requested_window' is ambiguous across tmux sessions: $sessions_csv" >&2
+      echo "hint: use 'session:window' (for example '0:$requested_window') or a pane id (for example '%6')" >&2
+      return 1
+    fi
+  fi
+
+  local selected_pane=""
+  local fallback_pane=""
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r session_name window_index pane_id pane_active window_active pane_index <<< "$row"
+    if [[ -n "$requested_session" && "$session_name" != "$requested_session" ]]; then
+      continue
+    fi
+    if [[ -z "$fallback_pane" ]]; then
+      fallback_pane="$pane_id"
+    fi
+    if [[ "$pane_active" == "1" ]]; then
+      selected_pane="$pane_id"
+      break
+    fi
+  done
+
+  if [[ -z "$selected_pane" ]]; then
+    selected_pane="$fallback_pane"
+  fi
+
+  if is_pane_id "$selected_pane"; then
+    printf '%s' "$selected_pane"
+    return 0
+  fi
+  return 1
+}
+
+resolve_pane_target() {
+  local target="$1"
+  local pane
+
+  if is_pane_id "$target"; then
+    printf '%s' "$target"
+    return 0
+  fi
+
+  if [[ "$target" =~ ^[0-9]+$ || "$target" =~ ^[^:]+:[0-9]+$ ]]; then
+    pane="$(resolve_pane_from_window_target "$target" || true)"
+    if is_pane_id "$pane"; then
+      printf '%s' "$pane"
+      return 0
+    fi
+    return 1
+  fi
+
+  echo "error: invalid pane/window target '$target'" >&2
+  echo "hint: use a pane id (for example '%6'), a window index (for example '2'), or 'session:window' (for example '0:2')" >&2
+  return 1
 }
 
 pid_file_for_key() {
@@ -200,7 +341,7 @@ closest_thread_id_for_start_epoch() {
 detect_thread_from_pane_tty() {
   local pane="$1"
   local pane_tty tty_for_ps
-  pane_tty="$(tmux display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null || true)"
+  pane_tty="$(tmux_capture display-message -p -t "$pane" '#{pane_tty}' || true)"
   [[ -n "$pane_tty" ]] || return 1
   tty_for_ps="${pane_tty#/dev/}"
   [[ -n "$tty_for_ps" ]] || return 1
@@ -295,9 +436,10 @@ resolve_thread_id() {
     return 0
   fi
 
-  echo "failed: could not auto-detect thread_id for pane=$pane" >&2
-  echo "hint: pass it explicitly: $0 start $pane <thread-id>" >&2
-  return 1
+  # No explicit thread was requested and detection failed: fall back to auto mode.
+  echo "warn: could not auto-detect thread_id for pane=$pane; falling back to auto mode" >&2
+  printf '%s' "auto"
+  return 0
 }
 
 parse_thread_and_message_args() {
@@ -467,20 +609,24 @@ is_running_pid_file() {
 }
 
 cmd_run() {
-  local pane
+  local pane target
   local thread_arg thread_id key
   local message_mode message_value
   local -a message_args=()
 
   if [[ $# -gt 0 && "$1" != --* ]]; then
-    pane="$1"
+    target="$1"
     shift
   else
-    pane="${TMUX_PANE:-}"
+    target="${TMUX_PANE:-}"
   fi
-  if [[ -z "$pane" ]]; then
-    echo "usage: $0 run <tmux-pane-id> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 run <pane-id|window-index|session:window> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
     exit 2
+  fi
+  pane="$(resolve_pane_target "$target")"
+  if [[ "$pane" != "$target" ]]; then
+    echo "resolved: target=$target pane=$pane"
   fi
 
   parse_thread_and_message_args "$@"
@@ -505,12 +651,14 @@ cmd_run() {
     --thread-id "$thread_id" \
     "${message_args[@]}" \
     --cooldown-secs 1.0 \
+    --send-delay-secs "$SEND_DELAY_SECS" \
+    --enter-delay-secs "$ENTER_DELAY_SECS" \
     --state-file "$(state_file_for_key "$key")" \
     --watch-log "$(watch_log_for_key "$key")"
 }
 
 cmd_start() {
-  local pane
+  local pane target
   local thread_arg
   local thread_id key pid_file run_log
   local message_mode message_value
@@ -518,14 +666,18 @@ cmd_start() {
   local -a message_args=()
   local pids_joined
   if [[ $# -gt 0 && "$1" != --* ]]; then
-    pane="$1"
+    target="$1"
     shift
   else
-    pane="${TMUX_PANE:-}"
+    target="${TMUX_PANE:-}"
   fi
-  if [[ -z "$pane" ]]; then
-    echo "usage: $0 start <tmux-pane-id> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 start <pane-id|window-index|session:window> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
     exit 2
+  fi
+  pane="$(resolve_pane_target "$target")"
+  if [[ "$pane" != "$target" ]]; then
+    echo "resolved: target=$target pane=$pane"
   fi
 
   parse_thread_and_message_args "$@"
@@ -575,6 +727,8 @@ cmd_start() {
     --thread-id "$thread_id" \
     "${message_args[@]}" \
     --cooldown-secs 1.0 \
+    --send-delay-secs "$SEND_DELAY_SECS" \
+    --enter-delay-secs "$ENTER_DELAY_SECS" \
     --state-file "$(state_file_for_key "$key")" \
     --watch-log "$(watch_log_for_key "$key")" \
     >>"$run_log" 2>&1 &
@@ -636,6 +790,7 @@ cmd_stop() {
   local pane="${1:-}"
 
   if [[ -n "$pane" ]]; then
+    pane="$(resolve_pane_target "$pane")"
     stop_pane_watchers "$pane"
     return 0
   fi
@@ -671,20 +826,24 @@ cmd_stop() {
 }
 
 cmd_restart() {
-  local pane key
+  local pane target key
   local thread_arg message_mode message_value message_explicit
   local meta_data meta_mode meta_value
   local -a start_args=()
 
   if [[ $# -gt 0 && "$1" != --* ]]; then
-    pane="$1"
+    target="$1"
     shift
   else
-    pane="${TMUX_PANE:-}"
+    target="${TMUX_PANE:-}"
   fi
-  if [[ -z "$pane" ]]; then
-    echo "usage: $0 restart <tmux-pane-id> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 restart <pane-id|window-index|session:window> [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
     exit 2
+  fi
+  pane="$(resolve_pane_target "$target")"
+  if [[ "$pane" != "$target" ]]; then
+    echo "resolved: target=$target pane=$pane"
   fi
 
   parse_thread_and_message_args "$@"
@@ -733,13 +892,17 @@ cmd_restart() {
 }
 
 cmd_pause() {
-  local pane="${1:-${TMUX_PANE:-}}"
+  local pane target="${1:-${TMUX_PANE:-}}"
   local key pause_file
   local -a pane_pids=()
   local pid
-  if [[ -z "$pane" ]]; then
-    echo "usage: $0 pause <tmux-pane-id>" >&2
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 pause <pane-id|window-index|session:window>" >&2
     exit 2
+  fi
+  pane="$(resolve_pane_target "$target")"
+  if [[ "$pane" != "$target" ]]; then
+    echo "resolved: target=$target pane=$pane"
   fi
   key="$(key_from_pane "$pane")"
   pause_file="$(pause_file_for_key "$key")"
@@ -752,13 +915,17 @@ cmd_pause() {
 }
 
 cmd_resume() {
-  local pane="${1:-${TMUX_PANE:-}}"
+  local pane target="${1:-${TMUX_PANE:-}}"
   local key pause_file
   local -a pane_pids=()
   local pid
-  if [[ -z "$pane" ]]; then
-    echo "usage: $0 resume <tmux-pane-id>" >&2
+  if [[ -z "$target" ]]; then
+    echo "usage: $0 resume <pane-id|window-index|session:window>" >&2
     exit 2
+  fi
+  pane="$(resolve_pane_target "$target")"
+  if [[ "$pane" != "$target" ]]; then
+    echo "resolved: target=$target pane=$pane"
   fi
   key="$(key_from_pane "$pane")"
   pause_file="$(pause_file_for_key "$key")"
@@ -777,10 +944,17 @@ cmd_status() {
   local pane="${1:-}"
   local -a rows=()
   local row pid pane_id thread_id state_path watch_path msg_file msg_inline
-  local last_line event_summary thread_short state_value
+  local last_line event_summary thread_short state_value window_label
   local key meta_file message_mode message_value message_summary
+  local session_name window_index listed_pane_id
+  declare -A pane_window=()
 
   if [[ -n "$pane" ]]; then
+    local target="$pane"
+    pane="$(resolve_pane_target "$target")"
+    if [[ "$pane" != "$target" ]]; then
+      echo "resolved: target=$target pane=$pane"
+    fi
     mapfile -t rows < <(watcher_rows "$pane")
     echo "Active watchers for pane $pane: ${#rows[@]}"
   else
@@ -788,8 +962,15 @@ cmd_status() {
     echo "Active watchers: ${#rows[@]}"
   fi
 
-  printf "%-5s %-7s %-13s %-8s %-20s %s\n" "PANE" "PID" "THREAD_ID" "STATE" "LAST_EVENT" "MESSAGE"
-  printf "%-5s %-7s %-13s %-8s %-20s %s\n" "-----" "-------" "-------------" "--------" "--------------------" "-------"
+  local pane_listing=""
+  pane_listing="$(tmux_capture list-panes -a -F $'#{session_name}\t#{window_index}\t#{pane_id}' || true)"
+  while IFS=$'\t' read -r session_name window_index listed_pane_id; do
+    [[ -n "$listed_pane_id" ]] || continue
+    pane_window["$listed_pane_id"]="${session_name}:${window_index}"
+  done <<< "$pane_listing"
+
+  printf "%-7s %-5s %-7s %-13s %-8s %-20s %s\n" "WINDOW" "PANE" "PID" "THREAD_ID" "STATE" "LAST_EVENT" "MESSAGE"
+  printf "%-7s %-5s %-7s %-13s %-8s %-20s %s\n" "------" "-----" "-------" "-------------" "--------" "--------------------" "-------"
 
   if (( ${#rows[@]} == 0 )); then
     echo "(none)"
@@ -809,7 +990,7 @@ cmd_status() {
       last_line="$(tail -n 1 "$watch_path" 2>/dev/null || true)"
       if [[ -n "$last_line" ]]; then
         event_summary="${last_line#*] }"
-        if [[ "$event_summary" =~ ^continue:\ sent\ turn=([0-9]+) ]]; then
+        if [[ "$event_summary" =~ ^continue:\ sent\ turn=([^[:space:]]+) ]]; then
           event_summary="continue turn=${BASH_REMATCH[1]}"
         elif [[ "$event_summary" =~ ^watch:\ pane= ]]; then
           event_summary="watch start"
@@ -863,8 +1044,10 @@ cmd_status() {
       state_value="paused"
     fi
 
-    printf "%-5s %-7s %-13s %-8s %-20s %s\n" \
-      "$pane_id" "$pid" "$thread_short" "$state_value" "$event_summary" "$message_summary"
+    window_label="${pane_window[$pane_id]:--}"
+
+    printf "%-7s %-5s %-7s %-13s %-8s %-20s %s\n" \
+      "$window_label" "$pane_id" "$pid" "$thread_short" "$state_value" "$event_summary" "$message_summary"
   done
 }
 
@@ -952,7 +1135,7 @@ case "$subcmd" in
   resume) cmd_resume "$@" ;;
   status) cmd_status "$@" ;;
   *)
-    echo "usage: $0 {start|stop|restart|pause|resume|status|run} [pane] [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
+    echo "usage: $0 {start|stop|restart|pause|resume|status|run} [pane-id|window-index|session:window] [thread-id|auto] [--message TEXT | --message-file FILE]" >&2
     exit 2
     ;;
 esac

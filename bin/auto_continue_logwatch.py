@@ -20,7 +20,7 @@ from typing import Optional
 
 EVENT_RE = re.compile(
     r"session_loop\{thread_id=([0-9a-f\-]+)\}.*post sampling token usage "
-    r"turn_id=([0-9]+).*needs_follow_up=(true|false)"
+    r"turn_id=([^ ]+).*needs_follow_up=(true|false)"
 )
 
 
@@ -34,54 +34,62 @@ def append_log(log_file: Path, msg: str) -> None:
         f.write(f"[{now_ts()}] {msg}\n")
 
 
-def tmux_pane_exists(pane: str) -> bool:
+def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.CompletedProcess:
+    cmd = ["tmux"]
+    socket_path = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
+    if socket_path:
+        cmd.extend(["-S", socket_path])
+    cmd.extend(args)
     rc = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_id}"],
-        capture_output=True,
+        cmd,
+        capture_output=capture_output,
         text=True,
         check=False,
     )
+    if rc.returncode == 0:
+        return rc
+
+    # Recover from stale TMUX socket by retrying against default server.
+    if os.environ.get("TMUX") and not socket_path:
+        env = os.environ.copy()
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        return subprocess.run(
+            cmd,
+            capture_output=capture_output,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+    return rc
+
+
+def tmux_pane_exists(pane: str) -> bool:
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_id}"])
     return rc.returncode == 0
 
 
 def tmux_pane_active(pane: str) -> bool:
-    rc = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_active}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_active}"])
     return rc.returncode == 0 and rc.stdout.strip() == "1"
 
 
 def tmux_pane_in_mode(pane: str) -> bool:
-    rc = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_in_mode}"])
     return rc.returncode == 0 and rc.stdout.strip() == "1"
 
 
 def tmux_cancel_mode_if_needed(pane: str) -> None:
     if tmux_pane_in_mode(pane):
-        subprocess.run(["tmux", "send-keys", "-t", pane, "-X", "cancel"], check=False)
+        run_tmux(["send-keys", "-t", pane, "-X", "cancel"], capture_output=False)
 
 
-def _tmux_send_once(pane: str, msg: str) -> tuple[bool, str]:
-    send_text = subprocess.run(
-        ["tmux", "send-keys", "-t", pane, "-l", msg],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    send_enter = subprocess.run(
-        ["tmux", "send-keys", "-t", pane, "C-m"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _tmux_send_once(pane: str, msg: str, enter_delay_secs: float) -> tuple[bool, str]:
+    send_text = run_tmux(["send-keys", "-t", pane, "-l", msg])
+    if enter_delay_secs > 0.0:
+        time.sleep(enter_delay_secs)
+    send_enter = run_tmux(["send-keys", "-t", pane, "C-m"])
     ok = send_text.returncode == 0 and send_enter.returncode == 0
     detail_parts = []
     if send_text.returncode != 0:
@@ -96,16 +104,16 @@ def _tmux_send_once(pane: str, msg: str) -> tuple[bool, str]:
     return ok, "; ".join(detail_parts)
 
 
-def tmux_send(pane: str, msg: str) -> tuple[bool, str]:
+def tmux_send(pane: str, msg: str, enter_delay_secs: float) -> tuple[bool, str]:
     # If user is browsing scrollback, leave copy mode before injecting text.
     tmux_cancel_mode_if_needed(pane)
-    ok, detail = _tmux_send_once(pane, msg)
+    ok, detail = _tmux_send_once(pane, msg, enter_delay_secs)
     if ok:
         return True, ""
 
     # One retry after a best-effort mode cancel handles transient mode races.
     tmux_cancel_mode_if_needed(pane)
-    ok_retry, detail_retry = _tmux_send_once(pane, msg)
+    ok_retry, detail_retry = _tmux_send_once(pane, msg, enter_delay_secs)
     if ok_retry:
         return True, ""
     if detail and detail_retry:
@@ -170,6 +178,8 @@ def main() -> int:
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--log-path", default=str(Path.home() / ".codex" / "log" / "codex-tui.log"))
     p.add_argument("--cooldown-secs", type=float, default=1.0)
+    p.add_argument("--send-delay-secs", type=float, default=0.25)
+    p.add_argument("--enter-delay-secs", type=float, default=0.15)
     p.add_argument("--require-pane-active", action="store_true")
     p.add_argument("--state-file", default="")
     p.add_argument("--watch-log", default="")
@@ -263,7 +273,10 @@ def main() -> int:
                 append_log(watch_log, f"skip: cooldown turn={turn_id}")
                 continue
 
-            ok, send_error = tmux_send(args.pane, msg)
+            if args.send_delay_secs > 0.0:
+                time.sleep(args.send_delay_secs)
+
+            ok, send_error = tmux_send(args.pane, msg, max(0.0, args.enter_delay_secs))
             if ok:
                 last_send_time = tnow
                 last_sent_turn = turn_id

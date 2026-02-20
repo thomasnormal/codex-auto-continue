@@ -6,7 +6,7 @@ It supports:
 - one watcher per pane
 - per-pane message text or message file
 - per-pane pause/resume
-- thread auto-discovery (so `start %6` usually just works)
+- thread auto-discovery (so `start %6` or `start 2` usually just works)
 - optional legacy notify-hook mode
 
 ## Requirements
@@ -24,10 +24,10 @@ It supports:
 cd /path/to/your/project
 ```
 
-2. Start watcher for a pane (thread auto-detected):
+2. Start watcher for a pane or window (thread auto-detected):
 
 ```bash
-/path/to/codex-auto-continue/bin/auto_continue_watchd.sh start %2
+/path/to/codex-auto-continue/bin/auto_continue_watchd.sh start 2
 ```
 
 3. Check status:
@@ -48,19 +48,36 @@ If that is not what you want, set:
 AUTO_CONTINUE_PROJECT_CWD=/path/to/your/project
 ```
 
+Optional timing knob for stubborn Enter races:
+
+```bash
+AUTO_CONTINUE_SEND_DELAY_SECS=0.25
+AUTO_CONTINUE_ENTER_DELAY_SECS=0.15
+```
+
+If your tmux windows live on a non-default socket, set:
+
+```bash
+AUTO_CONTINUE_TMUX_SOCKET=/path/to/tmux/socket
+```
+
 ## Commands
 
 ```bash
-auto_continue_watchd.sh start <pane> [thread-id|auto] [--message TEXT | --message-file FILE]
-auto_continue_watchd.sh stop [pane]
-auto_continue_watchd.sh restart <pane> [thread-id|auto] [--message TEXT | --message-file FILE]
-auto_continue_watchd.sh pause <pane>
-auto_continue_watchd.sh resume <pane>
-auto_continue_watchd.sh status [pane]
-auto_continue_watchd.sh run <pane> [thread-id|auto] [--message TEXT | --message-file FILE]
+auto_continue_watchd.sh start <target> [thread-id|auto] [--message TEXT | --message-file FILE]
+auto_continue_watchd.sh stop [target]
+auto_continue_watchd.sh restart <target> [thread-id|auto] [--message TEXT | --message-file FILE]
+auto_continue_watchd.sh pause <target>
+auto_continue_watchd.sh resume <target>
+auto_continue_watchd.sh status [target]
+auto_continue_watchd.sh run <target> [thread-id|auto] [--message TEXT | --message-file FILE]
 ```
 
 Notes:
+- `<target>` can be a pane id (`%6`), a window index (`2`), or `session:window` (`0:2`).
+- window targets resolve to the active pane in that window.
+- if thread auto-detection misses at `start`, the watcher now falls back to `thread-id=auto`.
+- `status` shows both `WINDOW` (`session:window`) and `PANE` columns.
 - `start` enforces one live watcher per pane.
 - `restart` stops and starts a pane watcher (reuses the pane's previous message/thread by default).
 - `run` is foreground mode (useful for debugging).
@@ -73,7 +90,7 @@ Examples:
 
 ```bash
 auto_continue_watchd.sh start %0 --message "continue and focus on tests"
-auto_continue_watchd.sh start %2 --message-file /path/to/msg.txt
+auto_continue_watchd.sh start 2 --message-file /path/to/msg.txt
 ```
 
 Default message file lookup:
