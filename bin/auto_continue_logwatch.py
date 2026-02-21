@@ -116,6 +116,34 @@ def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.Comp
     return rc
 
 
+PANE_ERROR_PATTERNS = [
+    re.compile(r"usage limit", re.IGNORECASE),
+    re.compile(r"rate limit", re.IGNORECASE),
+    re.compile(r"try again at\b", re.IGNORECASE),
+    re.compile(r"exceeded.*quota", re.IGNORECASE),
+    re.compile(r"billing", re.IGNORECASE),
+    re.compile(r"unauthorized|authentication.*(failed|error)", re.IGNORECASE),
+]
+
+
+def tmux_capture_pane(pane: str, lines: int = 10) -> str:
+    """Capture recent visible lines from a tmux pane."""
+    rc = run_tmux(["capture-pane", "-t", pane, "-p", "-S", f"-{lines}"])
+    if rc.returncode == 0:
+        return rc.stdout or ""
+    return ""
+
+
+def check_pane_for_errors(pane: str) -> Optional[str]:
+    """Return the first matched error string from the pane, or None."""
+    text = tmux_capture_pane(pane, lines=10)
+    for pat in PANE_ERROR_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
 def tmux_pane_exists(pane: str) -> bool:
     rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_id}"])
     return rc.returncode == 0
@@ -384,6 +412,18 @@ def main() -> int:
 
             if args.send_delay_secs > 0.0:
                 time.sleep(args.send_delay_secs)
+
+            pane_error = check_pane_for_errors(args.pane)
+            if pane_error:
+                append_log(
+                    watch_log,
+                    f"paused: error detected in pane ({pane_error!r}) turn={turn_id}",
+                )
+                pane_pause_file.parent.mkdir(parents=True, exist_ok=True)
+                pane_pause_file.write_text(
+                    f"auto-paused: {pane_error}\n", encoding="utf-8"
+                )
+                continue
 
             ok, send_error = tmux_send(args.pane, msg, max(0.0, args.enter_delay_secs))
             if ok:
