@@ -724,6 +724,31 @@ def collect_known_keys() -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _edit_message_interactive(initial: str = "") -> str | None:
+    """Open $EDITOR with *initial* text and return the edited content.
+
+    Returns None if the editor exits with an error or the user leaves the
+    content empty.  Strips a single trailing newline that editors tend to add.
+    """
+    editor = os.environ.get("EDITOR", "vim")
+    fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="acw_message_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(initial)
+        rc = subprocess.call([editor, tmp])
+        if rc != 0:
+            print("editor exited with error, message unchanged", file=sys.stderr)
+            return None
+        with open(tmp) as f:
+            new_value = f.read()
+        # Strip a single trailing newline that editors tend to add.
+        if new_value.endswith("\n") and not initial.endswith("\n"):
+            new_value = new_value[:-1]
+        return new_value
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def _logwatch_cmd(pane: str, thread_id: str, message_args: list[str], key: str) -> list[str]:
     return [
         "python3",
@@ -770,7 +795,16 @@ def cmd_start(argv: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
-    thread_arg, msg_mode, msg_value, _ = parse_thread_and_message_args(rest)
+    thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
+
+    # No --message/--message-file given: open editor for interactive input.
+    if not msg_explicit:
+        value = _edit_message_interactive()
+        if value is None or not value.strip():
+            print("start: no message provided, aborting", file=sys.stderr)
+            sys.exit(1)
+        msg_mode = "inline"
+        msg_value = value
 
     key = key_from_pane(pane)
     pf = pid_file_for_key(key)
@@ -1083,23 +1117,10 @@ def cmd_edit(argv: list[str]) -> None:
             cmd_restart([pane, "--message-file", value])
         return
 
-    # For inline messages, write to a temp file, edit, read back.
-    fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="acw_message_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(value)
-        editor = os.environ.get("EDITOR", "vim")
-        rc = subprocess.call([editor, tmp])
-        if rc != 0:
-            print("edit: editor exited with error, message unchanged", file=sys.stderr)
-            return
-        with open(tmp) as f:
-            new_value = f.read()
-        # Strip a single trailing newline that editors tend to add.
-        if new_value.endswith("\n") and not value.endswith("\n"):
-            new_value = new_value[:-1]
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+    # For inline messages, open editor with current value.
+    new_value = _edit_message_interactive(value)
+    if new_value is None:
+        return
 
     if new_value == value:
         print("edit: message unchanged")
