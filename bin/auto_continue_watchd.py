@@ -1471,7 +1471,9 @@ def main() -> None:
         "start": cmd_start,
         "stop": cmd_stop,
         "pause": cmd_pause,
+        "pause-all": lambda _: cmd_pause([]),
         "resume": cmd_resume,
+        "resume-all": lambda _: cmd_resume([]),
         "restart": cmd_restart,
         "restart-all": cmd_restart_all,
         "status": cmd_status,
@@ -1482,7 +1484,7 @@ def main() -> None:
         commands[subcmd](rest)
     else:
         print(
-            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|restart-all|status|edit} "
+            "usage: auto_continue_watchd.py {start|stop|pause|pause-all|resume|resume-all|restart|restart-all|status|edit} "
             "[pane-id|window-index|session:window] [thread-id|auto] "
             "[--message TEXT | --message-file FILE]",
             file=sys.stderr,
