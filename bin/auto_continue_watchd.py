@@ -522,17 +522,26 @@ def write_message_meta(key: str, mode: str, value: str) -> None:
 def read_message_meta_for_key(key: str) -> tuple[str, str] | None:
     path = message_meta_file_for_key(key)
     mode = ""
-    value = ""
+    value_lines: list[str] = []
+    in_value = False
     try:
         with open(path) as f:
             for line in f:
                 line = line.rstrip("\n")
                 if line.startswith("mode="):
                     mode = line[5:]
+                    in_value = False
                 elif line.startswith("value="):
-                    value = line[6:]
+                    value_lines = [line[6:]]
+                    in_value = True
+                elif in_value:
+                    value_lines.append(line)
     except OSError:
         return None
+    value = "\n".join(value_lines)
+    # Strip the trailing newline that write_message_meta always adds.
+    if value.endswith("\n"):
+        value = value[:-1]
     if mode in ("inline", "file"):
         return mode, value
     return None
