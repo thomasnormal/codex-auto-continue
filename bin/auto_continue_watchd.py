@@ -875,8 +875,11 @@ def stop_pid_file(pid_file: str) -> None:
     pid_str = _read_pid_file(pid_file)
     if pid_str is None:
         return
+    pid = int(pid_str)
     try:
-        os.kill(int(pid_str), signal.SIGTERM)
+        if _is_pid_stopped(pid):
+            os.kill(pid, signal.SIGCONT)
+        os.kill(pid, signal.SIGTERM)
     except OSError:
         pass
     Path(pid_file).unlink(missing_ok=True)
@@ -893,8 +896,12 @@ def stop_pane_watchers(pane: str) -> None:
         return
 
     for pid_str in pane_pids:
+        pid = int(pid_str)
         try:
-            os.kill(int(pid_str), signal.SIGTERM)
+            # Resume first so a SIGSTOP'd process can handle SIGTERM.
+            if _is_pid_stopped(pid):
+                os.kill(pid, signal.SIGCONT)
+            os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
         print(f"stopped: pane={pane} pid={pid_str}")
@@ -1155,8 +1162,11 @@ def cmd_restart_all(argv: list[str]) -> None:
             pids = watcher_pids_for_pane(pane)
             if pids:
                 for p in pids:
+                    pid = int(p)
                     try:
-                        os.kill(int(p), signal.SIGTERM)
+                        if _is_pid_stopped(pid):
+                            os.kill(pid, signal.SIGCONT)
+                        os.kill(pid, signal.SIGTERM)
                     except OSError:
                         pass
                 print(f"killed: orphaned watcher(s) for pane {pane} (pane no longer exists)")
