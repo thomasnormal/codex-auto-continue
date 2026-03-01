@@ -82,56 +82,53 @@ View health with `acw status`.
 
 ```
 $ acw status
-Active watchers: 5
+Active watchers: 3
 WINDOW  PANE  PID     THREAD_ID     STATE    LAST_EVENT                   MESSAGE
 ------  ----- ------- ------------- -------- ---------------------------- -------
-0:3     %3    443273  019ca0be-f... running  continue turn=019ca9e6-d4... msg:continue building full UVM support in...
-0:4     %4    445823  019ca0a5-7... running  continue turn=019caa01-44... msg:continue working on the AOT compilati...
-0:0     %0    1327202 019c9fb9-0... paused   continue turn=019ca5bb-ab... msg:continue implementing the mutation al...
-0:1     %1    1633943 019ca04f-9... running  continue turn=019caa25-d4... msg:continue fixing circt bugs and implem...
-0:2     %2    2800710 019ca0b1-7... running  continue turn=019caa2e-d1... msg:continue the "circt formal" work as l...
+0:1     %1    48201   01a2b3c4-d... running  continue turn=01a2b3c5-ef... msg:please continue working on the API...
+0:2     %2    48305   01a2b3c6-d... running  continue turn=01a2b3c7-ef... msg:continue writing tests for the auth...
+0:3     %3    48410   01a2b3c8-d... paused   continue turn=01a2b3c9-ef... msg:keep refactoring the database layer...
 ```
 
 ### Start with interactive editor
 
 ```
-$ acw start 3
+$ acw start 2
 # $EDITOR opens with an empty buffer — write your multi-line continue message.
 # Save and quit to start the watcher. Empty message = cancel.
-started: pid=443273 pane=%3 thread_id=019ca0be-fb83-7210-a577-6a81f6366054
+started: pid=48305 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 ```
 
 ### Start with inline message
 
 ```
 $ acw start %6 --message "continue and focus on tests"
-started: pid=551234 pane=%6 thread_id=019ca123-abcd-7890-ef01-234567890abc
+started: pid=49122 pane=%6 thread_id=01a2b3ca-d5e6-7f80-9a1b-2c3d4e5f6a7b
 ```
 
 ### Pause and resume
 
 ```
-$ acw pause 3
-paused: pane=%3 pid=443273
+$ acw pause 2
+paused: pane=%2 pid=48305
 
-$ acw resume 3
-resumed: pane=%3 pid=443273
+$ acw resume 2
+resumed: pane=%2 pid=48305
 
 $ acw pause-all
-paused: pane=%3 pid=443273
-paused: pane=%4 pid=445823
-paused: pane=%2 pid=2800710
+paused: pane=%1 pid=48201
+paused: pane=%2 pid=48305
 ```
 
 ### Edit message for a running watcher
 
 ```
-$ acw edit 3
+$ acw edit 2
 # $EDITOR opens pre-filled with the current message.
 # Save and quit to update. The watcher restarts with the new message.
-resolved: target=3 pane=%3
-stopped: pane=%3 pid=443273
-started: pid=551890 pane=%3 thread_id=019ca0be-fb83-7210-a577-6a81f6366054
+resolved: target=2 pane=%2
+stopped: pane=%2 pid=48305
+started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 ```
 
 ## Requirements
