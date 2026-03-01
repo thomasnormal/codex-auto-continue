@@ -17,6 +17,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from auto_continue_logwatch import discover_thread_for_pane as _discover_thread_for_pane
+
 # ---------------------------------------------------------------------------
 # Constants & path resolution
 # ---------------------------------------------------------------------------
@@ -319,6 +321,8 @@ def detect_thread_from_shell_snapshot(pane: str) -> str | None:
 
 
 def closest_thread_id_for_start_epoch(target_epoch: int) -> tuple[str, int] | None:
+    import calendar
+
     pattern = os.path.join(os.path.expanduser("~"), ".codex", "sessions", "*", "*", "*", "rollout-*.jsonl")
     files = glob.glob(pattern)
     if not files:
@@ -333,15 +337,14 @@ def closest_thread_id_for_start_epoch(target_epoch: int) -> tuple[str, int] | No
         m = rollout_re.fullmatch(base)
         if not m:
             continue
-        ts_str = f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}"
         tid = m.group(7).lower()
         try:
-            candidate_epoch = int(
-                subprocess.check_output(
-                    ["date", "-d", ts_str, "+%s"], stderr=subprocess.DEVNULL, text=True
-                ).strip()
+            ts = time.strptime(
+                f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}",
+                "%Y-%m-%d %H:%M:%S",
             )
-        except (subprocess.CalledProcessError, ValueError):
+            candidate_epoch = calendar.timegm(ts)
+        except (ValueError, OverflowError):
             continue
         diff = abs(candidate_epoch - target_epoch)
         if best_diff < 0 or diff < best_diff:
@@ -431,65 +434,11 @@ def detect_thread_from_pane_tty(pane: str) -> str | None:
     return None
 
 
-def detect_thread_from_proc_fd(pane: str) -> str | None:
-    """Inspect /proc/PID/fd to find which rollout file the pane's codex has open."""
-    rc = subprocess.run(
-        ["tmux", "list-panes", "-t", pane, "-F", "#{pane_pid}"],
-        capture_output=True, text=True, check=False,
-    )
-    if rc.returncode != 0 or not rc.stdout.strip():
-        return None
-    shell_pid = rc.stdout.strip()
-
-    try:
-        result = subprocess.run(
-            ["pstree", "-p", shell_pid],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            return None
-    except FileNotFoundError:
-        return None
-
-    pids = re.findall(r"\((\d+)\)", result.stdout)
-    rollout_re = re.compile(
-        r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
-        r"(" + THREAD_ID_RE.pattern + r")\.jsonl$"
-    )
-
-    for pid in pids:
-        try:
-            exe = Path(f"/proc/{pid}/exe").resolve().name
-        except OSError:
-            continue
-        if exe != "codex":
-            continue
-        fd_dir = Path(f"/proc/{pid}/fd")
-        try:
-            for fd in fd_dir.iterdir():
-                try:
-                    target = fd.resolve()
-                except OSError:
-                    continue
-                m = rollout_re.search(target.name)
-                if m:
-                    return m.group(1).lower()
-        except OSError:
-            continue
-    return None
-
-
 def detect_thread_id_for_pane(pane: str) -> str | None:
-    # Most reliable: check which rollout file the codex process has open.
-    tid = detect_thread_from_proc_fd(pane)
-    if tid and is_thread_id(tid):
-        return tid
-    tid = detect_thread_from_shell_snapshot(pane)
-    if tid and is_thread_id(tid):
-        return tid
-    tid = detect_thread_from_pane_tty(pane)
-    if tid and is_thread_id(tid):
-        return tid
+    for method in (_discover_thread_for_pane, detect_thread_from_shell_snapshot, detect_thread_from_pane_tty):
+        tid = method(pane)
+        if tid and is_thread_id(tid):
+            return tid
     return None
 
 

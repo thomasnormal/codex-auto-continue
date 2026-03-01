@@ -46,9 +46,8 @@ def find_rollout_file(thread_id: str, sessions_dir: Path) -> Optional[Path]:
     matches = list(sessions_dir.glob(pattern))
     if not matches:
         return None
-    # Most recent first (there should normally be exactly one).
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0]
+    # Most recent (there should normally be exactly one).
+    return max(matches, key=lambda p: p.stat().st_mtime)
 
 
 def parse_rollout_event(line: str) -> Optional[str]:
@@ -256,24 +255,27 @@ def discover_thread_for_pane(pane: str) -> Optional[str]:
     pids = re.findall(r"\((\d+)\)", result.stdout)
 
     # Check each PID for a codex process with an open rollout file.
+    seen_codex = False
     for pid in pids:
         try:
-            exe = Path(f"/proc/{pid}/exe").resolve().name
+            exe_name = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
         except OSError:
             continue
-        if exe != "codex":
+        if exe_name != "codex":
             continue
-        # Found a codex process — check its open file descriptors.
-        fd_dir = Path(f"/proc/{pid}/fd")
+        if seen_codex:
+            continue  # skip thread TIDs — same process, same fd table
+        seen_codex = True
+        fd_dir = f"/proc/{pid}/fd"
         try:
-            for fd in fd_dir.iterdir():
+            for entry in os.listdir(fd_dir):
                 try:
-                    target = fd.resolve()
+                    target = os.readlink(os.path.join(fd_dir, entry))
                 except OSError:
                     continue
-                m = ROLLOUT_RE.search(target.name)
+                m = ROLLOUT_RE.search(os.path.basename(target))
                 if m:
-                    return m.group(1)
+                    return m.group(1).lower()
         except OSError:
             continue
     return None
@@ -373,7 +375,7 @@ def main() -> int:
         tnow = time.time()
 
         # --- Poll codex-tui.log ---
-        if codex_log.exists():
+        if codex_fh is not None or codex_log.exists():
             if codex_fh is None:
                 codex_fh = codex_log.open("r", encoding="utf-8", errors="ignore")
                 codex_fh.seek(0, os.SEEK_END)
@@ -419,7 +421,7 @@ def main() -> int:
                     )
 
         # --- Poll rollout JSONL ---
-        if rollout_path is not None and rollout_path.exists():
+        if rollout_path is not None and (rollout_fh is not None or rollout_path.exists()):
             if rollout_fh is None:
                 rollout_fh = rollout_path.open("r", encoding="utf-8", errors="ignore")
                 rollout_fh.seek(0, os.SEEK_END)
@@ -568,7 +570,7 @@ def main() -> int:
                     except OSError:
                         pass
                 elif watched_thread and tnow - watcher_start > 60:
-                    if health not in ("error",):
+                    if health != "error":
                         health = "warn"
                         health_detail = "no rollout file found"
 
