@@ -30,6 +30,13 @@ ROLLOUT_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
 
+CHANNEL_CLOSED_RE = re.compile(
+    r"session_loop\{thread_id=([0-9a-f\-]+)\}.*(?:channel closed|failed to record rollout)"
+)
+
+HEALTH_CHECK_INTERVAL = 30.0   # seconds between periodic health checks
+ROLLOUT_STALE_SECS = 300.0     # rollout file considered stale after 5 minutes
+
 
 def find_rollout_file(thread_id: str, sessions_dir: Path) -> Optional[Path]:
     """Glob for the rollout JSONL file matching *thread_id*."""
@@ -80,9 +87,12 @@ def now_ts() -> str:
 
 
 def append_log(log_file: Path, msg: str) -> None:
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    with log_file.open("a", encoding="utf-8") as f:
-        f.write(f"[{now_ts()}] {msg}\n")
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(f"[{now_ts()}] {msg}\n")
+    except OSError:
+        pass  # disk full / read-only — keep running
 
 
 def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.CompletedProcess:
@@ -208,11 +218,74 @@ def read_state(path: Path) -> dict:
 
 
 def write_state(path: Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass  # disk full / read-only — keep running
 
 
-def discover_thread_id(log_path: Path) -> Optional[str]:
+def discover_thread_for_pane(pane: str) -> Optional[str]:
+    """Discover the thread_id for the codex process running in *pane*.
+
+    Walks the pane's process tree, finds any ``codex`` process, then
+    inspects ``/proc/<pid>/fd/`` for an open rollout JSONL file and
+    extracts the thread_id from its filename.
+    """
+    # Get the shell PID for the pane.
+    rc = subprocess.run(
+        ["tmux", "list-panes", "-t", pane, "-F", "#{pane_pid}"],
+        capture_output=True, text=True, check=False,
+    )
+    if rc.returncode != 0 or not rc.stdout.strip():
+        return None
+    shell_pid = rc.stdout.strip()
+
+    # Walk the process tree to find codex processes.
+    try:
+        result = subprocess.run(
+            ["pstree", "-p", shell_pid],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return None
+    except FileNotFoundError:
+        return None
+
+    # Extract all PIDs from the pstree output.
+    pids = re.findall(r"\((\d+)\)", result.stdout)
+
+    # Check each PID for a codex process with an open rollout file.
+    for pid in pids:
+        try:
+            exe = Path(f"/proc/{pid}/exe").resolve().name
+        except OSError:
+            continue
+        if exe != "codex":
+            continue
+        # Found a codex process — check its open file descriptors.
+        fd_dir = Path(f"/proc/{pid}/fd")
+        try:
+            for fd in fd_dir.iterdir():
+                try:
+                    target = fd.resolve()
+                except OSError:
+                    continue
+                m = ROLLOUT_RE.search(target.name)
+                if m:
+                    return m.group(1)
+        except OSError:
+            continue
+    return None
+
+
+def discover_thread_id(log_path: Path, pane: str = "") -> Optional[str]:
+    # Best method: inspect the codex process running in the target pane.
+    if pane:
+        tid = discover_thread_for_pane(pane)
+        if tid:
+            return tid
+
     try:
         lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
@@ -227,10 +300,6 @@ def discover_thread_id(log_path: Path) -> Optional[str]:
     if result:
         return result[0]
     return None
-
-
-def pane_key(pane: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", pane)
 
 
 def main() -> int:
@@ -258,8 +327,6 @@ def main() -> int:
         sys.stderr.write(f"auto_continue_logwatch: tmux pane not found: {args.pane}\n")
         return 2
 
-    pause_file = cwd / ".codex" / "AUTO_CONTINUE_PAUSE"
-    pane_pause_file = cwd / ".codex" / f"AUTO_CONTINUE_PAUSE.{pane_key(args.pane)}"
     state_file = Path(args.state_file) if args.state_file else (cwd / ".codex" / "auto_continue_logwatch.state.local.json")
     watch_log = Path(args.watch_log) if args.watch_log else (cwd / ".codex" / "auto_continue_logwatch.log")
     codex_log = Path(args.log_path)
@@ -275,7 +342,7 @@ def main() -> int:
     auto_mode = args.thread_id == "auto"
     watched_thread = args.thread_id
     if watched_thread == "auto":
-        watched_thread = discover_thread_id(codex_log) or ""
+        watched_thread = discover_thread_id(codex_log, pane=args.pane) or ""
 
     if not watched_thread:
         append_log(watch_log, "warn: could not auto-discover thread id yet; waiting for first event")
@@ -289,6 +356,11 @@ def main() -> int:
     rollout_fh = None
     rollout_path: Optional[Path] = None
     last_rollout_scan = 0.0
+    health = "ok"
+    health_detail = ""
+    last_health_check = 0.0
+    channel_closed_seen = False
+    watcher_start = time.time()
 
     # Try to locate the rollout file for the initial thread right away.
     if watched_thread:
@@ -312,6 +384,13 @@ def main() -> int:
                 m = EVENT_RE.search(line)
                 if m:
                     events.append((m.group(1), m.group(2), m.group(3)))
+                elif not channel_closed_seen and watched_thread:
+                    cm = CHANNEL_CLOSED_RE.search(line)
+                    if cm and cm.group(1) == watched_thread:
+                        channel_closed_seen = True
+                        health = "error"
+                        health_detail = "rollout channel closed"
+                        append_log(watch_log, f"health: {health} - {health_detail}")
             # Detect truncation/rotation.
             try:
                 if codex_fh.tell() > codex_log.stat().st_size:
@@ -396,12 +475,6 @@ def main() -> int:
             if turn_id == last_sent_turn and thread_id == last_sent_thread:
                 continue
 
-            if pause_file.exists():
-                append_log(watch_log, f"skip: pause file present ({pause_file}) turn={turn_id}")
-                continue
-            if pane_pause_file.exists():
-                append_log(watch_log, f"skip: pane pause file present ({pane_pause_file}) turn={turn_id}")
-                continue
             if args.require_pane_active and not tmux_pane_active(args.pane):
                 append_log(watch_log, f"skip: pane inactive turn={turn_id}")
                 continue
@@ -417,11 +490,7 @@ def main() -> int:
             if pane_error:
                 append_log(
                     watch_log,
-                    f"paused: error detected in pane ({pane_error!r}) turn={turn_id}",
-                )
-                pane_pause_file.parent.mkdir(parents=True, exist_ok=True)
-                pane_pause_file.write_text(
-                    f"auto-paused: {pane_error}\n", encoding="utf-8"
+                    f"skip: error detected in pane ({pane_error!r}) turn={turn_id}",
                 )
                 continue
 
@@ -430,9 +499,17 @@ def main() -> int:
                 last_send_time = tnow
                 last_sent_turn = turn_id
                 last_sent_thread = thread_id
+                if health != "ok":
+                    health = "ok"
+                    health_detail = ""
+                    channel_closed_seen = False
+                    append_log(watch_log, "health: ok (continue sent)")
                 state["last_sent_turn"] = turn_id
                 state["last_sent_thread"] = thread_id
                 state["thread_id"] = watched_thread
+                state["last_continue_at"] = now_ts()
+                state["health"] = health
+                state["health_detail"] = health_detail
                 write_state(state_file, state)
                 append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
             else:
@@ -449,6 +526,62 @@ def main() -> int:
                         watch_log,
                         f"error: tmux send failed turn={turn_id} thread={thread_id}",
                     )
+
+        # --- Periodic health check ---
+        if tnow - last_health_check > HEALTH_CHECK_INTERVAL:
+            last_health_check = tnow
+            prev_health = health
+
+            # Re-discover thread from pane's codex process in case the
+            # session was restarted with a new thread.
+            if auto_mode and args.pane:
+                live_tid = discover_thread_for_pane(args.pane)
+                if live_tid and live_tid != watched_thread:
+                    prev_thread = watched_thread
+                    watched_thread = live_tid
+                    watched_last_event_at = tnow
+                    if rollout_fh is not None:
+                        rollout_fh.close()
+                        rollout_fh = None
+                    rollout_path = find_rollout_file(watched_thread, SESSIONS_DIR)
+                    if rollout_path:
+                        append_log(watch_log, f"rollout: watching {rollout_path.name}")
+                    last_rollout_scan = tnow
+                    channel_closed_seen = False
+                    health = "ok"
+                    health_detail = ""
+                    append_log(
+                        watch_log,
+                        f"watch: pane-rebind thread_id={prev_thread} -> {watched_thread}",
+                    )
+
+            if not channel_closed_seen:
+                if rollout_path is not None and rollout_path.exists():
+                    try:
+                        stale_secs = tnow - rollout_path.stat().st_mtime
+                        if stale_secs > ROLLOUT_STALE_SECS and tnow - watcher_start > ROLLOUT_STALE_SECS:
+                            health = "stale"
+                            health_detail = f"rollout no writes {int(stale_secs / 60)}m"
+                        elif health == "stale":
+                            health = "ok"
+                            health_detail = ""
+                    except OSError:
+                        pass
+                elif watched_thread and tnow - watcher_start > 60:
+                    if health not in ("error",):
+                        health = "warn"
+                        health_detail = "no rollout file found"
+
+            if health != prev_health:
+                if health == "ok":
+                    append_log(watch_log, "health: ok")
+                else:
+                    append_log(watch_log, f"health: {health} - {health_detail}")
+
+            state["health"] = health
+            state["health_detail"] = health_detail
+            state["health_ts"] = now_ts()
+            write_state(state_file, state)
 
         time.sleep(0.2)
 
