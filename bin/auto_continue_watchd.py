@@ -261,6 +261,44 @@ def resolve_pane_from_window_target(target: str) -> str | None:
     return selected if is_pane_id(selected) else None
 
 
+def resolve_pane_from_window_name(name: str) -> str | None:
+    """Resolve a window name to a pane id.  Returns None if not found or ambiguous."""
+    fmt = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_active}"
+    listing = run_tmux("list-panes", "-a", "-F", fmt)
+    if not listing:
+        return None
+
+    matches: list[tuple[str, str, str, str]] = []  # (session, window_index, pane_id, pane_active)
+    for line in listing.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        sess, widx, wname, pid_, pactive = parts[:5]
+        if wname == name:
+            matches.append((sess, widx, pid_, pactive))
+
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0][2] if is_pane_id(matches[0][2]) else None
+
+    # Multiple panes across windows with the same name — ambiguous.
+    unique_windows = {(s, w) for s, w, _, _ in matches}
+    if len(unique_windows) > 1:
+        labels = ", ".join(f"{s}:{w}" for s, w in sorted(unique_windows))
+        print(
+            f"error: window name '{name}' is ambiguous across windows: {labels}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Multiple panes in the same window — pick the active one, else first.
+    for s, w, p, pa in matches:
+        if pa == "1" and is_pane_id(p):
+            return p
+    return matches[0][2] if is_pane_id(matches[0][2]) else None
+
+
 def resolve_pane_target(target: str) -> str:
     """Resolve any pane/window target to a tmux pane id (%N)."""
     if is_pane_id(target):
@@ -273,9 +311,14 @@ def resolve_pane_target(target: str) -> str:
         print(f"error: could not resolve window target '{target}'", file=sys.stderr)
         sys.exit(1)
 
+    # Try resolving as a window name.
+    pane = resolve_pane_from_window_name(target)
+    if pane and is_pane_id(pane):
+        return pane
+
     print(f"error: invalid pane/window target '{target}'", file=sys.stderr)
     print(
-        "hint: use a pane id (for example '%6'), a window index (for example '2'), or 'session:window' (for example '0:2')",
+        "hint: use a pane id ('%6'), window index ('2'), session:window ('0:2'), or window name ('uvm')",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1191,13 +1234,39 @@ def cmd_restart_all(argv: list[str]) -> None:
 
 
 def _build_pane_window_map() -> dict[str, str]:
-    listing = run_tmux("list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{pane_id}")
+    listing = run_tmux("list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}")
     mapping: dict[str, str] = {}
     if listing:
         for line in listing.splitlines():
             parts = line.split("\t")
-            if len(parts) >= 3 and parts[2]:
-                mapping[parts[2]] = f"{parts[0]}:{parts[1]}"
+            if len(parts) >= 4 and parts[3]:
+                mapping[parts[3]] = f"{parts[0]}:{parts[1]}:{parts[2]}"
+    return mapping
+
+
+def _build_thread_pane_map() -> dict[str, str]:
+    """Map thread_id → current tmux pane_id by scanning pane process trees.
+
+    After a tmux restart the Claude thread may be in a different pane than the
+    watcher's stored --pane argument.  This resolves the *actual* current pane
+    for each thread so that ``acw status`` shows the right window/pane.
+
+    Uses ``discover_thread_for_pane`` (walks /proc/PID/fd to find the open
+    rollout file) which works even when ``codex resume`` is invoked without
+    an explicit thread-id argument.
+    """
+    listing = run_tmux("list-panes", "-a", "-F", "#{pane_id}")
+    if not listing:
+        return {}
+
+    mapping: dict[str, str] = {}
+    for line in listing.splitlines():
+        pane_id = line.strip()
+        if not pane_id:
+            continue
+        tid = _discover_thread_for_pane(pane_id)
+        if tid and is_thread_id(tid):
+            mapping[tid.lower()] = pane_id
     return mapping
 
 
@@ -1244,6 +1313,74 @@ def _event_summary_from_watch_log(watch_path: str) -> str:
     if len(summary) > 56:
         summary = summary[:53] + "..."
     return summary
+
+
+SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
+
+ROLLOUT_FILENAME_RE = re.compile(
+    r"^rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-"
+    + THREAD_ID_RE.pattern + r"\.jsonl$"
+)
+
+
+def _find_rollout_for_thread(thread_id: str) -> str | None:
+    """Return the path to the rollout JSONL file for *thread_id*, or None."""
+    if not thread_id or not is_thread_id(thread_id):
+        return None
+    pattern = os.path.join(SESSIONS_DIR, "*", "*", "*", f"rollout-*-{thread_id}.jsonl")
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    return max(matches, key=os.path.getmtime)
+
+
+def _rollout_times(thread_id: str) -> tuple[str, str]:
+    """Return (started, last_message) for a thread from its rollout file.
+
+    *started* is parsed from the filename; *last_message* from the file mtime.
+    Both are returned as ``HH:MM:SS`` (today) or ``Mon DD HH:MM`` (older).
+    """
+    path = _find_rollout_for_thread(thread_id)
+    if not path:
+        return "-", "-"
+
+    # Started: parse from filename.
+    m = ROLLOUT_FILENAME_RE.match(os.path.basename(path))
+    if m:
+        started_epoch = time.mktime(time.strptime(
+            f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
+            "%Y-%m-%d %H:%M:%S",
+        ))
+        started = _format_age(started_epoch)
+    else:
+        started = "-"
+
+    # Last message: file mtime.
+    try:
+        mtime = os.path.getmtime(path)
+        last_msg = _format_age(mtime)
+    except OSError:
+        last_msg = "-"
+
+    return started, last_msg
+
+
+def _format_age(epoch: float) -> str:
+    """Format an epoch as a human-friendly relative age string."""
+    delta = time.time() - epoch
+    if delta < 0:
+        delta = 0
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        h = int(delta // 3600)
+        m = int((delta % 3600) // 60)
+        return f"{h}h{m:02d}m ago"
+    d = int(delta // 86400)
+    h = int((delta % 86400) // 3600)
+    return f"{d}d{h}h ago"
 
 
 def _read_state_json(state_path: str) -> dict[str, str]:
@@ -1297,38 +1434,47 @@ def _message_summary_for_row(r: dict[str, str]) -> str:
     return "-"
 
 
-def _status_table(rows: list[dict[str, str]], pane_window: dict[str, str]) -> None:
-    header = f"{'WINDOW':<7} {'PANE':<5} {'PID':<7} {'THREAD_ID':<13} {'STATE':<8} {'LAST_EVENT':<28} MESSAGE"
-    sep = f"{'------':<7} {'-----':<5} {'-------':<7} {'-------------':<13} {'--------':<8} {'----------------------------':<28} -------"
+def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
+    win_w = max(len("WINDOW"), *(len(wl) for _, _, wl in resolved)) if resolved else len("WINDOW")
+
+    header = (
+        f"{'WINDOW':<{win_w}} {'STATE':<8} {'STARTED':<10} {'LAST_MSG':<10} "
+        f"{'LAST_ACW':<10} MESSAGE"
+    )
+    sep = (
+        f"{'-' * win_w} {'--------':<8} {'----------':<10} {'----------':<10} "
+        f"{'----------':<10} -------"
+    )
     print(header)
     print(sep)
 
-    for r in rows:
-        thread_short = _truncate(r["thread"] or "unknown", 13)
-
+    for r, current_pane, window_label in resolved:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
 
-        event_summary = _event_summary_from_watch_log(r["watch"])
-        # Override event summary with health detail when degraded.
-        if state_value not in ("running", "paused"):
-            hd = sj.get("health_detail", "")
-            if hd:
-                event_summary = hd
-        event_summary = _truncate(event_summary, 28)
+        started, last_msg = _rollout_times(r["thread"])
+
+        last_acw = sj.get("last_continue_at", "")
+        if last_acw:
+            try:
+                epoch = time.mktime(time.strptime(last_acw, "%Y-%m-%d %H:%M:%S"))
+                last_acw = _format_age(epoch)
+            except (ValueError, OverflowError):
+                pass
+        if not last_acw:
+            last_acw = "-"
 
         msg_summary = _truncate(_message_summary_for_row(r), 44)
-        window_label = pane_window.get(r["pane"], "-")
 
         print(
-            f"{window_label:<7} {r['pane']:<5} {r['pid']:<7} {thread_short:<13} "
-            f"{state_value:<8} {event_summary:<28} {msg_summary}"
+            f"{window_label:<{win_w}} {state_value:<8} {started:<10} {last_msg:<10} "
+            f"{last_acw:<10} {msg_summary}"
         )
 
 
-def _status_details(rows: list[dict[str, str]], pane_window: dict[str, str]) -> None:
-    total = len(rows)
-    for idx, r in enumerate(rows, 1):
+def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
+    total = len(resolved)
+    for idx, (r, current_pane, window_label) in enumerate(resolved, 1):
         if idx > 1:
             print()
 
@@ -1355,14 +1501,19 @@ def _status_details(rows: list[dict[str, str]], pane_window: dict[str, str]) -> 
         else:
             msg_full = "-"
 
-        window_label = pane_window.get(r["pane"], "-")
+        started, last_msg = _rollout_times(r["thread"])
+
+        last_acw = sj.get("last_continue_at", "-")
 
         print(f"=== Watcher {idx}/{total} ===")
         print(f"  {'WINDOW:':<16} {window_label}")
-        print(f"  {'PANE:':<16} {r['pane']}")
+        print(f"  {'PANE:':<16} {current_pane}")
         print(f"  {'PID:':<16} {r['pid']}")
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
         print(f"  {'STATE:':<16} {state_value}")
+        print(f"  {'STARTED:':<16} {started}")
+        print(f"  {'LAST_MSG:':<16} {last_msg}")
+        print(f"  {'LAST_ACW:':<16} {last_acw}")
         hd = sj.get("health_detail", "")
         if hd:
             print(f"  {'HEALTH_DETAIL:':<16} {hd}")
@@ -1370,9 +1521,6 @@ def _status_details(rows: list[dict[str, str]], pane_window: dict[str, str]) -> 
         if hts:
             print(f"  {'HEALTH_SINCE:':<16} {hts}")
         print(f"  {'LAST_EVENT:':<16} {last_event}")
-        lc = sj.get("last_continue_at", "")
-        if lc:
-            print(f"  {'LAST_CONTINUE:':<16} {lc}")
         print(f"  {'MESSAGE:':<16} {msg_full}")
         if r["watch"]:
             print(f"  {'WATCH_LOG:':<16} {r['watch']}")
@@ -1390,6 +1538,7 @@ def cmd_status(argv: list[str]) -> None:
             pane_arg = arg
 
     pane_window = _build_pane_window_map()
+    thread_pane = _build_thread_pane_map()
     detail_tag = " (details)" if details else ""
 
     if pane_arg:
@@ -1407,10 +1556,20 @@ def cmd_status(argv: list[str]) -> None:
         print("(none)")
         return
 
+    # Resolve each row's current pane and window label, then sort by window.
+    resolved: list[tuple[dict[str, str], str, str]] = []  # (row, current_pane, window_label)
+    for r in rows:
+        current_pane = r["pane"]
+        if thread_pane and r["thread"] and is_thread_id(r["thread"]):
+            current_pane = thread_pane.get(r["thread"].lower(), r["pane"])
+        window_label = pane_window.get(current_pane, "-")
+        resolved.append((r, current_pane, window_label))
+    resolved.sort(key=lambda t: t[2])
+
     if details:
-        _status_details(rows, pane_window)
+        _status_details(resolved)
     else:
-        _status_table(rows, pane_window)
+        _status_table(resolved)
 
 
 # ---------------------------------------------------------------------------
