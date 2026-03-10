@@ -24,11 +24,9 @@ start       <target> [thread-id] [--message TEXT | --message-file FILE]
 stop        [target]
 restart     <target>
 edit        <target>
-pause       <target>
-resume      <target>
-pause-all
-resume-all
-restart-all
+pause       [target|*]
+resume      [target|*]
+restart     <target|*>
 cleanup     [target]
 status      [target]
 ```
@@ -145,7 +143,7 @@ paused: pane=%2 pid=48305
 $ acw resume tests
 resumed: pane=%2 pid=48305
 
-$ acw pause-all
+$ acw pause *
 paused: pane=%1 pid=48201
 paused: pane=%2 pid=48305
 ```

@@ -1023,7 +1023,7 @@ def cmd_pause(argv: list[str]) -> None:
     """Pause watcher(s) by sending SIGSTOP."""
     pane_arg = argv[0] if argv else ""
 
-    if pane_arg:
+    if pane_arg and pane_arg != "*":
         pane = resolve_pane_target(pane_arg)
         pids = watcher_pids_for_pane(pane)
         if not pids:
@@ -1065,7 +1065,7 @@ def cmd_resume(argv: list[str]) -> None:
     """Resume paused watcher(s) by sending SIGCONT."""
     pane_arg = argv[0] if argv else ""
 
-    if pane_arg:
+    if pane_arg and pane_arg != "*":
         pane = resolve_pane_target(pane_arg)
         pids = watcher_pids_for_pane(pane)
         if not pids:
@@ -1102,28 +1102,26 @@ def cmd_resume(argv: list[str]) -> None:
         print("no paused watchers")
 
 
-def cmd_restart(argv: list[str]) -> None:
-    rest = list(argv)
-    if rest and not rest[0].startswith("--"):
-        target = rest.pop(0)
-    else:
-        target = ""
-    if not target:
-        print(
-            "error: pane target is required\n"
-            "usage: auto_continue_watchd.py restart <pane-id|window-index|session:window> "
-            "[thread-id|auto] [--message TEXT | --message-file FILE]",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+def _restart_panes(panes: list[str]) -> None:
+    restarted = 0
+    for pane in panes:
+        if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
+            stop_pane_watchers(pane)
+            continue
 
-    pane = resolve_pane_target(target)
+        print(f"--- restarting {pane} ---")
+        _restart_one(pane, pane, [])
+        restarted += 1
+
+    if restarted == 0:
+        print("no live panes to restart")
+
+
+def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
     thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
-
-    key = key_from_pane(pane)
 
     if not msg_explicit:
         tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
@@ -1152,6 +1150,36 @@ def cmd_restart(argv: list[str]) -> None:
         start_args += ["--message-file", msg_value]
 
     cmd_start(start_args)
+
+
+def cmd_restart(argv: list[str]) -> None:
+    rest = list(argv)
+    if rest and not rest[0].startswith("--"):
+        target = rest.pop(0)
+    else:
+        target = ""
+    if not target:
+        print(
+            "error: pane target is required\n"
+            "usage: auto_continue_watchd.py restart <pane-id|window-index|session:window> "
+            "[thread-id|auto] [--message TEXT | --message-file FILE]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if target == "*":
+        if rest:
+            print("error: restart '*' does not accept additional arguments", file=sys.stderr)
+            sys.exit(2)
+        panes = sorted({r["pane"] for r in watcher_rows() if r.get("pane")})
+        if not panes:
+            print("no running watchers to restart")
+            return
+        _restart_panes(panes)
+        return
+
+    pane = resolve_pane_target(target)
+    _restart_one(target, pane, rest)
 
 
 def cmd_edit(argv: list[str]) -> None:
@@ -1192,27 +1220,6 @@ def cmd_edit(argv: list[str]) -> None:
     print(f"edit: message updated for pane {pane}")
     if watcher_rows(pane):
         cmd_restart([pane, "--message", new_value])
-
-
-def cmd_restart_all(argv: list[str]) -> None:
-    """Restart every running watcher."""
-    panes = sorted({r["pane"] for r in watcher_rows() if r.get("pane")})
-    if not panes:
-        print("no running watchers to restart")
-        return
-
-    restarted = 0
-    for pane in panes:
-        if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
-            stop_pane_watchers(pane)
-            continue
-
-        print(f"--- restarting {pane} ---")
-        cmd_restart([pane])
-        restarted += 1
-
-    if restarted == 0:
-        print("no live panes to restart")
 
 
 # ---------------------------------------------------------------------------
@@ -1766,18 +1773,15 @@ def main() -> None:
     # Only clean up stale files on commands that mutate state.  Read-only
     # commands (status, pause, resume) skip the cleanup overhead (ps scan +
     # multiple globs).
-    if subcmd in ("start", "stop", "restart", "restart-all", "edit", "cleanup"):
+    if subcmd in ("start", "stop", "restart", "edit", "cleanup"):
         cleanup_stale_files()
 
     commands = {
         "start": cmd_start,
         "stop": cmd_stop,
         "pause": cmd_pause,
-        "pause-all": lambda _: cmd_pause([]),
         "resume": cmd_resume,
-        "resume-all": lambda _: cmd_resume([]),
         "restart": cmd_restart,
-        "restart-all": cmd_restart_all,
         "cleanup": cmd_cleanup,
         "status": cmd_status,
         "edit": cmd_edit,
@@ -1788,7 +1792,7 @@ def main() -> None:
         commands[subcmd](rest)
     else:
         print(
-            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|restart-all|cleanup|status|edit} "
+            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|cleanup|status|edit} "
             "[pane-id|window-index|session:window] [thread-id|auto] "
             "[--message TEXT | --message-file FILE]",
             file=sys.stderr,

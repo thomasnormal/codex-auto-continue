@@ -14,6 +14,7 @@
 - Realization: when no repo-local env file exists, current Codex authentication comes from the user's live `~/.codex` state rather than exported env vars. The harness now uses an isolated home only when an explicit env file is available; otherwise it reuses the real Codex home for authentication while still isolating tmux and watcher state.
 - Change: tightened the real Codex contract test so it now requires a real completion signal in `codex-tui.log`. If Codex stops emitting a supported log completion signal, the contract suite now fails instead of silently passing on rollout-only evidence.
 - Change: replaced ad hoc watcher health transitions with `compute_health()`, a pure helper that treats `codex-tui.log` as the primary source. `rollout channel closed` now becomes `warn` after a matching Codex log completion is observed, and only remains `error` if no matching log completion arrives within a short grace window.
+- Change: removed the separate `pause-all`, `resume-all`, and `restart-all` commands. `pause *`, `resume *`, and `restart *` now cover the same behavior with a smaller CLI surface.
 
 ## 2026-03-06
 
