@@ -1,10 +1,10 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core entrypoints live in `bin/`: `auto_continue_watchd.py` manages watchers, `auto_continue_logwatch.py` tails Codex events, and `auto_continue_watchd.sh` is the thin shell shim. Compatibility code stays in `legacy/`. Tests live in `test/` with Python unit tests in `test_watchd_unit.py` and shell-based smoke/E2E coverage in `smoke.sh` and `test_rollout_e2e.sh`. Architecture notes and the running engineering log live in `docs/`. Example prompt text lives in `examples/messages/`.
+Core entrypoints live in `bin/`: `auto_continue_watchd.py` manages watchers and `auto_continue_logwatch.py` tails Codex events. Compatibility code stays in `legacy/`. Tests live in `test/` with Python unit tests in `test_watchd_unit.py` and shell-based smoke/E2E coverage in `smoke.sh` and `test_rollout_e2e.sh`. Architecture notes and the running engineering log live in `docs/`. Example prompt text lives in `examples/messages/`.
 
 ## Build, Test, and Development Commands
-Run the watcher locally with `bin/auto_continue_watchd.sh status` or `bin/auto_continue_watchd.sh start %6 --message "continue"`. Use `bash test/smoke.sh` for fast syntax and CLI checks. Use `python3 -m unittest test.test_watchd_unit` for isolated logic tests around thread discovery, recovery, and state handling. Use `bash test/test_rollout_e2e.sh` only when `tmux`, `codex`, and valid credentials are available; it launches a real tmux session and verifies auto-continue end to end.
+Run the watcher locally with `python3 bin/auto_continue_watchd.py status` or `python3 bin/auto_continue_watchd.py start %6 --message "continue"`. Use `bash test/smoke.sh` for fast syntax and CLI checks. Use `python3 -m unittest test.test_watchd_unit` for isolated logic tests around thread discovery, recovery, and state handling. Use `bash test/test_rollout_e2e.sh` only when `tmux`, `codex`, and valid credentials are available; it launches a real tmux session and verifies auto-continue end to end.
 
 ## Coding Style & Naming Conventions
 Follow existing Python and shell style: 4-space indentation in Python, `set -euo pipefail` in shell, and small stdlib-first helpers over new dependencies. Prefer snake_case for Python functions, variables, and test names. Keep CLI output short and operator-focused. Preserve the current file naming pattern: `auto_continue_*.py` for runtime code and `test_*.py` or `test_*.sh` for tests.

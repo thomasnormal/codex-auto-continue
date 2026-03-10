@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Process manager for auto-continue watchers.
 
-Drop-in replacement for auto_continue_watchd.sh.  Requires: rich (pip install rich).
+Requires: rich (pip install rich).
 """
 
 from __future__ import annotations

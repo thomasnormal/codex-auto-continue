@@ -2,7 +2,7 @@
 
 ## Components
 
-- `bin/auto_continue_watchd.py` (invoked via `bin/auto_continue_watchd.sh` shim)
+- `bin/auto_continue_watchd.py`
   - CLI process manager (Python).
   - Starts/stops one watcher per tmux pane.
   - Handles thread discovery, per-pane message config, tmux rename hook sync,

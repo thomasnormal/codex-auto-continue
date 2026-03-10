@@ -6,7 +6,7 @@ Auto-send a follow-up prompt to Codex in tmux after each completed turn.
 
 ```bash
 # Add an alias (optional but recommended)
-alias acw='/path/to/codex-auto-continue/bin/auto_continue_watchd.sh'
+alias acw='python3 /path/to/codex-auto-continue/bin/auto_continue_watchd.py'
 
 acw start 2        # window index — opens $EDITOR for the message
 acw start %6       # or pane id

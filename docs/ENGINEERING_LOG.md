@@ -15,6 +15,7 @@
 - Change: tightened the real Codex contract test so it now requires a real completion signal in `codex-tui.log`. If Codex stops emitting a supported log completion signal, the contract suite now fails instead of silently passing on rollout-only evidence.
 - Change: replaced ad hoc watcher health transitions with `compute_health()`, a pure helper that treats `codex-tui.log` as the primary source. `rollout channel closed` now becomes `warn` after a matching Codex log completion is observed, and only remains `error` if no matching log completion arrives within a short grace window.
 - Change: removed the separate `pause-all`, `resume-all`, and `restart-all` commands. `pause *`, `resume *`, and `restart *` now cover the same behavior with a smaller CLI surface.
+- Change: removed `bin/auto_continue_watchd.sh`. The Python entrypoint is now the only supported manager interface, which removes one more compatibility layer and keeps smoke/docs aligned with the real implementation.
 
 ## 2026-03-06
 
