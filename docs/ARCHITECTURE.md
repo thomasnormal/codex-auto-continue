@@ -2,33 +2,26 @@
 
 ## Components
 
-- `bin/auto_continue_watchd.sh`
-  - CLI process manager.
+- `bin/auto_continue_watchd.py` (invoked via `bin/auto_continue_watchd.sh` shim)
+  - CLI process manager (Python).
   - Starts/stops one watcher per tmux pane.
-  - Handles thread auto-discovery, per-pane message config, status table, and pause/resume.
+  - Handles thread discovery, per-pane message config, tmux rename hook sync,
+    and status/cleanup.
 - `bin/auto_continue_logwatch.py`
   - Event engine.
   - Tails `~/.codex/log/codex-tui.log`.
   - On `needs_follow_up=false` for the watched thread, sends message to target tmux pane.
-- `legacy/auto_continue_notify_hook.py`
-  - Old notify-hook mode retained for compatibility.
 
 ## Data Flow
 
 1. `start` resolves pane + thread ID.
 2. `watchd` launches `auto_continue_logwatch.py` with pane/thread/message arguments.
 3. Python watcher tails Codex log and emits message via `tmux send-keys`.
-4. Runtime state/logs live under `<project>/.codex/`.
+4. Runtime state/logs live under `~/.codex/`.
 
 ## Runtime Files
 
-All per-project files are in `<project>/.codex/`, including:
+Files are in `~/.codex/`, including:
 - `auto_continue_logwatch.<pane>.pid`
-- `auto_continue_logwatch.<pane>.state.local.json`
 - `auto_continue_logwatch.<pane>.log`
-- `auto_continue_logwatch.<pane>.message.local.txt`
-- `AUTO_CONTINUE_PAUSE.<pane>`
-
-Global pause file (optional):
-- `AUTO_CONTINUE_PAUSE`
-
+- `acw_session.<thread-id>.json` (thread-keyed canonical session state)

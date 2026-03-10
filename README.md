@@ -13,7 +13,9 @@ acw start %6       # or pane id
 acw start uvm      # or tmux window name
 ```
 
-That's it. The watcher auto-discovers the Codex thread and sends your message whenever a turn completes.
+That's it. The watcher discovers the Codex thread for the pane and sends your
+message whenever a turn completes. If a thread-id cannot be discovered, `start`
+fails instead of running with an unknown thread.
 
 ## Commands
 
@@ -27,6 +29,7 @@ resume      <target>
 pause-all
 resume-all
 restart-all
+cleanup     [target]
 status      [target]
 ```
 
@@ -53,31 +56,45 @@ Default message location: `~/.codex/auto_continue.message.txt`, falling back to 
 
 ## How It Works
 
-The watcher polls two event sources to support both old and new Codex versions:
+The watcher primarily tails `~/.codex/log/codex-tui.log` for completion
+signals:
 
-- **codex-tui.log** — old Codex emits `post sampling token usage` lines here
-- **rollout JSONL** (`~/.codex/sessions/`) — new Codex emits `task_complete` events here
+- old Codex logs `post sampling token usage ... needs_follow_up=false`
+- current Codex logs `codex_core::tasks: close`
 
-When either source signals a completed turn, the watcher sends the continue message to the tmux pane.
+It also checks rollout JSONL files under `~/.codex/sessions/` when available so
+startup can notice a pending completed turn that was already written before the
+watcher attached.
+
+When a watched thread completes a turn, the watcher sends the continue message
+to the tmux pane.
 
 ### Thread Auto-Discovery
 
-The watcher automatically discovers which Codex session belongs to each pane by inspecting the pane's process tree and checking which rollout file the `codex` process has open (`/proc/PID/fd/`). This works reliably even when multiple Codex sessions run on different panes simultaneously.
+The watch daemon discovers which Codex thread belongs to each pane by inspecting
+the pane's live process tree and tracking thread-keyed session state. This
+works reliably even when multiple Codex sessions run on different panes
+simultaneously.
 
-If the Codex session restarts with a new thread, the watcher re-discovers it automatically during periodic health checks (every 30 seconds).
+If the Codex session restarts with a new thread, the watcher re-discovers it during periodic health checks.
+
+Window names are synchronized via a tmux `window-renamed` hook (no periodic
+rename polling).
 
 ### Live Pane Resolution
 
-After a tmux crash and restart, Codex threads may end up in different panes than where the watcher was originally started. `acw status` resolves thread→pane mappings dynamically (via `/proc/PID/fd/`), so the WINDOW and PANE columns always reflect the current tmux layout.
+`acw status` resolves thread→pane mappings dynamically so the WINDOW and PANE
+columns reflect the current tmux layout.
 
 ### Health Monitoring
 
-Each watcher tracks its health status:
+Each watcher tracks completion-source health, with `codex-tui.log` as the
+primary source and rollout JSONL as a supplemental source when present:
 
-- **ok** — rollout file is being written, watcher is active
-- **stale** — rollout file hasn't been written in 5+ minutes
-- **warn** — no rollout file found for the tracked thread
-- **error** — rollout channel closed
+- **ok** — the watcher has a usable completion source
+- **stale** — a rollout file exists but has stopped updating before Codex log completion has been proven
+- **warn** — no rollout file has been found yet, or rollout recording closed and the watcher is continuing via `codex-tui.log`
+- **error** — rollout recording closed before the watcher observed a matching completion in `codex-tui.log`
 
 View health with `acw status`.
 
@@ -87,7 +104,7 @@ View health with `acw status`.
 
 ```
 $ acw status
-Active watchers: 3
+Sessions: 3
 WINDOW      STATE    STARTED    LAST_MSG   LAST_ACW   MESSAGE
 ----------- -------- ---------- ---------- ---------- -------
 0:1:api     running  2d14h ago  0s ago     4m ago     msg:please continue working on the API...
@@ -149,3 +166,18 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 - `python3`, `tmux`, `pstree`
 - Codex CLI
 - Linux (uses `/proc` for thread discovery)
+
+## E2E Test
+
+Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
+It runs two Python tests on top of a shared harness:
+
+- a Codex contract test that proves which completion signals the current Codex build emits
+- a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
+
+The harness always uses a dedicated tmux server on its own socket, so it does
+not interfere with your existing tmux sessions. If `AUTO_CONTINUE_E2E_ENV_FILE`
+or a local `.env.local` / `.env` is present, the harness uses that for Codex
+credentials inside an isolated test home. Otherwise it falls back to your
+existing `~/.codex` login state and still keeps tmux and watcher state
+isolated.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Process manager for auto-continue watchers.
 
-Drop-in replacement for auto_continue_watchd.sh.  Stdlib-only (no pip deps).
+Drop-in replacement for auto_continue_watchd.sh.  Requires: rich (pip install rich).
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ import glob
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,6 +20,7 @@ import time
 from pathlib import Path
 
 from auto_continue_logwatch import discover_thread_for_pane as _discover_thread_for_pane
+from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
 
 # ---------------------------------------------------------------------------
 # Constants & path resolution
@@ -70,7 +73,6 @@ if not os.path.isfile(DEFAULT_MSG_FILE):
     DEFAULT_MSG_FILE = str(REPO_ROOT / "examples" / "messages" / "default_continue_message.txt")
 
 LEGACY_PID_FILE = os.path.join(STATE_DIR, "auto_continue_logwatch.pid")
-LEGACY_RUN_LOG = os.path.join(STATE_DIR, "auto_continue_logwatch.runner.log")
 
 os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -85,11 +87,6 @@ def sanitize_key(s: str) -> str:
 
 def key_from_pane(pane: str) -> str:
     return sanitize_key(pane)
-
-
-def key_to_pane(key: str) -> str:
-    """Inverse of key_from_pane: '_3' → '%3'."""
-    return "%" + key.lstrip("_")
 
 
 def is_pane_id(s: str) -> bool:
@@ -127,12 +124,33 @@ def watch_log_for_key(key: str) -> str:
     return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.log")
 
 
-def state_file_for_key(key: str) -> str:
-    return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.state.local.json")
+def state_file_for_thread(thread_id: str) -> str:
+    return os.path.join(STATE_DIR, f"acw_session.{thread_id}.json")
 
 
-def message_meta_file_for_key(key: str) -> str:
-    return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.message.local.txt")
+def _read_session_state(thread_id: str) -> dict:
+    path = state_file_for_thread(thread_id)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_session_state(thread_id: str, data: dict) -> None:
+    path = state_file_for_thread(thread_id)
+    existing = _read_session_state(thread_id)
+    existing.update(data)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(existing, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +162,8 @@ def run_tmux(*args: str) -> str | None:
     """Run a tmux command, trying socket env then fallback without TMUX env."""
     cmd: list[str] = ["tmux"]
     sock = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
+    if not sock:
+        sock = _tmux_socket_from_env()
     if sock:
         cmd += ["-S", sock]
     cmd += list(args)
@@ -153,6 +173,10 @@ def run_tmux(*args: str) -> str | None:
         pass
 
     if not sock and os.environ.get("TMUX", ""):
+        # If the current client/server is healthy, do not silently fall back to
+        # another tmux server (that can create windows in the wrong session).
+        if _tmux_client_env_healthy():
+            return None
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         try:
             return subprocess.check_output(
@@ -160,7 +184,41 @@ def run_tmux(*args: str) -> str | None:
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
+    elif sock:
+        # Socket override can become stale; fallback to default tmux server.
+        try:
+            return subprocess.check_output(["tmux"] + list(args), stderr=subprocess.DEVNULL, text=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
     return None
+
+
+def _tmux_socket_from_env() -> str:
+    """Return tmux socket path parsed from $TMUX, or empty string."""
+    tmux_env = os.environ.get("TMUX", "")
+    if not tmux_env:
+        return ""
+    # TMUX format: "/tmp/tmux-UID/default,<client_pid>,<session_id>"
+    parts = tmux_env.split(",", 1)
+    if not parts:
+        return ""
+    sock = parts[0].strip()
+    return sock if sock else ""
+
+
+def _tmux_client_env_healthy() -> bool:
+    """Return True when TMUX points to a live current client/server."""
+    if not os.environ.get("TMUX", ""):
+        return False
+    try:
+        subprocess.check_output(
+            ["tmux", "display-message", "-p", "#{session_name}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
 
 def resolve_pane_from_window_target(target: str) -> str | None:
@@ -300,7 +358,11 @@ def resolve_pane_from_window_name(name: str) -> str | None:
 
 
 def resolve_pane_target(target: str) -> str:
-    """Resolve any pane/window target to a tmux pane id (%N)."""
+    """Resolve any pane/window target to a tmux pane id (%N).
+
+    Tries, in order: pane id, window index, tmux window name, thread id,
+    then state file window_name (for watchers whose pane is gone).
+    """
     if is_pane_id(target):
         return target
 
@@ -311,14 +373,20 @@ def resolve_pane_target(target: str) -> str:
         print(f"error: could not resolve window target '{target}'", file=sys.stderr)
         sys.exit(1)
 
-    # Try resolving as a window name.
+    # Try resolving as a tmux window name.
     pane = resolve_pane_from_window_name(target)
     if pane and is_pane_id(pane):
         return pane
 
-    print(f"error: invalid pane/window target '{target}'", file=sys.stderr)
+    # Try as a thread id — find the watcher's pane.
+    if is_thread_id(target):
+        for r in watcher_rows():
+            if r["thread"].lower() == target.lower():
+                return r["pane"]
+
+    print(f"error: no watcher or window found for '{target}'", file=sys.stderr)
     print(
-        "hint: use a pane id ('%6'), window index ('2'), session:window ('0:2'), or window name ('uvm')",
+        "hint: use a pane id ('%6'), window name, thread id, or window index ('2')",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -337,68 +405,8 @@ def extract_resume_thread_id(args: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
-def thread_id_from_snapshot_file(path: str) -> str | None:
-    base = os.path.basename(path)
-    m = re.fullmatch(r"(" + THREAD_ID_RE.pattern + r")\.sh", base)
-    return m.group(1).lower() if m else None
-
-
-def detect_thread_from_shell_snapshot(pane: str) -> str | None:
-    snap_dir = os.path.join(os.path.expanduser("~"), ".codex", "shell_snapshots")
-    if not os.path.isdir(snap_dir):
-        return None
-    files = sorted(glob.glob(os.path.join(snap_dir, "*.sh")), key=os.path.getmtime, reverse=True)
-    if not files:
-        return None
-    needle = f'declare -x TMUX_PANE="{pane}"'
-    for f in files:
-        try:
-            with open(f) as fh:
-                if needle in fh.read():
-                    tid = thread_id_from_snapshot_file(f)
-                    if tid and is_thread_id(tid):
-                        return tid
-        except OSError:
-            continue
-    return None
-
-
-def closest_thread_id_for_start_epoch(target_epoch: int) -> tuple[str, int] | None:
-    import calendar
-
-    pattern = os.path.join(os.path.expanduser("~"), ".codex", "sessions", "*", "*", "*", "rollout-*.jsonl")
-    files = glob.glob(pattern)
-    if not files:
-        return None
-    rollout_re = re.compile(
-        r"^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(" + THREAD_ID_RE.pattern + r")\.jsonl$"
-    )
-    best_tid = ""
-    best_diff = -1
-    for f in files:
-        base = os.path.basename(f)
-        m = rollout_re.fullmatch(base)
-        if not m:
-            continue
-        tid = m.group(7).lower()
-        try:
-            ts = time.strptime(
-                f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}",
-                "%Y-%m-%d %H:%M:%S",
-            )
-            candidate_epoch = calendar.timegm(ts)
-        except (ValueError, OverflowError):
-            continue
-        diff = abs(candidate_epoch - target_epoch)
-        if best_diff < 0 or diff < best_diff:
-            best_diff = diff
-            best_tid = tid
-    if is_thread_id(best_tid):
-        return best_tid, best_diff
-    return None
-
-
 def detect_thread_from_pane_tty(pane: str) -> str | None:
+    """Check pane tty for a `codex resume <thread-id>` command."""
     pane_tty = run_tmux("display-message", "-p", "-t", pane, "#{pane_tty}")
     if not pane_tty:
         return None
@@ -409,7 +417,6 @@ def detect_thread_from_pane_tty(pane: str) -> str | None:
     if not tty_for_ps:
         return None
 
-    # Fast path: thread id in `codex ... resume <thread-id>`.
     try:
         ps_out = subprocess.check_output(
             ["ps", "-t", tty_for_ps, "-o", "pid=,args="],
@@ -417,7 +424,7 @@ def detect_thread_from_pane_tty(pane: str) -> str | None:
             text=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        ps_out = ""
+        return None
 
     for line in ps_out.splitlines():
         line = line.strip()
@@ -432,53 +439,11 @@ def detect_thread_from_pane_tty(pane: str) -> str | None:
         tid = extract_resume_thread_id(args)
         if tid and is_thread_id(tid):
             return tid
-
-    # Fallback: match codex process start time to closest rollout session.
-    best_tid = ""
-    best_diff = -1
-    for line in ps_out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        pid_str, args = parts
-        if not pid_str.isdigit() or "codex" not in args:
-            continue
-        try:
-            lstart = subprocess.check_output(
-                ["ps", "-p", pid_str, "-o", "lstart="],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-        if not lstart:
-            continue
-        try:
-            start_epoch = int(
-                subprocess.check_output(
-                    ["date", "-d", lstart, "+%s"], stderr=subprocess.DEVNULL, text=True
-                ).strip()
-            )
-        except (subprocess.CalledProcessError, ValueError):
-            continue
-        result = closest_thread_id_for_start_epoch(start_epoch)
-        if not result:
-            continue
-        cand_tid, cand_diff = result
-        if best_diff < 0 or cand_diff < best_diff:
-            best_diff = cand_diff
-            best_tid = cand_tid
-
-    if is_thread_id(best_tid) and best_diff <= 600:
-        return best_tid
     return None
 
 
 def detect_thread_id_for_pane(pane: str) -> str | None:
-    for method in (_discover_thread_for_pane, detect_thread_from_shell_snapshot, detect_thread_from_pane_tty):
+    for method in (_discover_thread_for_pane, detect_thread_from_pane_tty):
         tid = method(pane)
         if tid and is_thread_id(tid):
             return tid
@@ -496,14 +461,11 @@ def resolve_thread_id(pane: str, requested: str = "") -> str:
     if tid and is_thread_id(tid):
         return tid
 
-    if requested == "auto":
-        return "auto"
-
     print(
-        f"warn: could not auto-detect thread_id for pane={pane}; falling back to auto mode",
+        f"error: could not determine thread_id for pane={pane}; start requires a concrete thread id",
         file=sys.stderr,
     )
-    return "auto"
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -556,57 +518,67 @@ def parse_thread_and_message_args(
 # ---------------------------------------------------------------------------
 
 
-def write_message_meta(key: str, mode: str, value: str) -> None:
-    path = message_meta_file_for_key(key)
-    with open(path, "w") as f:
-        f.write(f"mode={mode}\n")
-        f.write(f"value={value}\n")
+def _normalize_message_text(text: str) -> str:
+    """Match logwatch behavior: strip comment lines and trim."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    ).strip()
 
 
-def read_message_meta_for_key(key: str) -> tuple[str, str] | None:
-    path = message_meta_file_for_key(key)
-    mode = ""
-    value_lines: list[str] = []
-    in_value = False
+def _message_text(mode: str, value: str) -> str:
+    """Resolve the concrete continue message text."""
+    if mode == "inline":
+        return _normalize_message_text(value)
     try:
-        with open(path) as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if line.startswith("mode="):
-                    mode = line[5:]
-                    in_value = False
-                elif line.startswith("value="):
-                    value_lines = [line[6:]]
-                    in_value = True
-                elif in_value:
-                    value_lines.append(line)
+        text = Path(value).read_text(encoding="utf-8")
     except OSError:
-        return None
-    value = "\n".join(value_lines)
-    # Strip the trailing newline that write_message_meta always adds.
-    if value.endswith("\n"):
-        value = value[:-1]
-    if mode in ("inline", "file"):
-        return mode, value
-    return None
+        return ""
+    return _normalize_message_text(text)
+
+
+def _set_thread_name(thread_id: str, name: str) -> None:
+    if not is_thread_id(thread_id):
+        return
+    _write_session_state(thread_id, {"thread_id": thread_id, "name": name})
+
+
+def ensure_tmux_window_rename_hook() -> None:
+    """Install a global tmux hook to keep session names in sync."""
+    cmd = (
+        f"{shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(Path(__file__).resolve()))} "
+        "_window-renamed "
+        "\"#{window_id}\" "
+        "#{q:window_name}"
+    )
+    run_tmux("set-hook", "-g", "window-renamed", f"run-shell {shlex.quote(cmd)}")
+
+
+def cmd_window_renamed(argv: list[str]) -> None:
+    """Hook handler: sync renamed tmux window title into session state."""
+    if len(argv) < 2:
+        return
+    window_id = argv[0]
+    new_name = argv[1]
+    listing = run_tmux("list-panes", "-t", window_id, "-F", "#{pane_id}")
+    if not listing:
+        return
+
+    seen_threads: set[str] = set()
+    for pane in (ln.strip() for ln in listing.splitlines()):
+        if not is_pane_id(pane):
+            continue
+        rows = watcher_rows(pane)
+        tid = rows[0]["thread"].lower() if rows and is_thread_id(rows[0].get("thread", "")) else ""
+        if not tid or tid in seen_threads:
+            continue
+        seen_threads.add(tid)
+        _set_thread_name(tid, new_name)
 
 
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
-
-
-def _read_proc_cmdline(pid: str) -> list[str] | None:
-    """Read a process's argv from /proc (null-delimited, no word-splitting issues)."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            data = f.read()
-        if not data:
-            return None
-        args = data.rstrip(b"\0").split(b"\0")
-        return [a.decode("utf-8", errors="replace") for a in args]
-    except OSError:
-        return None
 
 
 def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
@@ -665,20 +637,18 @@ def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
         pid_str, argstr = parts
         if not pid_str.isdigit():
             continue
-        tokens = argstr.split()
+        # ps output loses null-delimited argv boundaries; use shell-like
+        # splitting and rely on state files for canonical message data.
+        try:
+            tokens = shlex.split(argstr)
+        except ValueError:
+            tokens = argstr.split()
         has_python = any(re.search(r"(^|/)python([0-9.]+)?$", t) for t in tokens)
         has_script = any(t.endswith("auto_continue_logwatch.py") for t in tokens)
         if not has_python or not has_script:
             continue
 
-        # Use /proc/PID/cmdline for proper null-delimited args (avoids breaking
-        # multi-word --message values that ps joins with spaces).
-        proc_argv = _read_proc_cmdline(pid_str)
-        if proc_argv:
-            info = _parse_logwatch_args(proc_argv)
-        else:
-            # Fallback to ps-parsed tokens (non-Linux or /proc unavailable).
-            info = _parse_logwatch_args(tokens)
+        info = _parse_logwatch_args(tokens)
         info["pid"] = pid_str
 
         if not info["pane"]:
@@ -694,13 +664,15 @@ def watcher_pids_for_pane(pane: str) -> list[str]:
 
 
 def _is_pid_stopped(pid: int) -> bool:
-    """Check if a process is in stopped (T) state via /proc."""
+    """Check if a process is in stopped (T) state via ``ps``."""
     try:
-        with open(f"/proc/{pid}/status") as f:
-            for line in f:
-                if line.startswith("State:"):
-                    return "\tT " in line or "\tT\t" in line
-    except OSError:
+        state = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "state="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return state.startswith("T")
+    except (subprocess.CalledProcessError, FileNotFoundError):
         pass
     return False
 
@@ -724,43 +696,6 @@ def thread_from_running_watcher_for_pane(pane: str) -> str | None:
     if is_thread_id(tid):
         return tid.lower()
     return None
-
-
-def thread_from_state_file_for_key(key: str) -> str | None:
-    sf = state_file_for_key(key)
-    if not os.path.isfile(sf):
-        return None
-    try:
-        with open(sf) as f:
-            data = json.load(f)
-        tid = data.get("thread_id", "")
-        if is_thread_id(tid):
-            return tid.lower()
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-    return None
-
-
-def collect_known_keys() -> set[str]:
-    keys: set[str] = set()
-    for r in watcher_rows():
-        k = key_from_pane(r["pane"])
-        if k:
-            keys.add(k)
-    for pat in (
-        os.path.join(STATE_DIR, "auto_continue_logwatch.*.state.local.json"),
-        os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid"),
-    ):
-        for f in glob.glob(pat):
-            base = os.path.basename(f)
-            k = base.removeprefix("auto_continue_logwatch.")
-            for suffix in (".state.local.json", ".pid"):
-                if k.endswith(suffix):
-                    k = k.removesuffix(suffix)
-                    break
-            if k and k != base:
-                keys.add(k)
-    return keys
 
 
 # ---------------------------------------------------------------------------
@@ -804,7 +739,7 @@ def _logwatch_cmd(pane: str, thread_id: str, message_args: list[str], key: str) 
         "--cooldown-secs", "1.0",
         "--send-delay-secs", SEND_DELAY_SECS,
         "--enter-delay-secs", ENTER_DELAY_SECS,
-        "--state-file", state_file_for_key(key),
+        "--state-file", state_file_for_thread(thread_id),
         "--watch-log", watch_log_for_key(key),
     ]
 
@@ -838,6 +773,7 @@ def cmd_start(argv: list[str]) -> None:
     pane = resolve_pane_target(target)
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
+    ensure_tmux_window_rename_hook()
 
     thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
 
@@ -877,11 +813,40 @@ def cmd_start(argv: list[str]) -> None:
         sys.exit(1)
 
     thread_id = resolve_thread_id(pane, thread_arg)
-    write_message_meta(key, msg_mode, msg_value)
+
+    # Warn if another watcher is already running for the same thread_id.
+    if is_thread_id(thread_id):
+        for r in watcher_rows():
+            if r["pane"] == pane:
+                continue
+            if r["thread"].lower() == thread_id.lower():
+                print(
+                    f"warning: another watcher (pid={r['pid']} pane={r['pane']}) "
+                    f"is already watching thread {thread_id[:8]}…",
+                    file=sys.stderr,
+                )
+                print(
+                    f"hint: stop it first with 'acw stop {r['pane']}' to avoid duplicates",
+                    file=sys.stderr,
+                )
+                break
+
+    message_text = _message_text(msg_mode, msg_value)
+    wn = run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or ""
+    _write_session_state(thread_id, {
+        "thread_id": thread_id,
+        "name": wn.strip(),
+        "message": message_text,
+    })
+
     if (not thread_arg or thread_arg == "auto") and thread_id != "auto":
         print(f"resolved: pane={pane} thread_id={thread_id}")
 
     Path(pf).unlink(missing_ok=True)
+
+    # Disable tmux automatic window renaming so the window name doesn't
+    # change to "python3" (the logwatch process) when codex exits.
+    run_tmux("set-option", "-w", "-t", pane, "automatic-rename", "off")
 
     cmd = _logwatch_cmd(pane, thread_id, _message_args(msg_mode, msg_value), key)
     log_fh = open(rl, "a")
@@ -952,13 +917,83 @@ def stop_pane_watchers(pane: str) -> None:
     Path(pf).unlink(missing_ok=True)
 
 
-def cmd_stop(argv: list[str]) -> None:
-    pane_arg = argv[0] if argv else ""
+def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
+    """Find running watchers whose session state name matches *name*."""
+    matches: list[dict[str, str]] = []
+    for r in watcher_rows():
+        tid = r["thread"]
+        if not tid or not is_thread_id(tid):
+            continue
+        ss = _read_session_state(tid)
+        if ss.get("name", "") == name:
+            matches.append(r)
+    return matches
 
-    if pane_arg:
-        pane = resolve_pane_target(pane_arg)
-        stop_pane_watchers(pane)
-        return
+
+def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
+    """Stop watcher processes given rows from watcher_rows()."""
+    for r in rows:
+        pid_str = r["pid"]
+        if not pid_str.isdigit():
+            continue
+        pid = int(pid_str)
+        try:
+            if _is_pid_stopped(pid):
+                os.kill(pid, signal.SIGCONT)
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        key = key_from_pane(r["pane"])
+        Path(pid_file_for_key(key)).unlink(missing_ok=True)
+        print(f"stopped: pane={r['pane']} pid={pid_str}")
+
+
+def _find_watchers_by_thread(thread_id: str) -> list[dict[str, str]]:
+    """Find running watchers whose thread_id matches."""
+    tid = thread_id.lower()
+    return [r for r in watcher_rows() if r["thread"].lower() == tid]
+
+
+def cmd_stop(argv: list[str]) -> None:
+    target = argv[0] if argv else ""
+
+    if target:
+        # Thread ID — stable identifier.
+        if is_thread_id(target):
+            matches = _find_watchers_by_thread(target)
+            if matches:
+                _stop_watcher_rows(matches)
+                return
+            print(f"not running: thread={target}", file=sys.stderr)
+            return
+
+        # Pane ID.
+        if is_pane_id(target):
+            stop_pane_watchers(target)
+            return
+
+        # Match running watchers by state file window_name first — this
+        # finds the actual watcher process even if the tmux window has
+        # been reassigned to a different pane.
+        matches = _find_watchers_by_window_name(target)
+        if matches:
+            _stop_watcher_rows(matches)
+            return
+
+        # Tmux window name or index.
+        pane = resolve_pane_from_window_name(target)
+        if not pane:
+            pane = resolve_pane_from_window_target(target) if re.fullmatch(r"\d+|[^:]+:\d+", target) else None
+        if pane and is_pane_id(pane):
+            stop_pane_watchers(pane)
+            return
+
+        print(f"error: no watcher found for '{target}'", file=sys.stderr)
+        print(
+            "hint: use a thread id, pane id ('%6'), window name, or window index ('2')",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     had_any = False
     for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
@@ -1091,20 +1126,20 @@ def cmd_restart(argv: list[str]) -> None:
     key = key_from_pane(pane)
 
     if not msg_explicit:
-        meta = read_message_meta_for_key(key)
-        if meta:
-            msg_mode, msg_value = meta
+        tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
+        if tid and is_thread_id(tid):
+            ss = _read_session_state(tid)
+            msg = ss.get("message", "")
+            if msg:
+                msg_mode, msg_value = "inline", msg
 
     if msg_mode == "file" and not os.path.isfile(msg_value):
         msg_value = DEFAULT_MSG_FILE
 
     if not thread_arg:
-        # Re-detect from the pane's live codex process first (most reliable).
         thread_arg = detect_thread_id_for_pane(pane) or ""
         if not thread_arg:
             thread_arg = thread_from_running_watcher_for_pane(pane) or ""
-        if not thread_arg:
-            thread_arg = thread_from_state_file_for_key(key) or ""
 
     stop_pane_watchers(pane)
 
@@ -1133,45 +1168,17 @@ def cmd_edit(argv: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
-    key = key_from_pane(pane)
+    tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
 
-    # Read current message (meta file → running watcher args → default).
-    mode = "inline"
     value = ""
-    meta = read_message_meta_for_key(key)
-    if meta:
-        mode, value = meta
+    if tid and is_thread_id(tid):
+        ss = _read_session_state(tid)
+        value = ss.get("message", "")
     if not value:
         rows = watcher_rows(pane)
         if rows:
-            value = rows[0]["msg_inline"] or rows[0]["msg_file"]
-            if rows[0]["msg_file"] and not rows[0]["msg_inline"]:
-                mode = "file"
+            value = rows[0]["msg_inline"]
 
-    # For file-mode messages, open the file, then restart if changed.
-    if mode == "file" and value and os.path.isfile(value):
-        try:
-            old_mtime = os.path.getmtime(value)
-        except OSError:
-            old_mtime = None
-        editor = os.environ.get("EDITOR", "vim")
-        rc = subprocess.call([editor, value])
-        if rc != 0:
-            print("edit: editor exited with error, not restarting", file=sys.stderr)
-            return
-        try:
-            new_mtime = os.path.getmtime(value)
-        except OSError:
-            new_mtime = None
-        if old_mtime == new_mtime:
-            print("edit: message file unchanged")
-            return
-        print(f"edit: message file updated")
-        if watcher_rows(pane):
-            cmd_restart([pane, "--message-file", value])
-        return
-
-    # For inline messages, open editor with current value.
     new_value = _edit_message_interactive(value)
     if new_value is None:
         return
@@ -1180,44 +1187,24 @@ def cmd_edit(argv: list[str]) -> None:
         print("edit: message unchanged")
         return
 
-    write_message_meta(key, "inline", new_value)
+    if tid and is_thread_id(tid):
+        _write_session_state(tid, {"message": new_value})
     print(f"edit: message updated for pane {pane}")
     if watcher_rows(pane):
         cmd_restart([pane, "--message", new_value])
 
 
 def cmd_restart_all(argv: list[str]) -> None:
-    """Restart every known watcher (running or dead) using saved thread/message.
-
-    Panes that no longer exist in tmux are stopped and cleaned up.
-    """
-    known = collect_known_keys()
-    if not known:
-        print("no known watchers to restart")
+    """Restart every running watcher."""
+    panes = sorted({r["pane"] for r in watcher_rows() if r.get("pane")})
+    if not panes:
+        print("no running watchers to restart")
         return
 
     restarted = 0
-    for key in sorted(known):
-        pane = key_to_pane(key)
-        if not is_pane_id(pane):
-            print(f"skip: cannot recover pane id from key '{key}'")
-            continue
-
-        # Check that the tmux pane still exists.
+    for pane in panes:
         if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
-            # Pane is gone — kill any orphaned watcher and clean up.
-            pids = watcher_pids_for_pane(pane)
-            if pids:
-                for p in pids:
-                    pid = int(p)
-                    try:
-                        if _is_pid_stopped(pid):
-                            os.kill(pid, signal.SIGCONT)
-                        os.kill(pid, signal.SIGTERM)
-                    except OSError:
-                        pass
-                print(f"killed: orphaned watcher(s) for pane {pane} (pane no longer exists)")
-            Path(pid_file_for_key(key)).unlink(missing_ok=True)
+            stop_pane_watchers(pane)
             continue
 
         print(f"--- restarting {pane} ---")
@@ -1244,75 +1231,41 @@ def _build_pane_window_map() -> dict[str, str]:
     return mapping
 
 
-def _build_thread_pane_map() -> dict[str, str]:
-    """Map thread_id → current tmux pane_id by scanning pane process trees.
-
-    After a tmux restart the Claude thread may be in a different pane than the
-    watcher's stored --pane argument.  This resolves the *actual* current pane
-    for each thread so that ``acw status`` shows the right window/pane.
-
-    Uses ``discover_thread_for_pane`` (walks /proc/PID/fd to find the open
-    rollout file) which works even when ``codex resume`` is invoked without
-    an explicit thread-id argument.
-    """
-    listing = run_tmux("list-panes", "-a", "-F", "#{pane_id}")
-    if not listing:
-        return {}
-
-    mapping: dict[str, str] = {}
-    for line in listing.splitlines():
-        pane_id = line.strip()
-        if not pane_id:
-            continue
-        tid = _discover_thread_for_pane(pane_id)
-        if tid and is_thread_id(tid):
-            mapping[tid.lower()] = pane_id
-    return mapping
-
-
-def _event_summary_from_watch_log(watch_path: str) -> str:
-    if not watch_path:
-        return "-"
+def _threads_from_pstree(shell_pid: str) -> list[str]:
+    """Walk a process tree and return thread_ids from any codex processes found."""
     try:
-        with open(watch_path, "rb") as f:
-            # Read last line efficiently
-            f.seek(0, 2)
-            size = f.tell()
-            if size == 0:
-                return "-"
-            pos = max(0, size - 4096)
-            f.seek(pos)
-            chunk = f.read().decode("utf-8", errors="replace")
-            lines = chunk.splitlines()
-            last_line = ""
-            for ln in reversed(lines):
-                if ln.strip():
-                    last_line = ln.strip()
-                    break
-    except OSError:
-        return "-"
-    if not last_line:
-        return "-"
+        result = subprocess.run(
+            ["pstree", "-p", shell_pid],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return []
+    except FileNotFoundError:
+        return []
+    threads: list[str] = []
+    for pid in re.findall(r"\((\d+)\)", result.stdout):
+        tid = _thread_from_codex_pid(pid)
+        if tid:
+            threads.append(tid)
+            break  # one codex per tree is enough
+    return threads
 
-    # Strip timestamp prefix "...] "
-    idx = last_line.find("] ")
-    if idx >= 0:
-        summary = last_line[idx + 2:]
-    else:
-        summary = last_line
 
-    m = re.match(r"^continue: sent turn=(\S+)", summary)
-    if m:
-        return f"continue turn={m.group(1)}"
-    if summary.startswith("watch: pane="):
-        return "watch start"
-    if summary.startswith("watch: auto-rebind"):
-        return "watch rebind"
-    if summary.startswith("error:"):
-        return "error"
-    if len(summary) > 56:
-        summary = summary[:53] + "..."
-    return summary
+def _build_thread_pane_map() -> dict[str, str]:
+    """Map thread_id -> current tmux pane_id by scanning pane process trees."""
+    listing = run_tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}")
+    mapping: dict[str, str] = {}
+    if listing:
+        for line in listing.splitlines():
+            parts = line.strip().split("\t")
+            if len(parts) < 2:
+                continue
+            pane_id, shell_pid = parts[0], parts[1]
+            if not pane_id or not shell_pid.isdigit():
+                continue
+            for tid in _threads_from_pstree(shell_pid):
+                mapping[tid] = pane_id
+    return mapping
 
 
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
@@ -1391,7 +1344,7 @@ def _read_state_json(state_path: str) -> dict[str, str]:
     try:
         with open(state_path) as f:
             data = json.load(f)
-        for k in ("health", "health_detail", "health_ts", "last_continue_at"):
+        for k in ("health", "health_detail", "health_ts", "last_continue_at", "window_name", "thread_id"):
             if k in data:
                 result[k] = str(data[k])
     except (OSError, json.JSONDecodeError):
@@ -1400,25 +1353,32 @@ def _read_state_json(state_path: str) -> dict[str, str]:
 
 
 def _resolve_message(r: dict[str, str]) -> tuple[str, str]:
-    """Return (mode, value) from meta file or watcher row args.
+    """Return (mode, value) from session state or watcher row args.
 
     mode is 'file', 'inline', or '' if no message is found.
     """
-    key = key_from_pane(r["pane"])
-    meta = read_message_meta_for_key(key)
-    if meta:
-        return meta
-    if r["msg_file"]:
-        return "file", r["msg_file"]
-    if r["msg_inline"]:
+    if r.get("msg_inline"):
         return "inline", r["msg_inline"]
+    if r.get("msg_file"):
+        return "file", r["msg_file"]
+
+    tid = r.get("thread", "")
+    if tid and is_thread_id(tid):
+        ss = _read_session_state(tid)
+        msg = ss.get("message", "")
+        if msg:
+            return "inline", msg
     return "", ""
 
 
 def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
     """Derive display state from process status and health JSON."""
-    if r["pid"].isdigit() and _is_pid_stopped(int(r["pid"])):
+    pid = r.get("pid", "")
+    if pid and pid.isdigit() and _is_pid_stopped(int(pid)):
         return "paused"
+    # No running watcher process.
+    if not pid:
+        return sj.get("health", "") or "dead"
     h = sj.get("health", "")
     if h and h != "ok":
         return h
@@ -1434,26 +1394,59 @@ def _message_summary_for_row(r: dict[str, str]) -> str:
     return "-"
 
 
+_STATE_STYLES = {
+    "running": "green",
+    "paused": "yellow",
+    "stale": "red",
+    "warn": "dark_orange",
+    "error": "bold red",
+    "dead": "dim",
+}
+
+
+def _styled_state(state: str) -> str:
+    style = _STATE_STYLES.get(state, "")
+    return f"[{style}]{state}[/{style}]" if style else state
+
+
+_MAX_MSG_LINES = 3
+
+
+def _clamp_visual_lines(text: str, max_lines: int, col_width: int) -> str:
+    """Truncate *text* so it fits in *max_lines* visual lines at *col_width*."""
+    if col_width < 10:
+        col_width = 40
+    lines = text.split("\n")
+    visual = 0
+    kept: list[str] = []
+    for line in lines:
+        vl = max(1, (len(line) + col_width - 1) // col_width) if line else 1
+        if visual + vl > max_lines:
+            remaining = max_lines - visual
+            if remaining > 0:
+                kept.append(line[: remaining * col_width])
+            result = "\n".join(kept)
+            if len(result) < len(text):
+                result = result.rstrip() + "…"
+            return result
+        kept.append(line)
+        visual += vl
+    return text
+
+
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    win_w = max(len("WINDOW"), *(len(wl) for _, _, wl in resolved)) if resolved else len("WINDOW")
+    import shutil
 
-    header = (
-        f"{'WINDOW':<{win_w}} {'STATE':<8} {'STARTED':<10} {'LAST_MSG':<10} "
-        f"{'LAST_ACW':<10} MESSAGE"
-    )
-    sep = (
-        f"{'-' * win_w} {'--------':<8} {'----------':<10} {'----------':<10} "
-        f"{'----------':<10} -------"
-    )
-    print(header)
-    print(sep)
+    from rich.console import Console
+    from rich.table import Table
 
+    # Precompute row data to estimate column widths.
+    # (window_pane, state, started, last_msg, last_acw, msg_raw)
+    rows_data: list[tuple[str, str, str, str, str, str]] = []
     for r, current_pane, window_label in resolved:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
-
         started, last_msg = _rollout_times(r["thread"])
-
         last_acw = sj.get("last_continue_at", "")
         if last_acw:
             try:
@@ -1463,13 +1456,41 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
                 pass
         if not last_acw:
             last_acw = "-"
+        msg_raw = _message_summary_for_row(r)
+        line1 = f"{window_label}/{current_pane}" if current_pane else window_label
+        tid = r["thread"] if is_thread_id(r["thread"]) else ""
+        window_pane = f"{line1}\n[dim]{tid}[/dim]" if tid else line1
+        rows_data.append((window_pane, state_value, started, last_msg, last_acw, msg_raw))
 
-        msg_summary = _truncate(_message_summary_for_row(r), 44)
+    # Estimate MESSAGE column width from terminal width and other columns.
+    term_w = shutil.get_terminal_size((120, 24)).columns
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_MSG", "LAST_ACW")
+    col_widths = [len(h) for h in headers]
+    for row in rows_data:
+        for i in range(5):
+            # Measure first line only, strip rich markup tags.
+            text = row[i].split("\n")[0]
+            text = re.sub(r"\[/?[^\]]*\]", "", text)
+            col_widths[i] = max(col_widths[i], len(text))
+    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
+    msg_col_w = max(20, min(60, term_w - sum(col_widths) - 19))
 
-        print(
-            f"{window_label:<{win_w}} {state_value:<8} {started:<10} {last_msg:<10} "
-            f"{last_acw:<10} {msg_summary}"
+    table = Table(show_lines=False, expand=True)
+    table.add_column("WINDOW/PANE", no_wrap=True)
+    table.add_column("STATE", no_wrap=True)
+    table.add_column("STARTED", no_wrap=True)
+    table.add_column("LAST_MSG", no_wrap=True)
+    table.add_column("LAST_ACW", no_wrap=True)
+    table.add_column("MESSAGE", ratio=1, max_width=60)
+
+    for window_pane, state_value, started, last_msg, last_acw, msg_raw in rows_data:
+        msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
+        table.add_row(
+            window_pane, _styled_state(state_value),
+            started, last_msg, last_acw, msg_summary,
         )
+
+    Console().print(table)
 
 
 def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
@@ -1507,7 +1528,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
 
         print(f"=== Watcher {idx}/{total} ===")
         print(f"  {'WINDOW:':<16} {window_label}")
-        print(f"  {'PANE:':<16} {current_pane}")
+        print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
         print(f"  {'PID:':<16} {r['pid']}")
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
         print(f"  {'STATE:':<16} {state_value}")
@@ -1528,6 +1549,62 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
             print(f"  {'STATE_FILE:':<16} {r['state']}")
 
 
+def _load_sessions() -> list[dict[str, str]]:
+    """Load all sessions from session state files (keyed by thread_id)."""
+    candidates: list[dict[str, str]] = []
+    for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
+        try:
+            with open(sf) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        thread_id = data.get("thread_id", "")
+        if not thread_id or not is_thread_id(thread_id):
+            continue
+        candidates.append({
+            "thread_id": thread_id,
+            "name": data.get("name", ""),
+            "message": data.get("message", ""),
+            "state_file": sf,
+            "health": data.get("health", ""),
+            "health_detail": data.get("health_detail", ""),
+            "health_ts": data.get("health_ts", ""),
+            "last_continue_at": data.get("last_continue_at", ""),
+        })
+    return candidates
+
+
+def _select_session_files(
+    sessions: list[dict[str, str]],
+    selector: str,
+) -> list[dict[str, str]]:
+    """Select session rows by exact name or thread-id prefix."""
+    sel = selector.lower()
+    matches = [
+        s for s in sessions
+        if s["thread_id"].lower() == sel
+        or s["thread_id"].lower().startswith(sel)
+        or s.get("name", "").lower() == sel
+    ]
+    if not matches:
+        print(f"error: no session matches '{selector}'", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print(
+            f"error: selector '{selector}' is ambiguous; matched {len(matches)} sessions",
+            file=sys.stderr,
+        )
+        for s in matches:
+            name = s.get("name", "") or "-"
+            print(f"  - {name}: {s['thread_id']}", file=sys.stderr)
+        print(
+            "hint: use an exact window name or a longer thread id prefix",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return matches
+
+
 def cmd_status(argv: list[str]) -> None:
     pane_arg = ""
     details = False
@@ -1537,33 +1614,58 @@ def cmd_status(argv: list[str]) -> None:
         else:
             pane_arg = arg
 
+    # 1. Load all sessions from state files.
+    sessions = _load_sessions()
+
+    # 2. Build maps from tmux (two scans total).
     pane_window = _build_pane_window_map()
     thread_pane = _build_thread_pane_map()
-    detail_tag = " (details)" if details else ""
 
+    # 3. Build set of running watcher PIDs per pane.
+    watcher_pid_for_pane: dict[str, str] = {}
+    for r in watcher_rows():
+        watcher_pid_for_pane[r["pane"]] = r["pid"]
+
+    # 4. Merge: for each session, look up live pane and watcher status.
+    resolved: list[tuple[dict[str, str], str, str]] = []
+    for s in sessions:
+        tid = s["thread_id"].lower()
+        ref = thread_pane.get(tid, "") if thread_pane else ""
+        live_pane = ref if is_pane_id(ref) else ""
+        # Prefer live tmux window name, fall back to state file.
+        window_label = pane_window.get(live_pane, "") if live_pane else ""
+        if not window_label:
+            window_label = s["name"] or "-"
+
+        # Build a row dict compatible with _status_table / _status_details.
+        # Find watcher PID: if live_pane is known, look up by pane.
+        watcher_pid = watcher_pid_for_pane.get(live_pane, "") if live_pane else ""
+        row: dict[str, str] = {
+            "pid": watcher_pid,
+            "pane": live_pane,
+            "thread": s["thread_id"],
+            "state": s["state_file"],
+            "watch": watch_log_for_key(key_from_pane(live_pane)) if live_pane else "",
+            "msg_file": "",
+            "msg_inline": s.get("message", ""),
+        }
+        resolved.append((row, live_pane, window_label))
+
+    # Optional pane filter.
     if pane_arg:
         target = pane_arg
         pane = resolve_pane_target(target)
         if pane != target:
             print(f"resolved: target={target} pane={pane}")
-        rows = watcher_rows(pane)
-        print(f"Active watchers{detail_tag} for pane {pane}: {len(rows)}")
-    else:
-        rows = watcher_rows()
-        print(f"Active watchers{detail_tag}: {len(rows)}")
+        resolved = [(r, lp, wl) for r, lp, wl in resolved if lp == pane]
 
-    if not rows:
+    detail_tag = " (details)" if details else ""
+    print(f"Sessions{detail_tag}: {len(resolved)}")
+
+    if not resolved:
         print("(none)")
         return
 
-    # Resolve each row's current pane and window label, then sort by window.
-    resolved: list[tuple[dict[str, str], str, str]] = []  # (row, current_pane, window_label)
-    for r in rows:
-        current_pane = r["pane"]
-        if thread_pane and r["thread"] and is_thread_id(r["thread"]):
-            current_pane = thread_pane.get(r["thread"].lower(), r["pane"])
-        window_label = pane_window.get(current_pane, "-")
-        resolved.append((r, current_pane, window_label))
     resolved.sort(key=lambda t: t[2])
 
     if details:
@@ -1577,8 +1679,38 @@ def cmd_status(argv: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def cmd_cleanup(argv: list[str]) -> None:
+    """Cleanup stale files, or remove a single selected session state file."""
+    selector = ""
+    rest = list(argv)
+    while rest:
+        tok = rest.pop(0)
+        if tok.startswith("-"):
+            print(f"error: unknown option '{tok}'", file=sys.stderr)
+            sys.exit(1)
+        if selector:
+            print("error: cleanup accepts at most one target selector", file=sys.stderr)
+            sys.exit(1)
+        selector = tok
+
+    if not selector:
+        cleanup_stale_files()
+        print("cleanup: removed stale files")
+        return
+
+    sessions = _load_sessions()
+    selected = _select_session_files(sessions, selector)
+    target = selected[0].get("state_file", "")
+    if not target:
+        print(f"error: selected session has no state file: {selector}", file=sys.stderr)
+        sys.exit(1)
+
+    Path(target).unlink(missing_ok=True)
+    print(f"cleanup: removed {target}")
+
+
 def cleanup_stale_files() -> None:
-    """Remove pid/log/message files for watchers that are no longer running."""
+    """Remove files for watchers that are no longer running."""
     # PID files for dead processes.
     for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
         if not is_running_pid_file(pf):
@@ -1586,12 +1718,20 @@ def cleanup_stale_files() -> None:
     if not is_running_pid_file(LEGACY_PID_FILE):
         Path(LEGACY_PID_FILE).unlink(missing_ok=True)
 
-    # Build the set of known keys once (single ps scan).
-    known = collect_known_keys()
+    # Build set of live watcher keys/threads (single ps scan).
+    live_keys: set[str] = set()
+    live_threads: set[str] = set()
+    for r in watcher_rows():
+        k = key_from_pane(r["pane"])
+        if k:
+            live_keys.add(k)
+        tid = r.get("thread", "")
+        if tid:
+            live_threads.add(tid.lower())
 
-    # Log files for unknown keys.
+    # Log files for dead watchers.
     keep_logs: set[str] = set()
-    for k in known:
+    for k in live_keys:
         keep_logs.add(watch_log_for_key(k))
         keep_logs.add(run_log_for_key(k))
     for pat in (
@@ -1602,13 +1742,12 @@ def cleanup_stale_files() -> None:
             if lf not in keep_logs:
                 Path(lf).unlink(missing_ok=True)
 
-    # Message meta files for unknown keys.
-    keep_meta: set[str] = set()
-    for k in known:
-        keep_meta.add(message_meta_file_for_key(k))
-    for mf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.message.local.txt")):
-        if mf not in keep_meta:
-            Path(mf).unlink(missing_ok=True)
+    # Session files for threads without a running watcher.
+    for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
+        base = os.path.basename(sf)
+        tid = base.removeprefix("acw_session.").removesuffix(".json")
+        if tid.lower() not in live_threads:
+            Path(sf).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1627,7 +1766,7 @@ def main() -> None:
     # Only clean up stale files on commands that mutate state.  Read-only
     # commands (status, pause, resume) skip the cleanup overhead (ps scan +
     # multiple globs).
-    if subcmd in ("start", "stop", "restart", "restart-all", "edit"):
+    if subcmd in ("start", "stop", "restart", "restart-all", "edit", "cleanup"):
         cleanup_stale_files()
 
     commands = {
@@ -1639,15 +1778,17 @@ def main() -> None:
         "resume-all": lambda _: cmd_resume([]),
         "restart": cmd_restart,
         "restart-all": cmd_restart_all,
+        "cleanup": cmd_cleanup,
         "status": cmd_status,
         "edit": cmd_edit,
+        "_window-renamed": cmd_window_renamed,
     }
 
     if subcmd in commands:
         commands[subcmd](rest)
     else:
         print(
-            "usage: auto_continue_watchd.py {start|stop|pause|pause-all|resume|resume-all|restart|restart-all|status|edit} "
+            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|restart-all|cleanup|status|edit} "
             "[pane-id|window-index|session:window] [thread-id|auto] "
             "[--message TEXT | --message-file FILE]",
             file=sys.stderr,

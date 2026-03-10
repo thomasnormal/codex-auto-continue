@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Auto-continue watcher that does not use Codex notify hooks.
 
-It tails ~/.codex/log/codex-tui.log and sends a prompt to a tmux pane whenever
-Codex emits a turn-complete signal (`needs_follow_up=false`) for a watched
-thread/turn.
+It tails ``~/.codex/log/codex-tui.log`` and sends a prompt to a tmux pane when
+Codex emits a turn-complete signal for a watched thread/turn. Older Codex
+builds log ``needs_follow_up=false`` and newer builds log
+``codex_core::tasks: close``.
 """
 
 from __future__ import annotations
@@ -16,19 +17,58 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import threading
 from typing import Optional
+
+try:
+    from watchdog.observers import Observer as _WatchdogObserver
+    from watchdog.events import FileSystemEventHandler as _FSHandler
+
+    class _WakeHandler(_FSHandler):
+        """Signal the main loop when a watched file is modified or created."""
+
+        def __init__(self, wake: threading.Event, paths: set[str]):
+            self.wake = wake
+            self.paths = paths
+
+        def on_modified(self, event):
+            if not event.is_directory and event.src_path in self.paths:
+                self.wake.set()
+
+        def on_created(self, event):
+            if not event.is_directory and event.src_path in self.paths:
+                self.wake.set()
+except ImportError:
+    _WatchdogObserver = None  # type: ignore[assignment,misc]
 
 EVENT_RE = re.compile(
     r"session_loop\{thread_id=([0-9a-f\-]+)\}.*post sampling token usage "
     r"turn_id=([^ ]+).*needs_follow_up=(true|false)"
 )
 
+TASK_CLOSE_RE = re.compile(
+    r'session_loop\{thread_id=([0-9a-f\-]+)\}.*'
+    r'turn\{[^}]*turn.id=([^ ]+)[^}]*\}: codex_core::tasks: close\b'
+)
+
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+STATE_DIR = Path.home() / ".codex"
+
+
+def _session_state_path(thread_id: str) -> Path:
+    return STATE_DIR / f"acw_session.{thread_id}.json"
 
 ROLLOUT_RE = re.compile(
     r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
+
+THREAD_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+def is_thread_id(s: str) -> bool:
+    return bool(THREAD_ID_RE.fullmatch(s))
 
 CHANNEL_CLOSED_RE = re.compile(
     r"session_loop\{thread_id=([0-9a-f\-]+)\}.*(?:channel closed|failed to record rollout)"
@@ -36,6 +76,7 @@ CHANNEL_CLOSED_RE = re.compile(
 
 HEALTH_CHECK_INTERVAL = 30.0   # seconds between periodic health checks
 ROLLOUT_STALE_SECS = 300.0     # rollout file considered stale after 5 minutes
+ROLLOUT_CHANNEL_CLOSED_GRACE_SECS = 5.0
 
 
 def find_rollout_file(thread_id: str, sessions_dir: Path) -> Optional[Path]:
@@ -64,6 +105,123 @@ def parse_rollout_event(line: str) -> Optional[str]:
     if payload.get("type") != "task_complete":
         return None
     return payload.get("turn_id")
+
+
+def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
+    """Return a normalized completion event from codex-tui.log."""
+    m = EVENT_RE.search(line)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+
+    m = TASK_CLOSE_RE.search(line)
+    if m:
+        return m.group(1), m.group(2), "false"
+
+    return None
+
+
+def compute_health(
+    *,
+    watched_thread: str,
+    rollout_path: Optional[Path],
+    watcher_start: float,
+    now: float,
+    rollout_channel_closed: bool,
+    rollout_channel_closed_at: float,
+    codex_log_completion_seen: bool,
+) -> tuple[str, str]:
+    """Compute watcher health from the current event-source state.
+
+    `codex-tui.log` is the primary completion source. Once we have observed a
+    completion event there for the watched thread, missing/stale rollout data is
+    no longer an error condition.
+    """
+    if rollout_channel_closed:
+        if codex_log_completion_seen:
+            return "warn", "rollout channel closed; using codex log"
+        if rollout_channel_closed_at and now - rollout_channel_closed_at < ROLLOUT_CHANNEL_CLOSED_GRACE_SECS:
+            return "ok", ""
+        return "error", "rollout channel closed"
+
+    if codex_log_completion_seen:
+        return "ok", ""
+
+    if rollout_path is not None and rollout_path.exists():
+        try:
+            stale_secs = now - rollout_path.stat().st_mtime
+            if stale_secs > ROLLOUT_STALE_SECS and now - watcher_start > ROLLOUT_STALE_SECS:
+                return "stale", f"rollout no writes {int(stale_secs / 60)}m"
+        except OSError:
+            pass
+        return "ok", ""
+
+    if watched_thread and now - watcher_start > 60:
+        return "warn", "no rollout file found"
+
+    return "ok", ""
+
+
+def _parse_rollout_line_type(line: str) -> Optional[str]:
+    """Return the event sub-type for a rollout JSONL line, or None."""
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    payload = obj.get("payload")
+    if isinstance(payload, dict):
+        return payload.get("type")
+    return obj.get("type")
+
+
+def _check_rollout_tail_for_pending(
+    rollout_path: Path,
+    watched_thread: str,
+    last_sent_turn: str,
+    last_sent_thread: str,
+    watch_log: Path,
+) -> Optional[tuple[str, str, str]]:
+    """Scan backwards from EOF for a task_complete not yet followed by a user_message.
+
+    Returns a synthetic event tuple ``(thread_id, turn_id, "false")`` if codex
+    appears idle and we haven't already responded, else ``None``.
+    """
+    try:
+        file_size = rollout_path.stat().st_size
+    except OSError:
+        return None
+    if file_size == 0:
+        return None
+
+    # Read up to 2 MB from the end — task_complete can be followed by large
+    # response_item / token_count events before the file goes quiet.
+    tail_bytes = min(file_size, 2 * 1024 * 1024)
+    try:
+        with rollout_path.open("rb") as f:
+            f.seek(-tail_bytes, os.SEEK_END)
+            tail = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    # Walk lines in reverse.  If we hit a user_message first, codex already
+    # received new input → no action.  If we hit task_complete first, codex
+    # is idle and we should send a continue.
+    for line in reversed(tail.splitlines()):
+        etype = _parse_rollout_line_type(line)
+        if etype == "user_message":
+            return None  # new turn already started
+        if etype == "task_complete":
+            turn_id = parse_rollout_event(line)
+            if not turn_id:
+                return None
+            if turn_id == last_sent_turn and watched_thread == last_sent_thread:
+                return None  # already responded to this turn
+            append_log(
+                watch_log,
+                f"startup: found pending task_complete turn={turn_id}",
+            )
+            return (watched_thread, turn_id, "false")
+
+    return None
 
 
 def find_latest_rollout(sessions_dir: Path) -> Optional[tuple[str, Path]]:
@@ -158,6 +316,22 @@ def tmux_pane_exists(pane: str) -> bool:
     return rc.returncode == 0
 
 
+def tmux_window_name(pane: str) -> str:
+    """Return the tmux window name for *pane*, or '' on failure."""
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{window_name}"])
+    if rc.returncode == 0 and rc.stdout:
+        return rc.stdout.strip()
+    return ""
+
+
+def tmux_window_index(pane: str) -> str:
+    """Return the tmux window index for *pane*, or '' on failure."""
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{window_index}"])
+    if rc.returncode == 0 and rc.stdout:
+        return rc.stdout.strip()
+    return ""
+
+
 def tmux_pane_active(pane: str) -> bool:
     rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_active}"])
     return rc.returncode == 0 and rc.stdout.strip() == "1"
@@ -219,65 +393,58 @@ def read_state(path: Path) -> dict:
 def write_state(path: Path, state: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(state, indent=2, sort_keys=True))
+        os.replace(tmp, str(path))
     except OSError:
-        pass  # disk full / read-only — keep running
+        try:
+            os.unlink(tmp)
+        except (OSError, UnboundLocalError):
+            pass
+
+
+def thread_from_codex_pid(pid: str) -> Optional[str]:
+    """If *pid* is a codex process, return its thread_id from open rollout fds."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
+        if exe.removesuffix(" (deleted)") != "codex":
+            return None
+    except OSError:
+        return None
+    try:
+        for entry in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                target = os.readlink(f"/proc/{pid}/fd/{entry}")
+            except OSError:
+                continue
+            m = ROLLOUT_RE.search(os.path.basename(target))
+            if m:
+                return m.group(1).lower()
+    except OSError:
+        pass
+    return None
 
 
 def discover_thread_for_pane(pane: str) -> Optional[str]:
-    """Discover the thread_id for the codex process running in *pane*.
-
-    Walks the pane's process tree, finds any ``codex`` process, then
-    inspects ``/proc/<pid>/fd/`` for an open rollout JSONL file and
-    extracts the thread_id from its filename.
-    """
-    # Get the shell PID for the pane.
-    rc = subprocess.run(
-        ["tmux", "list-panes", "-t", pane, "-F", "#{pane_pid}"],
-        capture_output=True, text=True, check=False,
-    )
+    """Discover the thread_id for the codex process running in *pane*."""
+    rc = run_tmux(["list-panes", "-t", pane, "-F", "#{pane_pid}"])
     if rc.returncode != 0 or not rc.stdout.strip():
         return None
-    shell_pid = rc.stdout.strip()
-
-    # Walk the process tree to find codex processes.
     try:
         result = subprocess.run(
-            ["pstree", "-p", shell_pid],
+            ["pstree", "-p", rc.stdout.strip()],
             capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
             return None
     except FileNotFoundError:
         return None
-
-    # Extract all PIDs from the pstree output.
-    pids = re.findall(r"\((\d+)\)", result.stdout)
-
-    # Check each PID for a codex process with an open rollout file.
-    seen_codex = False
-    for pid in pids:
-        try:
-            exe_name = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
-        except OSError:
-            continue
-        if exe_name != "codex":
-            continue
-        if seen_codex:
-            continue  # skip thread TIDs — same process, same fd table
-        seen_codex = True
-        fd_dir = f"/proc/{pid}/fd"
-        try:
-            for entry in os.listdir(fd_dir):
-                try:
-                    target = os.readlink(os.path.join(fd_dir, entry))
-                except OSError:
-                    continue
-                m = ROLLOUT_RE.search(os.path.basename(target))
-                if m:
-                    return m.group(1).lower()
-        except OSError:
-            continue
+    for pid in re.findall(r"\((\d+)\)", result.stdout):
+        tid = thread_from_codex_pid(pid)
+        if tid:
+            return tid
     return None
 
 
@@ -292,11 +459,11 @@ def discover_thread_id(log_path: Path, pane: str = "") -> Optional[str]:
         lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
         lines = []
-    # Pick most recent thread id with a post-sampling line.
+    # Pick most recent thread id with a completion signal.
     for line in reversed(lines[-4000:]):
-        m = EVENT_RE.search(line)
-        if m:
-            return m.group(1)
+        event = parse_codex_log_event(line)
+        if event:
+            return event[0]
     # Fallback: discover from rollout session files (new-codex path).
     result = find_latest_rollout(SESSIONS_DIR)
     if result:
@@ -329,22 +496,27 @@ def main() -> int:
         sys.stderr.write(f"auto_continue_logwatch: tmux pane not found: {args.pane}\n")
         return 2
 
-    state_file = Path(args.state_file) if args.state_file else (cwd / ".codex" / "auto_continue_logwatch.state.local.json")
+    state_file = Path(args.state_file) if args.state_file else _session_state_path("unknown")
     watch_log = Path(args.watch_log) if args.watch_log else (cwd / ".codex" / "auto_continue_logwatch.log")
     codex_log = Path(args.log_path)
 
     msg = args.message
     if args.message_file:
         msg = Path(args.message_file).read_text(encoding="utf-8")
-
-    state = read_state(state_file)
-    last_sent_turn = str(state.get("last_sent_turn", ""))
-    last_sent_thread = str(state.get("last_sent_thread", state.get("thread_id", "")))
+    # Strip comment lines (starting with #).
+    msg = "\n".join(
+        line for line in msg.splitlines() if not line.lstrip().startswith("#")
+    ).strip()
 
     auto_mode = args.thread_id == "auto"
     watched_thread = args.thread_id
     if watched_thread == "auto":
         watched_thread = discover_thread_id(codex_log, pane=args.pane) or ""
+
+    # Read initial state from session state file.
+    state = read_state(state_file)
+    last_sent_turn = str(state.get("last_sent_turn", ""))
+    last_sent_thread = str(state.get("last_sent_thread", state.get("thread_id", "")))
 
     if not watched_thread:
         append_log(watch_log, "warn: could not auto-discover thread id yet; waiting for first event")
@@ -361,8 +533,40 @@ def main() -> int:
     health = "ok"
     health_detail = ""
     last_health_check = 0.0
-    channel_closed_seen = False
+    rollout_channel_closed = False
+    rollout_channel_closed_at = 0.0
+    codex_log_completion_seen = False
     watcher_start = time.time()
+
+    def update_health(now: float) -> None:
+        nonlocal health, health_detail
+        new_health, new_detail = compute_health(
+            watched_thread=watched_thread,
+            rollout_path=rollout_path,
+            watcher_start=watcher_start,
+            now=now,
+            rollout_channel_closed=rollout_channel_closed,
+            rollout_channel_closed_at=rollout_channel_closed_at,
+            codex_log_completion_seen=codex_log_completion_seen,
+        )
+        if new_health == health and new_detail == health_detail:
+            return
+        health = new_health
+        health_detail = new_detail
+        if health_detail:
+            append_log(watch_log, f"health: {health} - {health_detail}")
+        else:
+            append_log(watch_log, f"health: {health}")
+
+    # Initialize session state file.
+    if watched_thread and is_thread_id(watched_thread):
+        state["thread_id"] = watched_thread
+        wn = tmux_window_name(args.pane)
+        if wn:
+            state["name"] = wn
+        if "message" not in state:
+            state["message"] = msg
+        write_state(state_file, state)
 
     # Try to locate the rollout file for the initial thread right away.
     if watched_thread:
@@ -370,9 +574,63 @@ def main() -> int:
         if rollout_path:
             append_log(watch_log, f"rollout: watching {rollout_path.name}")
 
+    # Check if codex already finished its turn before we started.  Scan the
+    # tail of the rollout for a task_complete that hasn't been followed by a
+    # user_message (which would mean a new turn already started).  If found,
+    # inject it so the first loop iteration sends the continue.
+    pending_initial_event: Optional[tuple[str, str, str]] = None
+    if rollout_path and rollout_path.exists() and watched_thread:
+        pending_initial_event = _check_rollout_tail_for_pending(
+            rollout_path, watched_thread, last_sent_turn, last_sent_thread,
+            watch_log,
+        )
+
+    # --- Set up inotify file watching (falls back to polling if unavailable) ---
+    _wake_event = threading.Event()
+    _watched_paths: set[str] = set()
+    _watched_dirs: set[str] = set()
+    _observer = None
+
+    def _add_inotify_watch(file_path: Path) -> None:
+        """Register a file for inotify monitoring."""
+        nonlocal _observer
+        if _WatchdogObserver is None:
+            return
+        path_str = str(file_path.resolve())
+        if path_str in _watched_paths:
+            return
+        _watched_paths.add(path_str)
+        dir_str = str(file_path.resolve().parent)
+        if dir_str in _watched_dirs:
+            return
+        if not os.path.isdir(dir_str):
+            return
+        if _observer is None:
+            _observer = _WatchdogObserver()
+            _observer.daemon = True
+            _observer._acw_handler = _WakeHandler(_wake_event, _watched_paths)
+            _observer.start()
+        try:
+            _observer.schedule(_observer._acw_handler, dir_str, recursive=False)
+        except OSError:
+            return
+        _watched_dirs.add(dir_str)
+
+    codex_log.parent.mkdir(parents=True, exist_ok=True)
+    _add_inotify_watch(codex_log)
+    if rollout_path:
+        _add_inotify_watch(rollout_path)
+
     while True:
-        events: list[tuple[str, str, str]] = []
+        _wake_event.clear()
+
+        events: list[tuple[str, str, str, str]] = []
         tnow = time.time()
+
+        # Inject the pending startup event on the first iteration only.
+        if pending_initial_event is not None:
+            events.append((*pending_initial_event, "rollout"))
+            pending_initial_event = None
 
         # --- Poll codex-tui.log ---
         if codex_fh is not None or codex_log.exists():
@@ -383,16 +641,15 @@ def main() -> int:
                 line = codex_fh.readline()
                 if not line:
                     break
-                m = EVENT_RE.search(line)
-                if m:
-                    events.append((m.group(1), m.group(2), m.group(3)))
-                elif not channel_closed_seen and watched_thread:
+                event = parse_codex_log_event(line)
+                if event:
+                    events.append((*event, "codex_log"))
+                elif not rollout_channel_closed and watched_thread:
                     cm = CHANNEL_CLOSED_RE.search(line)
                     if cm and cm.group(1) == watched_thread:
-                        channel_closed_seen = True
-                        health = "error"
-                        health_detail = "rollout channel closed"
-                        append_log(watch_log, f"health: {health} - {health_detail}")
+                        rollout_channel_closed = True
+                        rollout_channel_closed_at = time.time()
+                        update_health(time.time())
             # Detect truncation/rotation.
             try:
                 if codex_fh.tell() > codex_log.stat().st_size:
@@ -410,6 +667,7 @@ def main() -> int:
                 if found:
                     rollout_path = found
                     append_log(watch_log, f"rollout: watching {rollout_path.name}")
+                    _add_inotify_watch(rollout_path)
             elif auto_mode:
                 result = find_latest_rollout(SESSIONS_DIR)
                 if result:
@@ -419,6 +677,7 @@ def main() -> int:
                         watch_log,
                         f"watch: auto-selected thread_id={watched_thread} from rollout",
                     )
+                    _add_inotify_watch(rollout_path)
 
         # --- Poll rollout JSONL ---
         if rollout_path is not None and (rollout_fh is not None or rollout_path.exists()):
@@ -431,7 +690,7 @@ def main() -> int:
                     break
                 turn_id = parse_rollout_event(line)
                 if turn_id and watched_thread:
-                    events.append((watched_thread, turn_id, "false"))
+                    events.append((watched_thread, turn_id, "false", "rollout"))
             # Detect truncation/rotation.
             try:
                 if rollout_fh.tell() > rollout_path.stat().st_size:
@@ -442,13 +701,16 @@ def main() -> int:
                 rollout_fh = None
 
         # --- Process collected events ---
-        for thread_id, turn_id, needs_follow_up in events:
+        for thread_id, turn_id, needs_follow_up, source in events:
             tnow = time.time()
 
             if auto_mode:
                 if not watched_thread:
                     watched_thread = thread_id
                     watched_last_event_at = tnow
+                    rollout_channel_closed = False
+                    rollout_channel_closed_at = 0.0
+                    codex_log_completion_seen = source == "codex_log"
                     append_log(watch_log, f"watch: auto-selected thread_id={watched_thread}")
                 elif thread_id == watched_thread:
                     watched_last_event_at = tnow
@@ -456,6 +718,9 @@ def main() -> int:
                     prev = watched_thread
                     watched_thread = thread_id
                     watched_last_event_at = tnow
+                    rollout_channel_closed = False
+                    rollout_channel_closed_at = 0.0
+                    codex_log_completion_seen = source == "codex_log"
                     # Reset rollout tracking for the new thread.
                     if rollout_fh is not None:
                         rollout_fh.close()
@@ -472,6 +737,9 @@ def main() -> int:
 
             if thread_id != watched_thread:
                 continue
+            if source == "codex_log":
+                codex_log_completion_seen = True
+                update_health(tnow)
             if needs_follow_up != "false":
                 continue
             if turn_id == last_sent_turn and thread_id == last_sent_thread:
@@ -501,15 +769,11 @@ def main() -> int:
                 last_send_time = tnow
                 last_sent_turn = turn_id
                 last_sent_thread = thread_id
-                if health != "ok":
-                    health = "ok"
-                    health_detail = ""
-                    channel_closed_seen = False
-                    append_log(watch_log, "health: ok (continue sent)")
+                now = now_ts()
                 state["last_sent_turn"] = turn_id
                 state["last_sent_thread"] = thread_id
                 state["thread_id"] = watched_thread
-                state["last_continue_at"] = now_ts()
+                state["last_continue_at"] = now
                 state["health"] = health
                 state["health_detail"] = health_detail
                 write_state(state_file, state)
@@ -532,7 +796,6 @@ def main() -> int:
         # --- Periodic health check ---
         if tnow - last_health_check > HEALTH_CHECK_INTERVAL:
             last_health_check = tnow
-            prev_health = health
 
             # Re-discover thread from pane's codex process in case the
             # session was restarted with a new thread.
@@ -548,44 +811,43 @@ def main() -> int:
                     rollout_path = find_rollout_file(watched_thread, SESSIONS_DIR)
                     if rollout_path:
                         append_log(watch_log, f"rollout: watching {rollout_path.name}")
+                        _add_inotify_watch(rollout_path)
                     last_rollout_scan = tnow
-                    channel_closed_seen = False
-                    health = "ok"
-                    health_detail = ""
+                    rollout_channel_closed = False
+                    rollout_channel_closed_at = 0.0
+                    codex_log_completion_seen = False
                     append_log(
                         watch_log,
                         f"watch: pane-rebind thread_id={prev_thread} -> {watched_thread}",
                     )
+                    # Update state file for the new thread.
+                    state_file = _session_state_path(watched_thread)
+                    state = {"thread_id": watched_thread, "message": msg}
+                    wn = tmux_window_name(args.pane)
+                    if wn:
+                        state["name"] = wn
+                    write_state(state_file, state)
 
-            if not channel_closed_seen:
-                if rollout_path is not None and rollout_path.exists():
-                    try:
-                        stale_secs = tnow - rollout_path.stat().st_mtime
-                        if stale_secs > ROLLOUT_STALE_SECS and tnow - watcher_start > ROLLOUT_STALE_SECS:
-                            health = "stale"
-                            health_detail = f"rollout no writes {int(stale_secs / 60)}m"
-                        elif health == "stale":
-                            health = "ok"
-                            health_detail = ""
-                    except OSError:
-                        pass
-                elif watched_thread and tnow - watcher_start > 60:
-                    if health != "error":
-                        health = "warn"
-                        health_detail = "no rollout file found"
+            update_health(tnow)
 
-            if health != prev_health:
-                if health == "ok":
-                    append_log(watch_log, "health: ok")
-                else:
-                    append_log(watch_log, f"health: {health} - {health_detail}")
-
+            now = now_ts()
             state["health"] = health
             state["health_detail"] = health_detail
-            state["health_ts"] = now_ts()
+            state["health_ts"] = now
             write_state(state_file, state)
 
-        time.sleep(0.2)
+        # Wait for inotify file notification, or fall back to timeout for
+        # periodic tasks (rollout discovery, health checks).
+        if not _wake_event.is_set():
+            if _observer is None:
+                # No inotify — poll at a reasonable rate.
+                timeout = 1.0
+            elif rollout_path is None:
+                # Need periodic scan to discover rollout file.
+                timeout = 5.0
+            else:
+                timeout = HEALTH_CHECK_INTERVAL
+            _wake_event.wait(timeout=timeout)
 
 
 if __name__ == "__main__":
