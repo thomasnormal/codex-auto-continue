@@ -212,6 +212,26 @@ class WatchdUnitTests(unittest.TestCase):
                         acw.cmd_restart(["*"])
         restart_panes.assert_called_once_with(["%1", "%2"])
 
+    def test_restart_without_target_restarts_all_live_panes(self):
+        rows = [
+            {"pane": "%1", "pid": "101"},
+            {"pane": "%2", "pid": "202"},
+        ]
+
+        def fake_tmux(*args):
+            if args[:4] == ("display-message", "-p", "-t", "%1"):
+                return "%1\n"
+            if args[:4] == ("display-message", "-p", "-t", "%2"):
+                return "%2\n"
+            return None
+
+        with patch.object(acw, "watcher_rows", return_value=rows):
+            with patch.object(acw, "run_tmux", side_effect=fake_tmux):
+                with patch.object(acw, "_restart_panes") as restart_panes:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        acw.cmd_restart([])
+        restart_panes.assert_called_once_with(["%1", "%2"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1158,18 +1158,10 @@ def cmd_restart(argv: list[str]) -> None:
         target = rest.pop(0)
     else:
         target = ""
-    if not target:
-        print(
-            "error: pane target is required\n"
-            "usage: auto_continue_watchd.py restart <pane-id|window-index|session:window> "
-            "[thread-id|auto] [--message TEXT | --message-file FILE]",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    if target == "*":
+    if not target or target == "*":
         if rest:
-            print("error: restart '*' does not accept additional arguments", file=sys.stderr)
+            selector = "restart '*'" if target == "*" else "restart"
+            print(f"error: {selector} does not accept additional arguments", file=sys.stderr)
             sys.exit(2)
         panes = sorted({r["pane"] for r in watcher_rows() if r.get("pane")})
         if not panes:

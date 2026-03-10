@@ -22,16 +22,16 @@ fails instead of running with an unknown thread.
 ```
 start       <target> [thread-id] [--message TEXT | --message-file FILE]
 stop        [target]
-restart     <target>
 edit        <target>
 pause       [target|*]
 resume      [target|*]
-restart     <target|*>
+restart     [target]
 cleanup     [target]
 status      [target]
 ```
 
 `<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
+`restart` with no target restarts all running watchers.
 
 ## Custom Message
 
