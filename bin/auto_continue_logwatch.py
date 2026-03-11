@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -285,6 +286,8 @@ def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.Comp
 
 
 PANE_ERROR_PATTERNS = [
+    re.compile(r"conversation interrupted", re.IGNORECASE),
+    re.compile(r"something went wrong\? hit /feedback", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),
     re.compile(r"try again at\b", re.IGNORECASE),
@@ -310,6 +313,17 @@ def check_pane_for_errors(pane: str) -> Optional[str]:
         if m:
             return m.group(0)
     return None
+
+
+def auto_pause_current_watcher(reason: str, watch_log: Path, state_file: Path, state: dict) -> None:
+    """Record an auto-pause reason and stop the current watcher."""
+    now = now_ts()
+    next_state = dict(state)
+    next_state["health_detail"] = f"auto-paused: {reason}"
+    next_state["health_ts"] = now
+    write_state(state_file, next_state)
+    append_log(watch_log, f"pause: auto-pausing watcher ({reason})")
+    os.kill(os.getpid(), signal.SIGSTOP)
 
 
 def tmux_pane_exists(pane: str) -> bool:
@@ -767,10 +781,7 @@ def main() -> int:
 
             pane_error = check_pane_for_errors(args.pane)
             if pane_error:
-                append_log(
-                    watch_log,
-                    f"skip: error detected in pane ({pane_error!r}) turn={turn_id}",
-                )
+                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
                 continue
 
             ok, send_error = tmux_send(args.pane, msg, max(0.0, args.enter_delay_secs))

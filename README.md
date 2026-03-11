@@ -179,6 +179,11 @@ paused: pane=%1 pid=48201
 paused: pane=%2 pid=48305
 ```
 
+Watchers also auto-pause when the pane shows a Codex-level interruption or
+account error banner, such as `Conversation interrupted`, auth failures, or
+quota/usage-limit errors. Resume them explicitly with `acw resume <target>`
+after you have handled the issue in the pane.
+
 ### Edit message for a running watcher
 
 ```

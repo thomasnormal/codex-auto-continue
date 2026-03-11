@@ -114,6 +114,34 @@ class LogwatchUnitTests(unittest.TestCase):
         finally:
             log_path.unlink(missing_ok=True)
 
+    def test_check_pane_for_errors_matches_conversation_interrupted(self):
+        text = (
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "Something went wrong? Hit /feedback to report the issue.\n"
+        )
+        with patch.object(logwatch, "tmux_capture_pane", return_value=text):
+            reason = logwatch.check_pane_for_errors("%11")
+        self.assertEqual("Conversation interrupted", reason)
+
+    def test_auto_pause_current_watcher_stops_process_for_pane_error(self):
+        state = {"thread_id": THREAD, "message": "continue"}
+        with patch.object(logwatch, "append_log") as append_log:
+            with patch.object(logwatch, "write_state") as write_state:
+                with patch.object(logwatch.os, "kill") as kill:
+                    with patch.object(logwatch, "now_ts", return_value="2026-03-11 12:34:56"):
+                        logwatch.auto_pause_current_watcher(
+                            "Conversation interrupted",
+                            Path("/tmp/acw.log"),
+                            Path("/tmp/acw.json"),
+                            state,
+                        )
+        append_log.assert_called_once()
+        write_state.assert_called_once()
+        written_state = write_state.call_args.args[1]
+        self.assertEqual("auto-paused: Conversation interrupted", written_state["health_detail"])
+        self.assertEqual("2026-03-11 12:34:56", written_state["health_ts"])
+        kill.assert_called_once_with(logwatch.os.getpid(), logwatch.signal.SIGSTOP)
+
     def test_compute_health_warns_when_rollout_channel_closed_but_codex_log_works(self):
         health, detail = logwatch.compute_health(
             watched_thread=THREAD,
