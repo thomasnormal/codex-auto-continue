@@ -118,6 +118,26 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertIn("RESULT: ok", doctor.stdout, self.harness.diagnostics())
         self.assertIn(f"Codex thread detected: {first_turn.thread_id}", doctor.stdout, self.harness.diagnostics())
 
+    def test_manager_doctor_reports_missing_thread_for_plain_shell_pane(self):
+        self.harness.rename_window("shellpane")
+
+        doctor = self.harness.run_manager_in_current_pane("doctor", check=False)
+
+        self.assertNotEqual(0, doctor.returncode, self.harness.diagnostics())
+        self.assertIn("pane resolved:", doctor.stdout, self.harness.diagnostics())
+        self.assertIn("could not detect a Codex thread", doctor.stdout, self.harness.diagnostics())
+        self.assertIn("RESULT: error", doctor.stdout, self.harness.diagnostics())
+
+    def test_manager_start_fails_on_plain_shell_pane_without_thread(self):
+        self.harness.rename_window("plain")
+
+        start = self.harness.run_manager("start", "plain", "--message", "test continue", check=False)
+
+        self.assertNotEqual(0, start.returncode, self.harness.diagnostics())
+        self.assertIn("resolved: target=plain pane=", start.stdout, self.harness.diagnostics())
+        self.assertIn("could not determine thread_id", start.stderr, self.harness.diagnostics())
+        self.assertFalse(self.harness.manager_pid_file.exists(), self.harness.diagnostics())
+
     def test_manager_status_reports_dead_after_real_watcher_exit(self):
         self.harness.rename_window("deadwatch")
         self.harness.start_codex("say the word hello and nothing else")
@@ -130,6 +150,19 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("deadwatch", status.stdout, self.harness.diagnostics())
         self.assertIn("STATE:           dead", status.stdout, self.harness.diagnostics())
+
+    def test_manager_status_summary_shows_recent_last_agent_text(self):
+        token = "CONTROLPANELTOKEN"
+        self.harness.rename_window("summary")
+        self.harness.start_codex(f"say exactly {token} and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        self.harness.run_manager("start", "summary", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("LAST_AGENT", status.stdout, self.harness.diagnostics())
+        self.assertIn(token, status.stdout, self.harness.diagnostics())
 
     def test_manager_recovers_after_private_tmux_socket_recreation(self):
         self.harness.rename_window("socket")

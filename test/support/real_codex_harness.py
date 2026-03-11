@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex
@@ -17,9 +16,6 @@ from typing import Optional
 
 
 STALE_HARNESS_GRACE_SECS = 300.0
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
 SHELL_SNAPSHOT_RE = re.compile(r"session_init:shell_snapshot\{thread_id=([0-9a-fA-F\-]+)\}")
 POST_SAMPLING_RE = re.compile(
     r"session_loop\{thread_id=([0-9a-fA-F\-]+)\}.*post sampling token usage "
@@ -105,31 +101,6 @@ def _completion_sources_for_thread(lines: list[str], thread_id: str) -> set[str]
         close = TASK_CLOSE_RE.search(line)
         if close and close.group(1) == thread_id:
             sources.add("codex_log_task_close")
-    return sources
-
-
-def _rollout_sources_for_thread(home_dir: Path, thread_id: str) -> set[str]:
-    sources: set[str] = set()
-    sessions_dir = home_dir / ".codex" / "sessions"
-    if not sessions_dir.is_dir():
-        return sources
-    for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
-        if thread_id.lower() not in path.name.lower():
-            continue
-        try:
-            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                try:
-                    obj = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                if obj.get("type") != "event_msg":
-                    continue
-                payload = obj.get("payload")
-                if isinstance(payload, dict) and payload.get("type") == "task_complete":
-                    sources.add("rollout_task_complete")
-                    return sources
-        except OSError:
-            continue
     return sources
 
 
@@ -555,7 +526,6 @@ class RealCodexHarness:
             if not thread_id:
                 return None
             sources = _completion_sources_for_thread(lines, thread_id)
-            sources.update(_rollout_sources_for_thread(self.home_dir, thread_id))
             if not sources:
                 return None
             return TurnObservation(thread_id=thread_id, sources=sources)
@@ -716,12 +686,6 @@ class RealCodexHarness:
             match = SHELL_SNAPSHOT_RE.search(line)
             if match:
                 return match.group(1)
-        sessions_dir = self.home_dir / ".codex" / "sessions"
-        if sessions_dir.is_dir():
-            for path in sorted(sessions_dir.glob("*/*/*/rollout-*.jsonl")):
-                match = THREAD_ID_RE.search(path.name)
-                if match:
-                    return match.group(0)
         return ""
 
     def _line_count(self, path: Path) -> int:

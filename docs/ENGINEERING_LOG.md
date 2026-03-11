@@ -2,6 +2,11 @@
 
 ## 2026-03-11
 
+- Change: removed the remaining rollout-era evidence paths from the isolated real-Codex harness. The contract and integration suites now discover completed turns only from `codex-tui.log` and shell snapshots, matching the production watcher model.
+- Change: tightened the public CLI surface again. `cleanup` is now all-or-nothing, and thread-id selectors remain supported only as the explicit second positional argument to `acw start`.
+- Change: expanded the private real-Codex suite with manager-facing regressions for `doctor` on a plain shell pane, `start` failure on a non-Codex pane, and `status` rendering of a live `LAST_AGENT` snippet.
+- Realization: `acw status` only worked in the main shell because `rich` was installed in the user's `~/.local`, not system-wide. The isolated real-Codex harness changed `HOME`, which exposed that hidden dependency immediately.
+- Change: `acw status` now falls back to a plain-text summary table when `rich` is unavailable, so the tool keeps working in isolated homes and fresh machines.
 - Change: `acw status` now shows a live `LAST_AGENT` snippet extracted from each pane's recent visible Codex output, with a thread-title fallback when no good pane line is available. This makes the summary table act more like a control panel instead of just another timestamp view.
 - Change: sped up the default `acw status` path by skipping the expensive global tmux pane→thread scan. Summary mode now trusts live watcher rows for pane identity and only uses the slower full scan in `--details`, which cut local status latency from about 1.17s to about 0.29s on the main tmux server.
 - Change: removed rollout JSONL from the live watcher path. `auto_continue_logwatch.py` now drives completion from `~/.codex/log/codex-tui.log` only, including startup replay by scanning the recent log tail for a pending completion on the watched thread.

@@ -43,7 +43,7 @@ edit        <target>
 pause       [target|*]
 resume      [target|*]
 restart     [target|*]
-cleanup     [target]
+cleanup
 status      [target]
 doctor      [target]
 ```
@@ -51,9 +51,7 @@ doctor      [target]
 For `start`, `<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
 `stop` with no target stops all running watchers.
 `pause`, `resume`, and `restart` with no target act on all running watchers.
-`cleanup` with no target removes stale watcher files; with a target it removes a
-single thread-keyed session file selected by exact window name or thread-id
-prefix.
+`cleanup` removes stale watcher files.
 `doctor` checks tmux reachability, state-dir writability, Codex auth state, and
 optionally the target pane's thread detection and watcher status.
 
@@ -239,11 +237,14 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 - Codex CLI
 - Linux (uses `/proc` for thread discovery)
 
+`rich` is optional. If it is installed, `acw status` uses the formatted table;
+otherwise it falls back to a plain-text summary.
+
 ## E2E Test
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
 The shell script is a thin wrapper around a shared Python harness and currently
-runs nine real-Codex tests:
+runs twelve real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
@@ -252,7 +253,10 @@ runs nine real-Codex tests:
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
 - a manager integration test that updates a watcher's message through `acw edit <pane>`
 - a manager integration test that verifies `acw doctor` reports a healthy current pane with a detected thread
+- a manager regression test that verifies `acw doctor` reports a missing thread on a plain shell pane
+- a manager regression test that verifies `acw start <window-name>` fails cleanly on a non-Codex pane
 - a manager integration test that reports `dead` after a real watcher process exits
+- a manager integration test that shows recent assistant output in the `LAST_AGENT` status column
 - a manager integration test that recreates a private tmux socket with `kill -USR1` and then starts successfully
 
 The harness always uses a dedicated tmux server on its own socket, so it does

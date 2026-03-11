@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Process manager for auto-continue watchers.
-
-Requires: rich (pip install rich).
-"""
+"""Process manager for auto-continue watchers."""
 
 from __future__ import annotations
 
@@ -74,8 +71,6 @@ DEFAULT_MSG_FILE = os.path.join(STATE_DIR, "auto_continue.message.txt")
 if not os.path.isfile(DEFAULT_MSG_FILE):
     DEFAULT_MSG_FILE = str(REPO_ROOT / "examples" / "messages" / "default_continue_message.txt")
 
-LEGACY_PID_FILE = os.path.join(STATE_DIR, "auto_continue_logwatch.pid")
-
 os.makedirs(STATE_DIR, exist_ok=True)
 
 HELP_TEXT = f"""Usage:
@@ -86,7 +81,7 @@ HELP_TEXT = f"""Usage:
   auto_continue_watchd.py resume [target|*]
   auto_continue_watchd.py restart [target|*]
   auto_continue_watchd.py edit <target>
-  auto_continue_watchd.py cleanup [target]
+  auto_continue_watchd.py cleanup
   auto_continue_watchd.py doctor [target]
 
 Commands:
@@ -97,12 +92,11 @@ Commands:
   resume    Send SIGCONT to one paused watcher or all watchers.
   restart   Restart one watcher or all running watchers.
   edit      Edit the stored continue message for a running watcher, then restart it.
-  cleanup   Remove stale watcher files, or one saved session state by selector.
+  cleanup   Remove stale watcher files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
 Targets:
-  start/edit expect a live tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
-  stop/pause/resume/restart/status/doctor also accept thread ids where that is unambiguous.
+  Commands with a target accept a tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
   pause, resume, and restart accept '*' to act on all watchers. Bare '*' must usually be quoted in the shell.
 
 Examples:
@@ -473,8 +467,7 @@ def resolve_pane_from_window_name(name: str) -> str | None:
 def resolve_pane_target(target: str) -> str:
     """Resolve any pane/window target to a tmux pane id (%N).
 
-    Tries, in order: pane id, window index, tmux window name, thread id,
-    then state file window_name (for watchers whose pane is gone).
+    Tries, in order: pane id, window index, then exact tmux window name.
     """
     if is_pane_id(target):
         return target
@@ -491,19 +484,13 @@ def resolve_pane_target(target: str) -> str:
     if pane and is_pane_id(pane):
         return pane
 
-    # Try as a thread id — find the watcher's pane.
-    if is_thread_id(target):
-        for r in watcher_rows():
-            if r["thread"].lower() == target.lower():
-                return r["pane"]
-
     if _tmux_socket_recovery_hint():
         _print_tmux_unavailable_hint(target)
         sys.exit(1)
 
     print(f"error: no watcher or window found for '{target}'", file=sys.stderr)
     print(
-        "hint: use a pane id ('%6'), window name, thread id, or window index ('2')",
+        "hint: use a pane id ('%6'), window name, or window index ('2')",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1139,25 +1126,10 @@ def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
         print(f"stopped: pane={r['pane']} pid={pid_str}")
 
 
-def _find_watchers_by_thread(thread_id: str) -> list[dict[str, str]]:
-    """Find running watchers whose thread_id matches."""
-    tid = thread_id.lower()
-    return [r for r in watcher_rows() if r["thread"].lower() == tid]
-
-
 def cmd_stop(argv: list[str]) -> None:
     target = argv[0] if argv else ""
 
     if target:
-        # Thread ID — stable identifier.
-        if is_thread_id(target):
-            matches = _find_watchers_by_thread(target)
-            if matches:
-                _stop_watcher_rows(matches)
-                return
-            print(f"not running: thread={target}", file=sys.stderr)
-            return
-
         # Pane ID.
         if is_pane_id(target):
             stop_pane_watchers(target)
@@ -1181,7 +1153,7 @@ def cmd_stop(argv: list[str]) -> None:
 
         print(f"error: no watcher found for '{target}'", file=sys.stderr)
         print(
-            "hint: use a thread id, pane id ('%6'), window name, or window index ('2')",
+            "hint: use a pane id ('%6'), window name, or window index ('2')",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1190,10 +1162,6 @@ def cmd_stop(argv: list[str]) -> None:
     for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
         had_any = True
         stop_pid_file(pf)
-
-    if os.path.isfile(LEGACY_PID_FILE):
-        had_any = True
-        stop_pid_file(LEGACY_PID_FILE)
 
     for r in watcher_rows():
         pid_str = r["pid"]
@@ -1697,11 +1665,36 @@ def _clamp_visual_lines(text: str, max_lines: int, col_width: int) -> str:
     return text
 
 
+def _strip_rich_markup(text: str) -> str:
+    return re.sub(r"\[/?[^\]]*\]", "", text)
+
+
+def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
+    plain_rows: list[tuple[str, str, str, str, str, str]] = []
+    for row in rows_data:
+        plain_rows.append(
+            tuple(_strip_rich_markup(cell).replace("\n", " / ") for cell in row)
+        )
+
+    widths = [len(header) for header in headers]
+    for row in plain_rows:
+        for i, cell in enumerate(row):
+            widths[i] = min(max(widths[i], len(cell)), 60)
+
+    def _fmt(cell: str, width: int) -> str:
+        if len(cell) > width:
+            return cell[: width - 1] + "…"
+        return cell.ljust(width)
+
+    print("  ".join(_fmt(header, widths[i]) for i, header in enumerate(headers)))
+    print("  ".join("-" * widths[i] for i in range(len(headers))))
+    for row in plain_rows:
+        print("  ".join(_fmt(cell, widths[i]) for i, cell in enumerate(row)))
+
+
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     import shutil
-
-    from rich.console import Console
-    from rich.table import Table
 
     # Precompute row data to estimate column widths.
     # (window_pane, state, started, last_acw, last_agent, msg_raw)
@@ -1726,6 +1719,13 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         short_tid = _short_thread_id(tid) if tid else ""
         window_pane = f"{line1}\n[dim]{short_tid}[/dim]" if short_tid else line1
         rows_data.append((window_pane, state_value, started, last_acw, last_agent, msg_raw))
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except ModuleNotFoundError:
+        _status_table_plain(rows_data)
+        return
 
     # Estimate MESSAGE column width from terminal width and other columns.
     term_w = shutil.get_terminal_size((120, 24)).columns
@@ -1840,37 +1840,6 @@ def _load_sessions() -> list[dict[str, str]]:
             "last_continue_at": data.get("last_continue_at", ""),
         })
     return candidates
-
-
-def _select_session_files(
-    sessions: list[dict[str, str]],
-    selector: str,
-) -> list[dict[str, str]]:
-    """Select session rows by exact name or thread-id prefix."""
-    sel = selector.lower()
-    matches = [
-        s for s in sessions
-        if s["thread_id"].lower() == sel
-        or s["thread_id"].lower().startswith(sel)
-        or s.get("name", "").lower() == sel
-    ]
-    if not matches:
-        print(f"error: no session matches '{selector}'", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1:
-        print(
-            f"error: selector '{selector}' is ambiguous; matched {len(matches)} sessions",
-            file=sys.stderr,
-        )
-        for s in matches:
-            name = s.get("name", "") or "-"
-            print(f"  - {name}: {s['thread_id']}", file=sys.stderr)
-        print(
-            "hint: use an exact window name or a longer thread id prefix",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return matches
 
 
 def cmd_status(argv: list[str]) -> None:
@@ -1994,12 +1963,6 @@ def _doctor_resolve_target(target: str) -> tuple[str, str]:
             return pane, ""
         return "", ""
 
-    if target == ".":
-        pane = current_tmux_pane()
-        if pane:
-            return pane, ""
-        return "", "current pane target '.' requires TMUX_PANE in the environment"
-
     if is_pane_id(target):
         return target, ""
 
@@ -2012,12 +1975,6 @@ def _doctor_resolve_target(target: str) -> tuple[str, str]:
     pane = resolve_pane_from_window_name(target)
     if pane and is_pane_id(pane):
         return pane, ""
-
-    if is_thread_id(target):
-        for row in watcher_rows():
-            if row["thread"].lower() == target.lower():
-                return row["pane"], ""
-        return "", f"no watcher found for thread {target}"
 
     if _tmux_socket_recovery_hint():
         return "", _tmux_socket_recovery_hint()
@@ -2097,33 +2054,12 @@ def cmd_doctor(argv: list[str]) -> None:
 
 
 def cmd_cleanup(argv: list[str]) -> None:
-    """Cleanup stale files, or remove a single selected session state file."""
-    selector = ""
-    rest = list(argv)
-    while rest:
-        tok = rest.pop(0)
-        if tok.startswith("-"):
-            print(f"error: unknown option '{tok}'", file=sys.stderr)
-            sys.exit(1)
-        if selector:
-            print("error: cleanup accepts at most one target selector", file=sys.stderr)
-            sys.exit(1)
-        selector = tok
-
-    if not selector:
-        cleanup_stale_files()
-        print("cleanup: removed stale files")
-        return
-
-    sessions = _load_sessions()
-    selected = _select_session_files(sessions, selector)
-    target = selected[0].get("state_file", "")
-    if not target:
-        print(f"error: selected session has no state file: {selector}", file=sys.stderr)
-        sys.exit(1)
-
-    Path(target).unlink(missing_ok=True)
-    print(f"cleanup: removed {target}")
+    """Cleanup stale files."""
+    if argv:
+        print("error: cleanup does not accept a target", file=sys.stderr)
+        sys.exit(2)
+    cleanup_stale_files()
+    print("cleanup: removed stale files")
 
 
 def cleanup_stale_files() -> None:
@@ -2132,8 +2068,6 @@ def cleanup_stale_files() -> None:
     for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
         if not is_running_pid_file(pf):
             Path(pf).unlink(missing_ok=True)
-    if not is_running_pid_file(LEGACY_PID_FILE):
-        Path(LEGACY_PID_FILE).unlink(missing_ok=True)
 
     # Build set of live watcher keys/threads (single ps scan).
     live_keys: set[str] = set()

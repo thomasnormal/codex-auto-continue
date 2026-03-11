@@ -2,6 +2,7 @@ import io
 import json
 import subprocess
 import unittest
+import builtins
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -95,6 +96,50 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 1", text)
         self.assertIn("Ran tests", text)
 
+    def test_status_summary_falls_back_without_rich(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        live_rows = [{
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_file": "",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }]
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.startswith("rich"):
+                raise ModuleNotFoundError("No module named 'rich'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
+                with patch.object(
+                    acw,
+                    "_build_thread_pane_map",
+                    side_effect=AssertionError("summary status should not scan all panes"),
+                ):
+                    with patch.object(acw, "watcher_rows", return_value=live_rows):
+                        with patch.object(acw, "_read_state_json", return_value={}):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                        out = io.StringIO()
+                                        with patch("builtins.__import__", side_effect=fake_import):
+                                            with redirect_stdout(out):
+                                                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("WINDOW/PANE", text)
+        self.assertIn("LAST_AGENT", text)
+        self.assertIn("Ran tests", text)
+
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
             with redirect_stderr(io.StringIO()):
@@ -156,6 +201,12 @@ class WatchdUnitTests(unittest.TestCase):
         rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
         self.assertIn("info:pane checks skipped", rendered)
 
+    def test_doctor_rejects_explicit_dot_target(self):
+        checks, code = acw._doctor_checks(".")
+        self.assertEqual(1, code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+        self.assertIn("error:could not resolve target '.'", rendered)
+
     def test_load_sessions_reads_thread_keyed_state(self):
         session_file = f"/state/acw_session.{THREAD}.json"
         with patch.object(acw.glob, "glob", return_value=[session_file]):
@@ -192,33 +243,10 @@ class WatchdUnitTests(unittest.TestCase):
 
         write_state.assert_called_once_with(THREAD, {"thread_id": THREAD, "name": "new-name"})
 
-    def test_select_session_files_matches_thread_prefix(self):
-        sessions = [
-            {"thread_id": THREAD, "name": "alpha", "state_file": "/tmp/a.json"},
-            {"thread_id": "22222222-2222-2222-2222-222222222222", "name": "beta", "state_file": "/tmp/b.json"},
-        ]
-        selected = acw._select_session_files(sessions, THREAD[:8])
-        self.assertEqual(THREAD, selected[0]["thread_id"])
-
-    def test_cleanup_selector_removes_matched_state_file(self):
-        session_file = f"/state/acw_session.{THREAD}.json"
-        sessions = [{"thread_id": THREAD, "name": "aot", "state_file": session_file}]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw.Path, "unlink") as unlink:
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    acw.cmd_cleanup(["aot"])
-        unlink.assert_called_once_with(missing_ok=True)
-
-    def test_cleanup_selector_ambiguous_exits(self):
-        t2 = "22222222-2222-2222-2222-222222222222"
-        sessions = [
-            {"thread_id": THREAD, "name": "aot", "state_file": f"/state/acw_session.{THREAD}.json"},
-            {"thread_id": t2, "name": "aot", "state_file": f"/state/acw_session.{t2}.json"},
-        ]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    acw.cmd_cleanup(["aot"])
+    def test_cleanup_rejects_target(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                acw.cmd_cleanup(["aot"])
 
     def test_cleanup_stale_files_removes_dead_session_state(self):
         session_file = f"/state/acw_session.{THREAD}.json"
@@ -236,13 +264,8 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(
-                    acw,
-                    "is_running_pid_file",
-                    side_effect=lambda path: path == acw.LEGACY_PID_FILE,
-                ):
-                    with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files()
+                with patch.object(acw.Path, "unlink") as unlink:
+                    acw.cleanup_stale_files()
         unlink.assert_called_once_with(missing_ok=True)
 
     def test_build_thread_pane_map_uses_tmux_process_tree(self):
@@ -333,6 +356,13 @@ class WatchdUnitTests(unittest.TestCase):
         text = err.getvalue()
         self.assertIn("tmux server is unavailable", text)
         self.assertIn("kill -USR1 1996933", text)
+
+    def test_resolve_pane_target_rejects_thread_id(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                acw.resolve_pane_target(THREAD)
+        self.assertIn("use a pane id", err.getvalue())
 
     def test_status_uses_live_watcher_rows_when_tmux_metadata_is_unavailable(self):
         sessions = [{
