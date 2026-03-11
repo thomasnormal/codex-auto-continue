@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -334,10 +335,18 @@ class RealCodexHarness:
         )
         return state_file
 
-    def run_manager(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_manager(
+        self,
+        *args: str,
+        check: bool = True,
+        env_overrides: Optional[dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.process_env
+        if env_overrides:
+            env.update(env_overrides)
         proc = subprocess.run(
             ["python3", str(self.repo_root / "bin" / "auto_continue_watchd.py"), *args],
-            env=self.process_env,
+            env=env,
             cwd=str(self.repo_root),
             text=True,
             capture_output=True,
@@ -352,6 +361,17 @@ class RealCodexHarness:
                 f"{self.diagnostics()}"
             )
         return proc
+
+    def run_manager_in_current_pane(
+        self,
+        *args: str,
+        check: bool = True,
+        env_overrides: Optional[dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = {"TMUX_PANE": self.pane_id}
+        if env_overrides:
+            env.update(env_overrides)
+        return self.run_manager(*args, check=check, env_overrides=env)
 
     def wait_for_watcher_started(self, thread_id: str, timeout: float = 15.0) -> None:
         self._wait_for(
@@ -430,6 +450,31 @@ class RealCodexHarness:
 
     def manager_state_file(self, thread_id: str) -> Path:
         return self.codex_dir / f"acw_session.{thread_id}.json"
+
+    def wait_for_manager_state_contains(self, thread_id: str, needle: str, timeout: float = 15.0) -> str:
+        path = self.manager_state_file(thread_id)
+
+        def _probe() -> Optional[str]:
+            if not path.is_file():
+                return None
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if needle in text:
+                return text
+            return None
+
+        return self._wait_for_value(_probe, timeout=timeout, description=f"manager state containing {needle!r}")
+
+    def make_editor_script(self, new_message: str) -> Path:
+        script = self.root / f"editor-{uuid.uuid4().hex[:8]}.sh"
+        quoted = shlex.quote(new_message)
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"printf '%s' {quoted} > \"$1\"\n",
+            encoding="utf-8",
+        )
+        script.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        return script
 
     def stop_manager_watcher(self) -> None:
         pid = self._read_manager_pid()

@@ -93,6 +93,11 @@ def is_pane_id(s: str) -> bool:
     return bool(re.fullmatch(r"%[0-9]+", s))
 
 
+def current_tmux_pane() -> str:
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    return pane if is_pane_id(pane) else ""
+
+
 def _truncate(s: str, width: int) -> str:
     """Truncate string to *width* chars, adding '...' suffix if needed."""
     return s if len(s) <= width else s[: width - 3] + "..."
@@ -429,6 +434,13 @@ def resolve_pane_target(target: str) -> str:
     Tries, in order: pane id, window index, tmux window name, thread id,
     then state file window_name (for watchers whose pane is gone).
     """
+    if target == ".":
+        pane = current_tmux_pane()
+        if pane:
+            return pane
+        print("error: current pane target '.' requires TMUX_PANE in the environment", file=sys.stderr)
+        sys.exit(2)
+
     if is_pane_id(target):
         return target
 
@@ -469,6 +481,13 @@ def resolve_start_pane_target(target: str) -> str:
     window name. Thread ids are intentionally rejected here because the second
     positional argument is reserved for the explicit Codex thread id.
     """
+    if target == ".":
+        pane = current_tmux_pane()
+        if pane:
+            return pane
+        print("error: current pane target '.' requires TMUX_PANE in the environment", file=sys.stderr)
+        sys.exit(2)
+
     if is_pane_id(target):
         return target
 
@@ -1848,6 +1867,132 @@ def cmd_status(argv: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Doctor
+# ---------------------------------------------------------------------------
+
+
+def _state_dir_is_writable() -> tuple[bool, str]:
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="acw_doctor_", dir=STATE_DIR)
+        os.close(fd)
+        os.unlink(tmp)
+        return True, STATE_DIR
+    except OSError as exc:
+        return False, f"{STATE_DIR} ({exc})"
+
+
+def _codex_auth_state_available() -> tuple[bool, str]:
+    auth = Path(STATE_DIR) / "auth.json"
+    if auth.is_file():
+        return True, str(auth)
+    return False, str(auth)
+
+
+def _doctor_resolve_target(target: str) -> tuple[str, str]:
+    if not target:
+        pane = current_tmux_pane()
+        if pane:
+            return pane, ""
+        return "", ""
+
+    if target == ".":
+        pane = current_tmux_pane()
+        if pane:
+            return pane, ""
+        return "", "current pane target '.' requires TMUX_PANE in the environment"
+
+    if is_pane_id(target):
+        return target, ""
+
+    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
+        pane = resolve_pane_from_window_target(target)
+        if pane and is_pane_id(pane):
+            return pane, ""
+        return "", f"could not resolve window target '{target}'"
+
+    pane = resolve_pane_from_window_name(target)
+    if pane and is_pane_id(pane):
+        return pane, ""
+
+    if is_thread_id(target):
+        for row in watcher_rows():
+            if row["thread"].lower() == target.lower():
+                return row["pane"], ""
+        return "", f"no watcher found for thread {target}"
+
+    if _tmux_socket_recovery_hint():
+        return "", _tmux_socket_recovery_hint()
+    return "", f"could not resolve target '{target}'"
+
+
+def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
+    checks: list[tuple[str, str]] = []
+    errors = 0
+
+    ok, detail = _state_dir_is_writable()
+    checks.append(("ok" if ok else "error", f"state dir writable: {detail}"))
+    errors += 0 if ok else 1
+
+    ok, detail = _codex_auth_state_available()
+    checks.append(("ok" if ok else "error", f"Codex auth state present: {detail}"))
+    errors += 0 if ok else 1
+
+    tmux_ok = run_tmux("list-sessions") is not None
+    checks.append(("ok" if tmux_ok else "error", "tmux server reachable"))
+    errors += 0 if tmux_ok else 1
+    recovery = _tmux_socket_recovery_hint()
+    if recovery:
+        checks.append(("info", recovery))
+
+    pane, pane_error = _doctor_resolve_target(target)
+    if pane_error:
+        checks.append(("error", pane_error))
+        errors += 1
+        return checks, 1
+
+    if not pane:
+        checks.append(("info", "pane checks skipped: no target and TMUX_PANE not set"))
+        return checks, 1 if errors else 0
+
+    checks.append(("ok", f"pane resolved: {pane}"))
+    tid = detect_thread_id_for_pane(pane)
+    if tid and is_thread_id(tid):
+        checks.append(("ok", f"Codex thread detected: {tid}"))
+    else:
+        checks.append(("error", f"could not detect a Codex thread for pane {pane}"))
+        errors += 1
+
+    rows = watcher_rows(pane)
+    if rows:
+        pid = rows[0].get("pid", "")
+        checks.append(("ok", f"watcher running: pane={pane} pid={pid}"))
+    else:
+        checks.append(("info", f"no watcher running for pane {pane}"))
+
+    return checks, 1 if errors else 0
+
+
+def cmd_doctor(argv: list[str]) -> None:
+    target = ""
+    if argv:
+        if len(argv) > 1 or argv[0].startswith("--"):
+            print("error: doctor accepts at most one target", file=sys.stderr)
+            sys.exit(2)
+        target = argv[0]
+
+    checks, code = _doctor_checks(target)
+    print("Doctor")
+    print(f"  state_dir: {STATE_DIR}")
+    sock = _preferred_tmux_socket() or "(default)"
+    print(f"  tmux_socket: {sock}")
+    for level, message in checks:
+        print(f"[{level}] {message}")
+    print(f"RESULT: {'ok' if code == 0 else 'error'}")
+    if code:
+        sys.exit(code)
+
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 
@@ -1951,6 +2096,7 @@ def main() -> None:
         "cleanup": cmd_cleanup,
         "status": cmd_status,
         "edit": cmd_edit,
+        "doctor": cmd_doctor,
         "_window-renamed": cmd_window_renamed,
     }
 
@@ -1958,8 +2104,8 @@ def main() -> None:
         commands[subcmd](rest)
     else:
         print(
-            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|cleanup|status|edit} "
-            "[pane-id|window-index|session:window] [thread-id|auto] "
+            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|cleanup|status|edit|doctor} "
+            "[pane-id|window-index|session:window|.] [thread-id] "
             "[--message TEXT | --message-file FILE]",
             file=sys.stderr,
         )

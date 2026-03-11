@@ -49,6 +49,18 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "resolve_pane_from_window_name", return_value="%7"):
             self.assertEqual("%7", acw.resolve_start_pane_target("formal"))
 
+    def test_resolve_start_pane_target_uses_current_pane_for_dot(self):
+        with patch.dict(acw.os.environ, {"TMUX_PANE": "%9"}, clear=False):
+            self.assertEqual("%9", acw.resolve_start_pane_target("."))
+
+    def test_resolve_start_pane_target_rejects_dot_without_current_pane(self):
+        err = io.StringIO()
+        with patch.dict(acw.os.environ, {}, clear=True):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    acw.resolve_start_pane_target(".")
+        self.assertIn("current pane target '.' requires TMUX_PANE", err.getvalue())
+
     def test_watcher_rows_filter_to_current_tmux_socket(self):
         ps_out = (
             "101 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
@@ -62,6 +74,30 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual("202", rows[0]["pid"])
         self.assertEqual("/tmp/current.sock", rows[0]["tmux_socket"])
+
+    def test_doctor_checks_current_pane_and_thread(self):
+        with patch.dict(acw.os.environ, {"TMUX_PANE": "%7"}, clear=False):
+            with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
+                with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
+                    with patch.object(acw, "run_tmux", return_value="session\n"):
+                        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
+                            with patch.object(acw, "watcher_rows", return_value=[]):
+                                checks, code = acw._doctor_checks(".")
+        self.assertEqual(0, code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+        self.assertIn("ok:tmux server reachable", rendered)
+        self.assertIn("ok:pane resolved: %7", rendered)
+        self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
+
+    def test_doctor_skips_pane_checks_without_target_or_current_pane(self):
+        with patch.dict(acw.os.environ, {}, clear=True):
+            with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
+                with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
+                    with patch.object(acw, "run_tmux", return_value="session\n"):
+                        checks, code = acw._doctor_checks("")
+        self.assertEqual(0, code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+        self.assertIn("info:pane checks skipped", rendered)
 
     def test_load_sessions_reads_thread_keyed_state(self):
         session_file = f"/state/acw_session.{THREAD}.json"
