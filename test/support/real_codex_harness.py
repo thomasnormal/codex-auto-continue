@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 
+STALE_HARNESS_GRACE_SECS = 300.0
 THREAD_ID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -161,6 +162,137 @@ def _copy_tree_with_modes(src: Path, dst: Path) -> None:
         target.chmod(0o600)
 
 
+def _owner_pid_path(root: Path) -> Path:
+    return root / "owner.pid"
+
+
+def _read_owner_pid(root: Path) -> Optional[int]:
+    path = _owner_pid_path(root)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def stale_harness_roots(
+    temp_root: Path,
+    *,
+    active_owner_pid: int,
+    live_pids: Optional[set[int]] = None,
+    now: Optional[float] = None,
+    grace_secs: float = STALE_HARNESS_GRACE_SECS,
+) -> list[Path]:
+    if live_pids is None:
+        live_pids = set()
+    if now is None:
+        now = time.time()
+
+    stale: list[Path] = []
+    for root in sorted(temp_root.glob("real-codex-*")):
+        owner_pid = _read_owner_pid(root)
+        if owner_pid is not None:
+            if owner_pid == active_owner_pid:
+                continue
+            if owner_pid in live_pids:
+                continue
+            stale.append(root)
+            continue
+        try:
+            age = now - root.stat().st_mtime
+        except OSError:
+            continue
+        if age >= grace_secs:
+            stale.append(root)
+    return stale
+
+
+def _processes_for_root(root: Path) -> list[int]:
+    proc = subprocess.run(
+        ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    marker = str(root)
+    pids: list[int] = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_str, args = parts
+        if not pid_str.isdigit() or marker not in args:
+            continue
+        pids.append(int(pid_str))
+    return pids
+
+
+def harness_process_roots(temp_root: Path, ps_output: str) -> set[Path]:
+    roots: set[Path] = set()
+    root_prefix = str(temp_root) + os.sep
+    root_re = re.compile(rf"({re.escape(root_prefix)}real-codex-[^/\s]+)")
+    for line in ps_output.splitlines():
+        match = root_re.search(line)
+        if not match:
+            continue
+        root = Path(match.group(1))
+        roots.add(root)
+    return roots
+
+
+def reap_stale_harnesses(temp_root: Path, *, active_owner_pid: int) -> None:
+    try:
+        ps_out = subprocess.check_output(
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        live_pids: set[int] = set()
+        process_roots: set[Path] = set()
+    else:
+        live_pids = {
+            int(line.strip().split(None, 1)[0])
+            for line in ps_out.splitlines()
+            if line.strip().split(None, 1)[0].isdigit()
+        }
+        process_roots = harness_process_roots(temp_root, ps_out)
+
+    stale_roots = set(
+        stale_harness_roots(temp_root, active_owner_pid=active_owner_pid, live_pids=live_pids)
+    )
+    for root in process_roots:
+        if not root.exists():
+            stale_roots.add(root)
+
+    for root in sorted(stale_roots):
+        pids = _processes_for_root(root)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in pids:
+                if pid == active_owner_pid or not _process_alive(pid):
+                    continue
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if not any(_process_alive(pid) for pid in pids):
+                    break
+                time.sleep(0.1)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 class RealCodexHarness:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
@@ -172,10 +304,13 @@ class RealCodexHarness:
         )
         self.temp_root.mkdir(parents=True, exist_ok=True)
         self.temp_root.chmod(0o700)
+        reap_stale_harnesses(self.temp_root, active_owner_pid=os.getpid())
         self.base_env, self.env_file = load_real_codex_env(repo_root)
         self._tmpdir = tempfile.TemporaryDirectory(prefix="real-codex-", dir=str(self.temp_root))
         self.root = Path(self._tmpdir.name)
         self.root.chmod(0o700)
+        _owner_pid_path(self.root).write_text(f"{os.getpid()}\n", encoding="utf-8")
+        _owner_pid_path(self.root).chmod(0o600)
         self.home_dir = self.root / "home"
         self.home_dir.mkdir(parents=True, exist_ok=True)
         self.home_dir.chmod(0o700)

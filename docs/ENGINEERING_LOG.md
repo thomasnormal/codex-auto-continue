@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: the real-Codex harness now writes an owner pid file for each private `real-codex-*` workspace and reaps stale private harness directories on startup. That cleanup also kills lingering tmux servers and watcher processes whose temp tree was deleted after an interrupted run.
 - Change: added `acw doctor`, a first-pass environment and pane diagnostic command. It checks tmux reachability, `~/.codex` writability, Codex auth state, and, when a target pane is available, thread detection plus watcher presence.
 - Realization: the explicit `.` pane shorthand for `start`/`edit` was not a good fit for this CLI. The current-pane flow is now limited to `acw doctor` with no target inside tmux; mutating commands stay explicit about which pane they touch.
 - Change: expanded the isolated real-Codex suite again with manager-centric tests for `acw edit <pane>` and `acw doctor` on the current pane.
