@@ -17,6 +17,17 @@ That's it. The watcher discovers the Codex thread for the pane and sends your
 message whenever a turn completes. If a thread-id cannot be discovered, `start`
 fails instead of running with an unknown thread.
 
+For all-watcher operations, prefer the no-target forms:
+
+```bash
+acw pause
+acw resume
+acw restart
+```
+
+Quoted `'*'` is still accepted as an explicit synonym, but an unquoted `*`
+will be expanded by your shell before `acw` sees it.
+
 ## Commands
 
 ```
@@ -25,13 +36,17 @@ stop        [target]
 edit        <target>
 pause       [target|*]
 resume      [target|*]
-restart     [target]
+restart     [target|*]
 cleanup     [target]
 status      [target]
 ```
 
 `<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
-`restart` with no target restarts all running watchers.
+`stop` with no target stops all running watchers.
+`pause`, `resume`, and `restart` with no target act on all running watchers.
+`cleanup` with no target removes stale watcher files; with a target it removes a
+single thread-keyed session file selected by exact window name or thread-id
+prefix.
 
 ## Custom Message
 
@@ -73,6 +88,8 @@ The watch daemon discovers which Codex thread belongs to each pane by inspecting
 the pane's live process tree and tracking thread-keyed session state. This
 works reliably even when multiple Codex sessions run on different panes
 simultaneously.
+
+Canonical session state is stored as `~/.codex/acw_session.<thread-id>.json`.
 
 If the Codex session restarts with a new thread, the watcher re-discovers it during periodic health checks.
 
@@ -143,7 +160,7 @@ paused: pane=%2 pid=48305
 $ acw resume tests
 resumed: pane=%2 pid=48305
 
-$ acw pause *
+$ acw pause
 paused: pane=%1 pid=48201
 paused: pane=%2 pid=48305
 ```
@@ -168,10 +185,12 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 ## E2E Test
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
-It runs two Python tests on top of a shared harness:
+The shell script is a thin wrapper around a shared Python harness and currently
+runs three real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
+- a watcher regression test that ensures `rollout channel closed` is not reported as a hard error when `codex-tui.log` is still driving completion
 
 The harness always uses a dedicated tmux server on its own socket, so it does
 not interfere with your existing tmux sessions. If `AUTO_CONTINUE_E2E_ENV_FILE`
