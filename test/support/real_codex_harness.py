@@ -263,6 +263,9 @@ class RealCodexHarness:
         time.sleep(0.2)
         self.send_keys("C-m")
 
+    def send_escape(self) -> None:
+        self.send_keys("Escape")
+
     def start_watcher(self, thread_id: str, message: str = "test continue") -> Path:
         state_file = self.state_dir / f"acw_session.{thread_id}.json"
         cmd = [
@@ -319,6 +322,17 @@ class RealCodexHarness:
         self._wait_for(_ready, timeout=timeout, description="watcher continue send")
         return self.watch_log.read_text(encoding="utf-8", errors="ignore")
 
+    def wait_for_watch_log_contains(self, needle: str, timeout: float = 30.0) -> str:
+        def _ready() -> bool:
+            self._assert_watcher_alive()
+            return self.watch_log.is_file() and needle in self.watch_log.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+
+        self._wait_for(_ready, timeout=timeout, description=f"watch log entry {needle!r}")
+        return self.watch_log.read_text(encoding="utf-8", errors="ignore")
+
     def wait_for_first_completed_turn(self, timeout: float = 60.0) -> TurnObservation:
         def _probe() -> Optional[TurnObservation]:
             lines = self.new_codex_log_lines()
@@ -335,6 +349,18 @@ class RealCodexHarness:
 
     def capture_pane(self, lines: int = 80) -> str:
         return self.tmux_stdout("capture-pane", "-t", self.pane_id, "-p", "-S", f"-{lines}")
+
+    def wait_for_pane_contains(self, needle: str, timeout: float = 30.0, lines: int = 120) -> str:
+        def _probe() -> Optional[str]:
+            text = self.capture_pane(lines=lines)
+            if needle in text:
+                return text
+            return None
+
+        return self._wait_for_value(_probe, timeout=timeout, description=f"pane text {needle!r}")
+
+    def wait_for_watcher_stopped(self, timeout: float = 15.0) -> None:
+        self._wait_for(self._watcher_is_stopped, timeout=timeout, description="watcher stopped")
 
     def recent_codex_log(self, lines: int = 120) -> str:
         if not self.codex_log.is_file():
@@ -443,3 +469,17 @@ class RealCodexHarness:
                 return value
             time.sleep(1.0)
         raise AssertionError(f"timed out waiting for {description}\n{self.diagnostics()}")
+
+    def _watcher_is_stopped(self) -> bool:
+        if self.watcher_proc is None:
+            return False
+        if self.watcher_proc.poll() is not None:
+            return False
+        proc = subprocess.run(
+            ["ps", "-p", str(self.watcher_proc.pid), "-o", "state="],
+            env=self.process_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode == 0 and proc.stdout.strip().startswith("T")

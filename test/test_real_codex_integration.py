@@ -51,6 +51,28 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
             self.harness.diagnostics(),
         )
 
+    def test_watcher_auto_pauses_on_interrupt_banner(self):
+        self.harness.start_codex("say the word hello and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        state_file = self.harness.start_watcher(first_turn.thread_id)
+        self.harness.wait_for_watcher_started(first_turn.thread_id)
+
+        self.harness.send_codex_prompt(
+            "Write exactly 200 numbered bullet points about prime numbers, one short sentence each."
+        )
+        self.harness.wait_for_pane_contains("Working", timeout=30.0)
+        self.harness.send_escape()
+        self.harness.wait_for_pane_contains("Conversation interrupted", timeout=30.0)
+        watch_log = self.harness.wait_for_watch_log_contains(
+            "pause: auto-pausing watcher (Conversation interrupted)",
+            timeout=45.0,
+        )
+        self.harness.wait_for_watcher_stopped(timeout=15.0)
+
+        state_text = state_file.read_text(encoding="utf-8", errors="ignore")
+        self.assertIn("pause: auto-pausing watcher (Conversation interrupted)", watch_log)
+        self.assertIn("auto-paused: Conversation interrupted", state_text)
+
 
 if __name__ == "__main__":
     unittest.main()

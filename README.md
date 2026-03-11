@@ -205,11 +205,12 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
 The shell script is a thin wrapper around a shared Python harness and currently
-runs three real-Codex tests:
+runs four real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
 - a watcher regression test that ensures `rollout channel closed` is not reported as a hard error when `codex-tui.log` is still driving completion
+- a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real `Conversation interrupted` banner
 
 The harness always uses a dedicated tmux server on its own socket, so it does
 not interfere with your existing tmux sessions. If `AUTO_CONTINUE_E2E_ENV_FILE`
