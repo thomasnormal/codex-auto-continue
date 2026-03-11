@@ -10,7 +10,6 @@ alias acw='python3 /path/to/codex-auto-continue/bin/auto_continue_watchd.py'
 
 acw start 2        # window index — opens $EDITOR for the message
 acw start %6       # or pane id
-acw start .        # or the current tmux pane
 acw start uvm      # or tmux window name
 ```
 
@@ -47,7 +46,7 @@ status      [target]
 doctor      [target]
 ```
 
-For `start`, `<target>` is `.`, a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
+For `start`, `<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
 `stop` with no target stops all running watchers.
 `pause`, `resume`, and `restart` with no target act on all running watchers.
 `cleanup` with no target removes stale watcher files; with a target it removes a
@@ -63,7 +62,6 @@ When starting without `--message` or `--message-file`, your `$EDITOR` opens so y
 You can also provide a message inline or via file:
 
 ```bash
-acw start . --message "continue and focus on this pane"
 acw start %0 --message "continue and focus on tests"
 acw start 2 --message-file /path/to/msg.txt
 ```
@@ -71,7 +69,6 @@ acw start 2 --message-file /path/to/msg.txt
 To edit the message for a running watcher:
 
 ```bash
-acw edit .    # current pane
 acw edit 2    # opens $EDITOR with the current message
 ```
 
@@ -135,8 +132,8 @@ kill -USR1 1996933
 
 ## Doctor
 
-Run `acw doctor` for environment checks, or `acw doctor .` inside tmux to
-check the current pane end to end:
+Run `acw doctor` for environment checks. Inside tmux, `acw doctor` also checks
+the current pane when `TMUX_PANE` is available:
 
 ```bash
 $ acw doctor .
@@ -246,16 +243,15 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
 The shell script is a thin wrapper around a shared Python harness and currently
-runs ten real-Codex tests:
+runs nine real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
 - a watcher regression test that ensures `rollout channel closed` is not reported as a hard error when `codex-tui.log` is still driving completion
 - a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
-- a manager integration test that starts a watcher against the current pane via `acw start .`
-- a manager integration test that updates the current pane's message via `acw edit .`
-- a manager integration test that verifies `acw doctor .` reports a healthy pane with a detected thread
+- a manager integration test that updates a watcher's message through `acw edit <pane>`
+- a manager integration test that verifies `acw doctor` reports a healthy current pane with a detected thread
 - a manager integration test that reports `dead` after a real watcher process exits
 - a manager integration test that recreates a private tmux socket with `kill -USR1` and then starts successfully
 

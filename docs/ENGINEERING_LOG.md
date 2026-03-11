@@ -3,8 +3,8 @@
 ## 2026-03-11
 
 - Change: added `acw doctor`, a first-pass environment and pane diagnostic command. It checks tmux reachability, `~/.codex` writability, Codex auth state, and, when a target pane is available, thread detection plus watcher presence.
-- Change: `.` now resolves to the current tmux pane for pane-targeted commands, including `start`, `edit`, and `doctor`. This gives the common "work on the pane I'm already in" flow a canonical short form.
-- Change: expanded the isolated real-Codex suite again with manager-centric tests for `acw start .`, `acw edit .`, and `acw doctor .`.
+- Realization: the explicit `.` pane shorthand for `start`/`edit` was not a good fit for this CLI. The current-pane flow is now limited to `acw doctor` with no target inside tmux; mutating commands stay explicit about which pane they touch.
+- Change: expanded the isolated real-Codex suite again with manager-centric tests for `acw edit <pane>` and `acw doctor` on the current pane.
 - Change: the real-Codex harness now always uses an isolated test home, seeded from the user's existing Codex auth/config files. That keeps watcher state, Codex logs, sessions, and tmux artifacts out of the live `~/.codex` tree while still authenticating a real Codex process.
 - Change: the real-Codex harness now archives pane capture, watcher logs, a Codex log tail, and state files under `~/.codex/auto-continue-e2e-tmp/failures/` whenever a contract or integration test fails.
 - Change: expanded the isolated real-Codex suite to cover manager behavior as well as the direct watcher: starting against a plain `codex --full-auto` pane, reporting `dead` after a real watcher exits, and recovering after a private tmux socket is recreated with `kill -USR1`.

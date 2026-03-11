@@ -49,18 +49,6 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "resolve_pane_from_window_name", return_value="%7"):
             self.assertEqual("%7", acw.resolve_start_pane_target("formal"))
 
-    def test_resolve_start_pane_target_uses_current_pane_for_dot(self):
-        with patch.dict(acw.os.environ, {"TMUX_PANE": "%9"}, clear=False):
-            self.assertEqual("%9", acw.resolve_start_pane_target("."))
-
-    def test_resolve_start_pane_target_rejects_dot_without_current_pane(self):
-        err = io.StringIO()
-        with patch.dict(acw.os.environ, {}, clear=True):
-            with redirect_stderr(err):
-                with self.assertRaises(SystemExit):
-                    acw.resolve_start_pane_target(".")
-        self.assertIn("current pane target '.' requires TMUX_PANE", err.getvalue())
-
     def test_watcher_rows_filter_to_current_tmux_socket(self):
         ps_out = (
             "101 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
@@ -82,7 +70,7 @@ class WatchdUnitTests(unittest.TestCase):
                     with patch.object(acw, "run_tmux", return_value="session\n"):
                         with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
                             with patch.object(acw, "watcher_rows", return_value=[]):
-                                checks, code = acw._doctor_checks(".")
+                                checks, code = acw._doctor_checks("")
         self.assertEqual(0, code)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
         self.assertIn("ok:tmux server reachable", rendered)

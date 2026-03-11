@@ -434,13 +434,6 @@ def resolve_pane_target(target: str) -> str:
     Tries, in order: pane id, window index, tmux window name, thread id,
     then state file window_name (for watchers whose pane is gone).
     """
-    if target == ".":
-        pane = current_tmux_pane()
-        if pane:
-            return pane
-        print("error: current pane target '.' requires TMUX_PANE in the environment", file=sys.stderr)
-        sys.exit(2)
-
     if is_pane_id(target):
         return target
 
@@ -481,13 +474,6 @@ def resolve_start_pane_target(target: str) -> str:
     window name. Thread ids are intentionally rejected here because the second
     positional argument is reserved for the explicit Codex thread id.
     """
-    if target == ".":
-        pane = current_tmux_pane()
-        if pane:
-            return pane
-        print("error: current pane target '.' requires TMUX_PANE in the environment", file=sys.stderr)
-        sys.exit(2)
-
     if is_pane_id(target):
         return target
 

@@ -96,23 +96,14 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertIn("resolved: target=fullauto pane=", start.stdout, self.harness.diagnostics())
         self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
 
-    def test_manager_start_uses_current_pane_for_dot(self):
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-
-        start = self.harness.run_manager_in_current_pane("start", ".", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        self.assertIn(f"resolved: pane={self.harness.pane_id} thread_id={first_turn.thread_id}", start.stdout)
-
     def test_manager_edit_updates_message_for_current_pane(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager_in_current_pane("start", ".", "--message", "initial continue")
+        self.harness.run_manager("start", self.harness.pane_id, "--message", "initial continue")
         self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
 
         editor = self.harness.make_editor_script("updated continue")
-        self.harness.run_manager_in_current_pane("edit", ".", env_overrides={"EDITOR": str(editor)})
+        self.harness.run_manager("edit", self.harness.pane_id, env_overrides={"EDITOR": str(editor)})
         self.harness.wait_for_manager_state_contains(first_turn.thread_id, "updated continue")
 
         state_text = self.harness.manager_state_file(first_turn.thread_id).read_text(encoding="utf-8", errors="ignore")
@@ -122,7 +113,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
 
-        doctor = self.harness.run_manager_in_current_pane("doctor", ".")
+        doctor = self.harness.run_manager_in_current_pane("doctor")
 
         self.assertIn("RESULT: ok", doctor.stdout, self.harness.diagnostics())
         self.assertIn(f"Codex thread detected: {first_turn.thread_id}", doctor.stdout, self.harness.diagnostics())
