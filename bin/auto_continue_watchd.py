@@ -1446,7 +1446,7 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
         return "paused"
     # No running watcher process.
     if not pid:
-        return sj.get("health", "") or "dead"
+        return "dead"
     h = sj.get("health", "")
     if h and h != "ok":
         return h

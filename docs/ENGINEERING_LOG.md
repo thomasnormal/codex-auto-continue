@@ -2,6 +2,9 @@
 
 ## 2026-03-11
 
+- Change: bounded state-db pid-to-thread discovery to the current Codex process lifetime. The SQLite fallback now ignores `logs.process_uuid = pid:<pid>:...` rows older than the live process start time, which prevents stale thread reuse when Linux recycles a pid.
+- Change: taught `auto_continue_logwatch.py` to recover from stale explicit tmux socket configuration in the same way `watchd` already did. If `AUTO_CONTINUE_TMUX_SOCKET` or `$TMUX` points at a vanished socket, the watcher now retries against the default server with the client env cleared instead of staying wedged on the dead path.
+- Change: tightened status semantics so persisted session health no longer masquerades as liveness. If there is no live watcher pid, `acw status` now reports `dead` even when the last on-disk health snapshot was `ok`.
 - Change: added a real-Codex regression in the isolated tmux harness for the `Conversation interrupted` path. The harness now sends `Escape` to a private background pane, waits for the real Codex banner, and asserts that the watcher moves into a stopped/paused state without touching the user's live tmux server.
 - Realization: checking pane-visible Codex errors after the cooldown gate was too late. A user interrupt could still queue a follow-up completion during cooldown, and the watcher would miss the interrupt banner. Pane-error detection now runs before cooldown, and pane capture depth was widened so the interrupt banner is less likely to scroll out of the sampled region.
 - Change: watchers now auto-pause on pane-visible Codex interruption/account-error banners instead of repeatedly re-sending the continue message. This covers the `Conversation interrupted` banner as well as auth/quota-style failures already matched by pane error detection.

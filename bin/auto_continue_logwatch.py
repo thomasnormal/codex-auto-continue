@@ -269,13 +269,13 @@ def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.Comp
     if rc.returncode == 0:
         return rc
 
-    # Recover from stale TMUX socket by retrying against default server.
-    if os.environ.get("TMUX") and not socket_path:
+    # Recover from stale socket state by retrying against the default server.
+    if socket_path or os.environ.get("TMUX"):
         env = os.environ.copy()
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
         return subprocess.run(
-            cmd,
+            ["tmux", *args],
             capture_output=capture_output,
             text=True,
             check=False,
@@ -420,10 +420,27 @@ def write_state(path: Path, state: dict) -> None:
             pass
 
 
+def _process_start_epoch(pid: str) -> Optional[float]:
+    """Return the wall-clock start time for *pid* using /proc metadata."""
+    if not pid.isdigit():
+        return None
+    try:
+        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        start_ticks = int(stat_fields[21])
+        uptime_secs = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+    boot_time = time.time() - uptime_secs
+    return boot_time + (start_ticks / hz)
+
+
 def _thread_from_state_db_pid(pid: str, state_dir: Path = STATE_DIR) -> Optional[str]:
     """Return the most recent thread_id logged by the Codex process *pid*."""
     if not pid.isdigit() or not state_dir.is_dir():
         return None
+    started_at = _process_start_epoch(pid)
+    min_ts = int(started_at) if started_at is not None else None
 
     for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
@@ -431,14 +448,17 @@ def _thread_from_state_db_pid(pid: str, state_dir: Path = STATE_DIR) -> Optional
         except sqlite3.Error:
             continue
         try:
-            row = conn.execute(
+            query = (
                 "select thread_id "
                 "from logs "
                 "where process_uuid like ? and thread_id is not null and thread_id != '' "
-                "order by ts desc, ts_nanos desc "
-                "limit 1",
-                (f"pid:{pid}:%",),
-            ).fetchone()
+            )
+            params: list[object] = [f"pid:{pid}:%"]
+            if min_ts is not None:
+                query += "and ts >= ? "
+                params.append(min_ts)
+            query += "order by ts desc, ts_nanos desc limit 1"
+            row = conn.execute(query, params).fetchone()
         except sqlite3.Error:
             row = None
         finally:

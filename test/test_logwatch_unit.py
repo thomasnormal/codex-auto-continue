@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import os
 from unittest.mock import patch
+import subprocess
 
 import sys
 
@@ -51,6 +52,30 @@ class LogwatchUnitTests(unittest.TestCase):
                 THREAD,
                 logwatch._thread_from_state_db_pid("222", Path(tmpdir)),
             )
+
+    def test_thread_from_state_db_pid_ignores_rows_older_than_process_start(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o700)
+            db_path = Path(tmpdir) / "state_5.sqlite"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "create table logs ("
+                    "thread_id text, "
+                    "process_uuid text, "
+                    "ts integer, "
+                    "ts_nanos integer)"
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "pid:222:stale", 50, 0),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with patch.object(logwatch, "_process_start_epoch", return_value=100.0):
+                self.assertIsNone(logwatch._thread_from_state_db_pid("222", Path(tmpdir)))
 
     def test_parse_codex_log_event_parses_post_sampling_line(self):
         line = (
@@ -141,6 +166,31 @@ class LogwatchUnitTests(unittest.TestCase):
         self.assertEqual("auto-paused: Conversation interrupted", written_state["health_detail"])
         self.assertEqual("2026-03-11 12:34:56", written_state["health_ts"])
         kill.assert_called_once_with(logwatch.os.getpid(), logwatch.signal.SIGSTOP)
+
+    def test_run_tmux_falls_back_when_explicit_socket_is_stale(self):
+        calls = []
+
+        def fake_run(cmd, capture_output=None, text=None, check=None, env=None):
+            calls.append((cmd, env))
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(cmd, 1, "", "stale socket")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        env = {
+            "AUTO_CONTINUE_TMUX_SOCKET": "/tmp/tmux-test/socket",
+            "TMUX": "/tmp/tmux-test/socket,1,0",
+            "TMUX_PANE": "%9",
+            "PATH": "/usr/bin",
+        }
+        with patch.dict(logwatch.os.environ, env, clear=True):
+            with patch.object(logwatch.subprocess, "run", side_effect=fake_run):
+                rc = logwatch.run_tmux(["list-sessions"])
+
+        self.assertEqual(0, rc.returncode)
+        self.assertEqual(["tmux", "-S", "/tmp/tmux-test/socket", "list-sessions"], calls[0][0])
+        self.assertEqual(["tmux", "list-sessions"], calls[1][0])
+        self.assertNotIn("TMUX", calls[1][1])
+        self.assertNotIn("TMUX_PANE", calls[1][1])
 
     def test_compute_health_warns_when_rollout_channel_closed_but_codex_log_works(self):
         health, detail = logwatch.compute_health(

@@ -93,6 +93,10 @@ Automatic thread discovery is pane-local only. If `acw` cannot prove which
 thread belongs to the target pane yet, it waits instead of guessing from the
 most recent global Codex log or rollout activity.
 
+Pid-based thread discovery is also bounded to the current Codex process
+lifetime, so `acw` will not reuse stale thread ids from an older process that
+happened to share the same Linux pid later.
+
 Canonical session state is stored as `~/.codex/acw_session.<thread-id>.json`.
 
 If the Codex session restarts with a new thread, the watcher re-discovers it during periodic health checks.
@@ -183,6 +187,9 @@ Watchers also auto-pause when the pane shows a Codex-level interruption or
 account error banner, such as `Conversation interrupted`, auth failures, or
 quota/usage-limit errors. Resume them explicitly with `acw resume <target>`
 after you have handled the issue in the pane.
+
+If a watcher process is gone, `acw status` now reports it as `dead` even if the
+last persisted health snapshot was `ok`.
 
 ### Edit message for a running watcher
 
