@@ -547,56 +547,10 @@ def resolve_start_pane_target(target: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def extract_resume_thread_id(args: str) -> str | None:
-    m = re.search(
-        r"\s" r"resume" r"\s" r"(" + THREAD_ID_RE.pattern + r")(?:$|\s)",
-        args,
-    )
-    return m.group(1).lower() if m else None
-
-
-def detect_thread_from_pane_tty(pane: str) -> str | None:
-    """Check pane tty for a `codex resume <thread-id>` command."""
-    pane_tty = run_tmux("display-message", "-p", "-t", pane, "#{pane_tty}")
-    if not pane_tty:
-        return None
-    pane_tty = pane_tty.strip()
-    if not pane_tty:
-        return None
-    tty_for_ps = pane_tty.removeprefix("/dev/")
-    if not tty_for_ps:
-        return None
-
-    try:
-        ps_out = subprocess.check_output(
-            ["ps", "-t", tty_for_ps, "-o", "pid=,args="],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-    for line in ps_out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        pid_str, args = parts
-        if not pid_str.isdigit() or "codex" not in args:
-            continue
-        tid = extract_resume_thread_id(args)
-        if tid and is_thread_id(tid):
-            return tid
-    return None
-
-
 def detect_thread_id_for_pane(pane: str) -> str | None:
-    for method in (_discover_thread_for_pane, detect_thread_from_pane_tty):
-        tid = method(pane)
-        if tid and is_thread_id(tid):
-            return tid
+    tid = _discover_thread_for_pane(pane)
+    if tid and is_thread_id(tid):
+        return tid
     return None
 
 

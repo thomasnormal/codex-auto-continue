@@ -539,7 +539,6 @@ def main() -> int:
     p.add_argument("--pane", default=os.environ.get("TMUX_PANE", ""))
     p.add_argument("--thread-id", default="auto")
     p.add_argument("--tmux-socket", default=os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", ""))
-    p.add_argument("--auto-rebind-idle-secs", type=float, default=20.0)
     p.add_argument("--message-file", default="")
     p.add_argument("--message", default="please continue")
     p.add_argument("--cwd", default=os.getcwd())
@@ -547,7 +546,6 @@ def main() -> int:
     p.add_argument("--cooldown-secs", type=float, default=1.0)
     p.add_argument("--send-delay-secs", type=float, default=0.25)
     p.add_argument("--enter-delay-secs", type=float, default=0.15)
-    p.add_argument("--require-pane-active", action="store_true")
     p.add_argument("--state-file", default="")
     p.add_argument("--watch-log", default="")
     args = p.parse_args()
@@ -591,8 +589,6 @@ def main() -> int:
         append_log(watch_log, f"watch: pane={args.pane} thread_id={watched_thread}")
 
     last_send_time = 0.0
-    watched_last_event_at = 0.0
-
     codex_fh = None
     health = "ok"
     health_detail = ""
@@ -709,31 +705,13 @@ def main() -> int:
             if auto_mode:
                 if not watched_thread:
                     watched_thread = thread_id
-                    watched_last_event_at = tnow
                     append_log(watch_log, f"watch: auto-selected thread_id={watched_thread}")
-                elif thread_id == watched_thread:
-                    watched_last_event_at = tnow
-                elif watched_last_event_at == 0.0 or (tnow - watched_last_event_at) > max(0.0, args.auto_rebind_idle_secs):
-                    prev = watched_thread
-                    watched_thread = thread_id
-                    watched_last_event_at = tnow
-                    append_log(
-                        watch_log,
-                        (
-                            f"watch: auto-rebind thread_id={prev} -> {watched_thread} "
-                            f"(idle>{args.auto_rebind_idle_secs:.1f}s)"
-                        ),
-                    )
 
             if thread_id != watched_thread:
                 continue
             if needs_follow_up != "false":
                 continue
             if turn_id == last_sent_turn and thread_id == last_sent_thread:
-                continue
-
-            if args.require_pane_active and not tmux_pane_active(args.pane):
-                append_log(watch_log, f"skip: pane inactive turn={turn_id}")
                 continue
 
             pane_error = check_pane_for_errors(args.pane)

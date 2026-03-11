@@ -96,6 +96,21 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertIn("resolved: target=fullauto pane=", start.stdout, self.harness.diagnostics())
         self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
 
+    def test_manager_start_works_for_codex_resume_pane(self):
+        self.harness.rename_window("seed")
+        self.harness.start_codex("say the word hello and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.new_window("resume")
+        self.harness.resume_codex(first_turn.thread_id)
+        self.harness.wait_for_recent_codex_log_contains(first_turn.thread_id, timeout=45.0)
+
+        start = self.harness.run_manager("start", "resume", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
+
+        self.assertIn("resolved: target=resume pane=", start.stdout, self.harness.diagnostics())
+        self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
+
     def test_manager_edit_updates_message_for_current_pane(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()

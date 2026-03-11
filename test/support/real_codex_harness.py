@@ -393,8 +393,26 @@ class RealCodexHarness:
     def rename_window(self, name: str) -> None:
         self.tmux("rename-window", "-t", f"{self.session_name}:0", name)
 
+    def new_window(self, name: str) -> str:
+        pane = self.tmux_stdout(
+            "new-window",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            self.session_name,
+            "-n",
+            name,
+        )
+        self.pane_id = pane.strip()
+        return self.pane_id
+
     def start_codex(self, prompt: str) -> None:
         self.send_keys(f"codex {shlex.quote(prompt)}", "C-m")
+        self._maybe_accept_directory_trust_prompt()
+
+    def resume_codex(self, thread_id: str) -> None:
+        self.send_keys(f"codex resume {thread_id}", "C-m")
         self._maybe_accept_directory_trust_prompt()
 
     def send_codex_prompt(self, prompt: str) -> None:
@@ -518,6 +536,15 @@ class RealCodexHarness:
 
         self._wait_for(_ready, timeout=timeout, description=f"watch log entry {needle!r}")
         return self.watch_log.read_text(encoding="utf-8", errors="ignore")
+
+    def wait_for_recent_codex_log_contains(self, needle: str, timeout: float = 30.0) -> str:
+        def _probe() -> Optional[str]:
+            text = self.recent_codex_log(lines=400)
+            if needle in text:
+                return text
+            return None
+
+        return self._wait_for_value(_probe, timeout=timeout, description=f"codex log containing {needle!r}")
 
     def wait_for_first_completed_turn(self, timeout: float = 60.0) -> TurnObservation:
         def _probe() -> Optional[TurnObservation]:

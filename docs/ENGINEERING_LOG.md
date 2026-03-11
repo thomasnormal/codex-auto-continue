@@ -6,6 +6,8 @@
 - Change: tightened the public CLI surface again. `cleanup` is now all-or-nothing, and thread-id selectors remain supported only as the explicit second positional argument to `acw start`.
 - Change: removed the last manager-side `stale` health state and normalized any persisted legacy `stale` watcher rows to `warn`, which matches the current codex-log-only health model.
 - Change: deleted the leftover `_doctor_checks()` compatibility wrapper. Tests now exercise `_doctor_report()` directly, so the real doctor UI and recommendation path are the only maintained implementation.
+- Change: removed the old TTY-based `codex resume <thread-id>` sniffing from `auto_continue_watchd.py`. Pane-local process-tree and SQLite discovery are now the only thread-detection path, and the isolated real-Codex suite now proves both plain `codex` and resumed Codex panes work without the argv/TTY fallback.
+- Change: removed the unused direct-logwatch flags `--auto-rebind-idle-secs` and `--require-pane-active`. They only supported the older auto-rebind tuning path and were no longer part of the intended `acw` interface.
 - Change: expanded the private real-Codex suite with manager-facing regressions for `doctor` on a plain shell pane, `start` failure on a non-Codex pane, and `status` rendering of a live `LAST_AGENT` snippet.
 - Change: `acw status` now prints follow-up `acw doctor <target>` recommendations for degraded rows, and `acw doctor` now evaluates watcher health and highlights a concrete next command like `acw restart <target>` or `acw start <target> <thread-id>`.
 - Change: added light section separators to the default `acw status` table every third watcher so larger dashboards are easier to scan.

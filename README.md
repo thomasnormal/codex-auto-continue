@@ -92,7 +92,7 @@ to the tmux pane.
 
 The watch daemon discovers which Codex thread belongs to each pane by inspecting
 the pane's live process tree, Codex's local state DB, and thread-keyed session
-state. This works for both `codex resume ...` panes and plain `codex
+state. This works for both resumed Codex panes and plain `codex
 --full-auto` panes running on different tmux windows at the same time.
 
 Watcher processes also record the tmux socket they were started against. That
@@ -249,13 +249,14 @@ otherwise it falls back to a plain-text summary.
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
 The shell script is a thin wrapper around a shared Python harness and currently
-runs twelve real-Codex tests:
+runs thirteen real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
 - a watcher regression test that proves watcher health no longer emits legacy rollout warnings
 - a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
+- a manager integration test that starts a watcher against a `codex resume <thread-id>` pane
 - a manager integration test that updates a watcher's message through `acw edit <pane>`
 - a manager integration test that verifies `acw doctor` reports a healthy current pane with a detected thread
 - a manager regression test that verifies `acw doctor` reports a missing thread on a plain shell pane
