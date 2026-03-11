@@ -1635,15 +1635,22 @@ def cmd_status(argv: list[str]) -> None:
     thread_pane = _build_thread_pane_map()
 
     # 3. Build set of running watcher PIDs per pane.
+    watcher_row_for_thread: dict[str, dict[str, str]] = {}
     watcher_pid_for_pane: dict[str, str] = {}
     for r in watcher_rows():
+        tid = r.get("thread", "").lower()
+        if tid and tid not in watcher_row_for_thread:
+            watcher_row_for_thread[tid] = r
         watcher_pid_for_pane[r["pane"]] = r["pid"]
 
     # 4. Merge: for each session, look up live pane and watcher status.
     resolved: list[tuple[dict[str, str], str, str]] = []
     for s in sessions:
         tid = s["thread_id"].lower()
+        watcher_row = watcher_row_for_thread.get(tid, {})
         ref = thread_pane.get(tid, "") if thread_pane else ""
+        if not ref:
+            ref = watcher_row.get("pane", "")
         live_pane = ref if is_pane_id(ref) else ""
         # Prefer live tmux window name, fall back to state file.
         window_label = pane_window.get(live_pane, "") if live_pane else ""
@@ -1653,14 +1660,19 @@ def cmd_status(argv: list[str]) -> None:
         # Build a row dict compatible with _status_table / _status_details.
         # Find watcher PID: if live_pane is known, look up by pane.
         watcher_pid = watcher_pid_for_pane.get(live_pane, "") if live_pane else ""
+        if not watcher_pid:
+            watcher_pid = watcher_row.get("pid", "")
         row: dict[str, str] = {
             "pid": watcher_pid,
             "pane": live_pane,
             "thread": s["thread_id"],
             "state": s["state_file"],
-            "watch": watch_log_for_key(key_from_pane(live_pane)) if live_pane else "",
+            "watch": (
+                watch_log_for_key(key_from_pane(live_pane))
+                if live_pane else watcher_row.get("watch", "")
+            ),
             "msg_file": "",
-            "msg_inline": s.get("message", ""),
+            "msg_inline": watcher_row.get("msg_inline", "") or s.get("message", ""),
         }
         resolved.append((row, live_pane, window_label))
 

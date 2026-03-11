@@ -186,6 +186,38 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertNotIn("TMUX_PANE", calls[1][1])
         self.assertEqual("/usr/bin", calls[1][1]["PATH"])
 
+    def test_status_uses_live_watcher_rows_when_tmux_metadata_is_unavailable(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        live_rows = [{
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_file": "",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={}):
+                with patch.object(acw, "_build_thread_pane_map", return_value={}):
+                    with patch.object(acw, "watcher_rows", return_value=live_rows):
+                        with patch.object(acw, "_read_state_json", return_value={}):
+                            with patch.object(acw, "_rollout_times", return_value=("-", "-")):
+                                with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                    out = io.StringIO()
+                                    with redirect_stdout(out):
+                                        acw.cmd_status(["--details"])
+        text = out.getvalue()
+        self.assertIn("PANE:            %7", text)
+        self.assertIn("PID:             1234", text)
+        self.assertIn("STATE:           running", text)
+        self.assertIn("WINDOW:          formal", text)
+
     def test_tmux_socket_from_env(self):
         with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1013/default,22,0"}, clear=False):
             self.assertEqual("/tmp/tmux-1013/default", acw._tmux_socket_from_env())

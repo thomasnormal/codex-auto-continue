@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: made `acw status` fall back to live `watcher_rows()` data when tmux pane scans are unavailable. This keeps pane ids, watcher pids, and `running`/`paused` state visible even if the tmux client environment is stale or the server socket is temporarily unreachable.
 - Change: fixed stale-socket tmux fallback in `run_tmux()`. When `$TMUX` points to a dead socket, the retry path now clears `TMUX` and `TMUX_PANE` before probing the default tmux server, so window-name and window-index resolution keep working after a broken client env leaks into the shell.
 - Change: shortened thread IDs in the default `acw status` table to `prefix…suffix` form so the summary view stays compact while `acw status --details` still shows the full thread id.
 - Realization: after the CLI cleanup, the highest-friction operator mistake is shell expansion of bare `*`. The docs now prefer the no-target forms (`pause`, `resume`, `restart`) and treat quoted `'*'` as a secondary explicit form.
