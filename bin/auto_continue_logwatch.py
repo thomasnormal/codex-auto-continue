@@ -487,20 +487,6 @@ def discover_thread_id(log_path: Path, pane: str = "") -> Optional[str]:
         tid = discover_thread_for_pane(pane)
         if tid:
             return tid
-
-    try:
-        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        lines = []
-    # Pick most recent thread id with a completion signal.
-    for line in reversed(lines[-4000:]):
-        event = parse_codex_log_event(line)
-        if event:
-            return event[0]
-    # Fallback: discover from rollout session files (new-codex path).
-    result = find_latest_rollout(SESSIONS_DIR)
-    if result:
-        return result[0]
     return None
 
 
@@ -700,16 +686,6 @@ def main() -> int:
                 if found:
                     rollout_path = found
                     append_log(watch_log, f"rollout: watching {rollout_path.name}")
-                    _add_inotify_watch(rollout_path)
-            elif auto_mode:
-                result = find_latest_rollout(SESSIONS_DIR)
-                if result:
-                    watched_thread, rollout_path = result
-                    watched_last_event_at = tnow
-                    append_log(
-                        watch_log,
-                        f"watch: auto-selected thread_id={watched_thread} from rollout",
-                    )
                     _add_inotify_watch(rollout_path)
 
         # --- Poll rollout JSONL ---

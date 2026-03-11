@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 import sqlite3
 import os
+from unittest.mock import patch
 
 import sys
 
@@ -67,7 +68,7 @@ class LogwatchUnitTests(unittest.TestCase):
         )
         self.assertEqual((THREAD, TURN, "false"), logwatch.parse_codex_log_event(line))
 
-    def test_discover_thread_id_uses_task_close_signal(self):
+    def test_discover_thread_id_uses_pane_local_discovery(self):
         line = (
             f'2026-03-10T13:42:21Z INFO session_loop{{thread_id={THREAD}}}:'
             f'submission_dispatch{{submission.id="{TURN}"}}:'
@@ -78,7 +79,38 @@ class LogwatchUnitTests(unittest.TestCase):
             f.write(line + "\n")
             log_path = Path(f.name)
         try:
-            self.assertEqual(THREAD, logwatch.discover_thread_id(log_path))
+            with patch.object(logwatch, "discover_thread_for_pane", return_value=THREAD):
+                self.assertEqual(THREAD, logwatch.discover_thread_id(log_path, pane="%11"))
+        finally:
+            log_path.unlink(missing_ok=True)
+
+    def test_discover_thread_id_does_not_fall_back_to_global_log_when_pane_discovery_fails(self):
+        line = (
+            f'2026-03-10T13:42:21Z INFO session_loop{{thread_id={THREAD}}}:'
+            f'submission_dispatch{{submission.id="{TURN}"}}:'
+            f'turn{{otel.name="session_task.turn" thread.id={THREAD} turn.id={TURN} model=gpt-5.4}}: '
+            "codex_core::tasks: close time.busy=23.7ms time.idle=2.04s"
+        )
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as f:
+            f.write(line + "\n")
+            log_path = Path(f.name)
+        try:
+            with patch.object(logwatch, "discover_thread_for_pane", return_value=None):
+                self.assertIsNone(logwatch.discover_thread_id(log_path, pane="%11"))
+        finally:
+            log_path.unlink(missing_ok=True)
+
+    def test_discover_thread_id_does_not_fall_back_to_latest_rollout_when_pane_discovery_fails(self):
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as f:
+            log_path = Path(f.name)
+        try:
+            with patch.object(logwatch, "discover_thread_for_pane", return_value=None):
+                with patch.object(
+                    logwatch,
+                    "find_latest_rollout",
+                    side_effect=AssertionError("global rollout fallback should not run"),
+                ):
+                    self.assertIsNone(logwatch.discover_thread_id(log_path, pane="%11"))
         finally:
             log_path.unlink(missing_ok=True)
 

@@ -89,6 +89,10 @@ the pane's live process tree, Codex's local state DB, and thread-keyed session
 state. This works for both `codex resume ...` panes and plain `codex
 --full-auto` panes running on different tmux windows at the same time.
 
+Automatic thread discovery is pane-local only. If `acw` cannot prove which
+thread belongs to the target pane yet, it waits instead of guessing from the
+most recent global Codex log or rollout activity.
+
 Canonical session state is stored as `~/.codex/acw_session.<thread-id>.json`.
 
 If the Codex session restarts with a new thread, the watcher re-discovers it during periodic health checks.

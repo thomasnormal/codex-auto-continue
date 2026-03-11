@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: removed the remaining global auto-thread fallback from `auto_continue_logwatch.py`. In `--thread-id auto` mode, the watcher now binds only from pane-local Codex state and will wait if the pane's thread cannot be proven yet, instead of stealing the most recent global `codex-tui.log` or rollout thread from another pane.
 - Change: thread auto-discovery now falls back to Codex's local `state_*.sqlite` logs table, using the live Codex process pid from the pane process tree. This fixes `acw start` for panes launched as plain `codex --full-auto`, where there is no `resume <thread-id>` argv and no open rollout fd to inspect.
 - Change: when tmux is unreachable and the configured socket path has vanished, `acw` now detects live user-owned `tmux` server pids and prints a recovery hint using `kill -USR1 <pid>`. `status` also warns when it is showing degraded metadata because tmux pane scans failed.
 - Change: made `acw status` fall back to live `watcher_rows()` data when tmux pane scans are unavailable. This keeps pane ids, watcher pids, and `running`/`paused` state visible even if the tmux client environment is stale or the server socket is temporarily unreachable.
