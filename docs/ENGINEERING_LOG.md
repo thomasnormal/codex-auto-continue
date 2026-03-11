@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: thread auto-discovery now falls back to Codex's local `state_*.sqlite` logs table, using the live Codex process pid from the pane process tree. This fixes `acw start` for panes launched as plain `codex --full-auto`, where there is no `resume <thread-id>` argv and no open rollout fd to inspect.
 - Change: when tmux is unreachable and the configured socket path has vanished, `acw` now detects live user-owned `tmux` server pids and prints a recovery hint using `kill -USR1 <pid>`. `status` also warns when it is showing degraded metadata because tmux pane scans failed.
 - Change: made `acw status` fall back to live `watcher_rows()` data when tmux pane scans are unavailable. This keeps pane ids, watcher pids, and `running`/`paused` state visible even if the tmux client environment is stale or the server socket is temporarily unreachable.
 - Change: fixed stale-socket tmux fallback in `run_tmux()`. When `$TMUX` points to a dead socket, the retry path now clears `TMUX` and `TMUX_PANE` before probing the default tmux server, so window-name and window-index resolution keep working after a broken client env leaks into the shell.

@@ -85,9 +85,9 @@ to the tmux pane.
 ### Thread Auto-Discovery
 
 The watch daemon discovers which Codex thread belongs to each pane by inspecting
-the pane's live process tree and tracking thread-keyed session state. This
-works reliably even when multiple Codex sessions run on different panes
-simultaneously.
+the pane's live process tree, Codex's local state DB, and thread-keyed session
+state. This works for both `codex resume ...` panes and plain `codex
+--full-auto` panes running on different tmux windows at the same time.
 
 Canonical session state is stored as `~/.codex/acw_session.<thread-id>.json`.
 

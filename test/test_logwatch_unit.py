@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+import sqlite3
+import os
 
 import sys
 
@@ -15,6 +17,40 @@ TURN = "019cd7fb-f4cf-7512-8325-dae60d5294e4"
 
 
 class LogwatchUnitTests(unittest.TestCase):
+    def test_thread_from_state_db_pid_uses_process_uuid_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o700)
+            db_path = Path(tmpdir) / "state_5.sqlite"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "create table logs ("
+                    "thread_id text, "
+                    "process_uuid text, "
+                    "ts integer, "
+                    "ts_nanos integer)"
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "pid:111:old", 1, 1),
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    (THREAD, "pid:222:live", 10, 5),
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "pid:333:other", 20, 1),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.assertEqual(
+                THREAD,
+                logwatch._thread_from_state_db_pid("222", Path(tmpdir)),
+            )
+
     def test_parse_codex_log_event_parses_post_sampling_line(self):
         line = (
             f"2026-03-10 INFO session_loop{{thread_id={THREAD}}}: codex_core::codex: "

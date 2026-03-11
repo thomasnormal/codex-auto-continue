@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -405,8 +406,40 @@ def write_state(path: Path, state: dict) -> None:
             pass
 
 
+def _thread_from_state_db_pid(pid: str, state_dir: Path = STATE_DIR) -> Optional[str]:
+    """Return the most recent thread_id logged by the Codex process *pid*."""
+    if not pid.isdigit() or not state_dir.is_dir():
+        return None
+
+    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute(
+                "select thread_id "
+                "from logs "
+                "where process_uuid like ? and thread_id is not null and thread_id != '' "
+                "order by ts desc, ts_nanos desc "
+                "limit 1",
+                (f"pid:{pid}:%",),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            conn.close()
+
+        if not row:
+            continue
+        thread_id = str(row[0]).lower()
+        if is_thread_id(thread_id):
+            return thread_id
+    return None
+
+
 def thread_from_codex_pid(pid: str) -> Optional[str]:
-    """If *pid* is a codex process, return its thread_id from open rollout fds."""
+    """If *pid* is a codex process, return its thread_id from local Codex state."""
     try:
         exe = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
         if exe.removesuffix(" (deleted)") != "codex":
@@ -424,7 +457,7 @@ def thread_from_codex_pid(pid: str) -> Optional[str]:
                 return m.group(1).lower()
     except OSError:
         pass
-    return None
+    return _thread_from_state_db_pid(pid)
 
 
 def discover_thread_for_pane(pane: str) -> Optional[str]:
