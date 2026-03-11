@@ -1640,6 +1640,15 @@ def _styled_state(state: str) -> str:
     return f"[{style}]{state}[/{style}]" if style else state
 
 
+def _state_summary(state: str, sj: dict[str, str]) -> str:
+    """Return a compact state cell, with inline detail for degraded rows."""
+    detail = sj.get("health_detail", "").strip()
+    if not detail or state == "running":
+        return _styled_state(state)
+    detail_summary = _truncate(detail, 28)
+    return f"{_styled_state(state)}\n[dim]{detail_summary}[/dim]"
+
+
 _MAX_MSG_LINES = 3
 
 
@@ -1718,7 +1727,14 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         tid = r["thread"] if is_thread_id(r["thread"]) else ""
         short_tid = _short_thread_id(tid) if tid else ""
         window_pane = f"{line1}\n[dim]{short_tid}[/dim]" if short_tid else line1
-        rows_data.append((window_pane, state_value, started, last_acw, last_agent, msg_raw))
+        rows_data.append((
+            window_pane,
+            _state_summary(state_value, sj),
+            started,
+            last_acw,
+            last_agent,
+            msg_raw,
+        ))
 
     try:
         from rich.console import Console
@@ -1752,7 +1768,7 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
-            window_pane, _styled_state(state_value),
+            window_pane, state_value,
             started, last_acw, last_agent_summary, msg_summary,
         )
 

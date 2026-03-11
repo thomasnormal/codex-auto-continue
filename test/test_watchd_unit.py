@@ -42,6 +42,15 @@ class WatchdUnitTests(unittest.TestCase):
     def test_compute_state_shows_dead_without_live_pid_even_if_health_was_ok(self):
         self.assertEqual("dead", acw._compute_state({"pid": ""}, {"health": "ok"}))
 
+    def test_state_summary_shows_health_detail_for_warn(self):
+        summary = acw._state_summary("warn", {"health_detail": "codex log missing for pane %3"})
+        self.assertIn("warn", summary)
+        self.assertIn("codex log missing for pan...", summary)
+
+    def test_state_summary_omits_detail_for_running(self):
+        summary = acw._state_summary("running", {"health_detail": "should stay hidden"})
+        self.assertEqual("[green]running[/green]", summary)
+
     def test_thread_times_formats_sqlite_metadata(self):
         with patch.object(acw, "thread_times_from_state_db", return_value=(100.0, 150.0)):
             with patch.object(acw, "_format_age", side_effect=["started", "last-msg"]):
@@ -127,7 +136,11 @@ class WatchdUnitTests(unittest.TestCase):
                     side_effect=AssertionError("summary status should not scan all panes"),
                 ):
                     with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(acw, "_read_state_json", return_value={}):
+                        with patch.object(
+                            acw,
+                            "_read_state_json",
+                            return_value={"health": "warn", "health_detail": "codex log missing"},
+                        ):
                             with patch.object(acw, "_thread_times", return_value=("-", "-")):
                                 with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
                                     with patch.object(acw, "_is_pid_stopped", return_value=False):
@@ -139,6 +152,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("WINDOW/PANE", text)
         self.assertIn("LAST_AGENT", text)
         self.assertIn("Ran tests", text)
+        self.assertIn("warn / codex log missing", text)
 
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
