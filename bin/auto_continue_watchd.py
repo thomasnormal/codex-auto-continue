@@ -1370,6 +1370,13 @@ def _resolve_message(r: dict[str, str]) -> tuple[str, str]:
     return "", ""
 
 
+def _short_thread_id(thread_id: str) -> str:
+    """Return a compact display form for a thread id in summary tables."""
+    if not is_thread_id(thread_id):
+        return thread_id
+    return f"{thread_id[:8]}…{thread_id[-4:]}"
+
+
 def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
     """Derive display state from process status and health JSON."""
     pid = r.get("pid", "")
@@ -1458,7 +1465,8 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         msg_raw = _message_summary_for_row(r)
         line1 = f"{window_label}/{current_pane}" if current_pane else window_label
         tid = r["thread"] if is_thread_id(r["thread"]) else ""
-        window_pane = f"{line1}\n[dim]{tid}[/dim]" if tid else line1
+        short_tid = _short_thread_id(tid) if tid else ""
+        window_pane = f"{line1}\n[dim]{short_tid}[/dim]" if short_tid else line1
         rows_data.append((window_pane, state_value, started, last_msg, last_acw, msg_raw))
 
     # Estimate MESSAGE column width from terminal width and other columns.

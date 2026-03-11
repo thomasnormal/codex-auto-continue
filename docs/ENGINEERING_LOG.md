@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: shortened thread IDs in the default `acw status` table to `prefix…suffix` form so the summary view stays compact while `acw status --details` still shows the full thread id.
 - Realization: after the CLI cleanup, the highest-friction operator mistake is shell expansion of bare `*`. The docs now prefer the no-target forms (`pause`, `resume`, `restart`) and treat quoted `'*'` as a secondary explicit form.
 - Change: refreshed `README.md`, `docs/ARCHITECTURE.md`, and `AGENTS.md` to match the current acw surface: Python-only entrypoint, no `recover`, thread-keyed session state, private-socket real-Codex E2E harness, and the current real test count in the wrapper suite.
 

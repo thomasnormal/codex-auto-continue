@@ -20,6 +20,9 @@ THREAD = "11111111-1111-1111-1111-111111111111"
 
 
 class WatchdUnitTests(unittest.TestCase):
+    def test_short_thread_id_keeps_prefix_and_suffix(self):
+        self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
+
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
             with redirect_stderr(io.StringIO()):
