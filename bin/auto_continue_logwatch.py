@@ -297,7 +297,7 @@ PANE_ERROR_PATTERNS = [
 ]
 
 
-def tmux_capture_pane(pane: str, lines: int = 10) -> str:
+def tmux_capture_pane(pane: str, lines: int = 20) -> str:
     """Capture recent visible lines from a tmux pane."""
     rc = run_tmux(["capture-pane", "-t", pane, "-p", "-S", f"-{lines}"])
     if rc.returncode == 0:
@@ -307,7 +307,7 @@ def tmux_capture_pane(pane: str, lines: int = 10) -> str:
 
 def check_pane_for_errors(pane: str) -> Optional[str]:
     """Return the first matched error string from the pane, or None."""
-    text = tmux_capture_pane(pane, lines=10)
+    text = tmux_capture_pane(pane, lines=20)
     for pat in PANE_ERROR_PATTERNS:
         m = pat.search(text)
         if m:
@@ -772,17 +772,17 @@ def main() -> int:
                 append_log(watch_log, f"skip: pane inactive turn={turn_id}")
                 continue
 
+            pane_error = check_pane_for_errors(args.pane)
+            if pane_error:
+                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
+                continue
+
             if tnow - last_send_time < max(0.0, args.cooldown_secs):
                 append_log(watch_log, f"skip: cooldown turn={turn_id}")
                 continue
 
             if args.send_delay_secs > 0.0:
                 time.sleep(args.send_delay_secs)
-
-            pane_error = check_pane_for_errors(args.pane)
-            if pane_error:
-                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
-                continue
 
             ok, send_error = tmux_send(args.pane, msg, max(0.0, args.enter_delay_secs))
             if ok:

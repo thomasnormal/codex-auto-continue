@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Realization: checking pane-visible Codex errors after the cooldown gate was too late. A user interrupt could still queue a follow-up completion during cooldown, and the watcher would miss the interrupt banner. Pane-error detection now runs before cooldown, and pane capture depth was widened so the interrupt banner is less likely to scroll out of the sampled region.
 - Change: watchers now auto-pause on pane-visible Codex interruption/account-error banners instead of repeatedly re-sending the continue message. This covers the `Conversation interrupted` banner as well as auth/quota-style failures already matched by pane error detection.
 - Change: removed the remaining global auto-thread fallback from `auto_continue_logwatch.py`. In `--thread-id auto` mode, the watcher now binds only from pane-local Codex state and will wait if the pane's thread cannot be proven yet, instead of stealing the most recent global `codex-tui.log` or rollout thread from another pane.
 - Change: thread auto-discovery now falls back to Codex's local `state_*.sqlite` logs table, using the live Codex process pid from the pane process tree. This fixes `acw start` for panes launched as plain `codex --full-auto`, where there is no `resume <thread-id>` argv and no open rollout fd to inspect.
