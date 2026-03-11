@@ -2,6 +2,13 @@
 
 ## 2026-03-11
 
+- Change: the real-Codex harness now always uses an isolated test home, seeded from the user's existing Codex auth/config files. That keeps watcher state, Codex logs, sessions, and tmux artifacts out of the live `~/.codex` tree while still authenticating a real Codex process.
+- Change: the real-Codex harness now archives pane capture, watcher logs, a Codex log tail, and state files under `~/.codex/auto-continue-e2e-tmp/failures/` whenever a contract or integration test fails.
+- Change: expanded the isolated real-Codex suite to cover manager behavior as well as the direct watcher: starting against a plain `codex --full-auto` pane, reporting `dead` after a real watcher exits, and recovering after a private tmux socket is recreated with `kill -USR1`.
+- Change: simplified `start` target handling to canonical live tmux targets only (pane id, window index, `session:window`, or exact tmux window name). Thread ids are still accepted, but only as the second positional argument.
+- Realization: pane ids are only unique within one tmux server. `watcher_rows()` needed explicit tmux-socket metadata from watcher processes; otherwise a private `%0` test pane could collide with a live `%0` watcher on the user's main tmux server.
+- Change: `watchd` now passes `--tmux-socket` into watcher processes, `logwatch` persists that socket in argv, and watcher discovery scopes itself to the current tmux server when `AUTO_CONTINUE_TMUX_SOCKET` is set.
+- Change: broadened interrupt auto-pause matching to include the newer Codex banner `Model interrupted to submit steer instructions`, which now appears in the real product after `Esc` in some flows.
 - Change: bounded state-db pid-to-thread discovery to the current Codex process lifetime. The SQLite fallback now ignores `logs.process_uuid = pid:<pid>:...` rows older than the live process start time, which prevents stale thread reuse when Linux recycles a pid.
 - Change: taught `auto_continue_logwatch.py` to recover from stale explicit tmux socket configuration in the same way `watchd` already did. If `AUTO_CONTINUE_TMUX_SOCKET` or `$TMUX` points at a vanished socket, the watcher now retries against the default server with the client env cleared instead of staying wedged on the dead path.
 - Change: tightened status semantics so persisted session health no longer masquerades as liveness. If there is no live watcher pid, `acw status` now reports `dead` even when the last on-disk health snapshot was `ok`.

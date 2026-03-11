@@ -287,6 +287,7 @@ def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.Comp
 
 PANE_ERROR_PATTERNS = [
     re.compile(r"conversation interrupted", re.IGNORECASE),
+    re.compile(r"model interrupted to submit steer instructions", re.IGNORECASE),
     re.compile(r"something went wrong\? hit /feedback", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),
@@ -528,6 +529,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--pane", default=os.environ.get("TMUX_PANE", ""))
     p.add_argument("--thread-id", default="auto")
+    p.add_argument("--tmux-socket", default=os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", ""))
     p.add_argument("--auto-rebind-idle-secs", type=float, default=20.0)
     p.add_argument("--message-file", default="")
     p.add_argument("--message", default="please continue")
@@ -540,6 +542,9 @@ def main() -> int:
     p.add_argument("--state-file", default="")
     p.add_argument("--watch-log", default="")
     args = p.parse_args()
+
+    if args.tmux_socket:
+        os.environ["AUTO_CONTINUE_TMUX_SOCKET"] = args.tmux_socket
 
     cwd = Path(args.cwd)
     if not args.pane:

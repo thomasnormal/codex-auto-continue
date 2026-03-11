@@ -17,6 +17,10 @@ That's it. The watcher discovers the Codex thread for the pane and sends your
 message whenever a turn completes. If a thread-id cannot be discovered, `start`
 fails instead of running with an unknown thread.
 
+`start` only accepts live tmux targets: pane id, window index, `session:window`,
+or exact tmux window name. If you already know the Codex thread id, pass it as
+the second positional argument: `acw start uvm <thread-id>`.
+
 For all-watcher operations, prefer the no-target forms:
 
 ```bash
@@ -41,7 +45,7 @@ cleanup     [target]
 status      [target]
 ```
 
-`<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
+For `start`, `<target>` is a pane id (`%6`), window index (`2`), `session:window` (`0:2`), or a tmux window name (`uvm`).
 `stop` with no target stops all running watchers.
 `pause`, `resume`, and `restart` with no target act on all running watchers.
 `cleanup` with no target removes stale watcher files; with a target it removes a
@@ -88,6 +92,10 @@ The watch daemon discovers which Codex thread belongs to each pane by inspecting
 the pane's live process tree, Codex's local state DB, and thread-keyed session
 state. This works for both `codex resume ...` panes and plain `codex
 --full-auto` panes running on different tmux windows at the same time.
+
+Watcher processes also record the tmux socket they were started against. That
+keeps watcher discovery scoped to the current tmux server and avoids pane-id
+collisions between your live server and the isolated real-Codex test harness.
 
 Automatic thread discovery is pane-local only. If `acw` cannot prove which
 thread belongs to the target pane yet, it waits instead of guessing from the
@@ -184,9 +192,10 @@ paused: pane=%2 pid=48305
 ```
 
 Watchers also auto-pause when the pane shows a Codex-level interruption or
-account error banner, such as `Conversation interrupted`, auth failures, or
-quota/usage-limit errors. Resume them explicitly with `acw resume <target>`
-after you have handled the issue in the pane.
+account error banner, such as `Conversation interrupted`, `Model interrupted to
+submit steer instructions`, auth failures, or quota/usage-limit errors. Resume
+them explicitly with `acw resume <target>` after you have handled the issue in
+the pane.
 
 If a watcher process is gone, `acw status` now reports it as `dead` even if the
 last persisted health snapshot was `ok`.
@@ -212,16 +221,21 @@ started: pid=49501 pane=%2 thread_id=01a2b3c6-d5e6-7f80-9a1b-2c3d4e5f6a7b
 
 Run `bash test/test_rollout_e2e.sh` to execute the real-Codex integration suite.
 The shell script is a thin wrapper around a shared Python harness and currently
-runs four real-Codex tests:
+runs seven real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
 - a watcher regression test that ensures `rollout channel closed` is not reported as a hard error when `codex-tui.log` is still driving completion
-- a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real `Conversation interrupted` banner
+- a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
+- a manager integration test that starts a watcher against a plain `codex --full-auto` pane
+- a manager integration test that reports `dead` after a real watcher process exits
+- a manager integration test that recreates a private tmux socket with `kill -USR1` and then starts successfully
 
 The harness always uses a dedicated tmux server on its own socket, so it does
-not interfere with your existing tmux sessions. If `AUTO_CONTINUE_E2E_ENV_FILE`
-or a local `.env.local` / `.env` is present, the harness uses that for Codex
-credentials inside an isolated test home. Otherwise it falls back to your
-existing `~/.codex` login state and still keeps tmux and watcher state
-isolated.
+not interfere with your existing tmux sessions. It also always uses an isolated
+test home seeded from your existing Codex auth/config files, so tmux state,
+watcher state, and Codex session artifacts stay out of your live `~/.codex`.
+
+If a real-Codex test fails, the harness archives pane capture, watcher logs,
+Codex log tail, and state files under `~/.codex/auto-continue-e2e-tmp/failures/`
+for postmortem debugging.

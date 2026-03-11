@@ -231,23 +231,31 @@ def _tmux_client_env_healthy() -> bool:
 
 
 def _tmux_server_pids() -> list[str]:
+    sock = _preferred_tmux_socket()
     try:
         ps_out = subprocess.check_output(
-            ["ps", "-u", str(os.getuid()), "-o", "pid=,comm="],
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
             stderr=subprocess.DEVNULL,
             text=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
 
+    socket_matches: list[str] = []
     pids: list[str] = []
     for line in ps_out.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
             continue
-        pid_str, comm = parts
-        if pid_str.isdigit() and comm == "tmux":
-            pids.append(pid_str)
+        pid_str, args = parts
+        if not pid_str.isdigit() or "tmux" not in args:
+            continue
+        if sock and sock in args:
+            socket_matches.append(pid_str)
+            continue
+        pids.append(pid_str)
+    if socket_matches:
+        return socket_matches
     return pids
 
 
@@ -454,6 +462,51 @@ def resolve_pane_target(target: str) -> str:
     sys.exit(1)
 
 
+def resolve_start_pane_target(target: str) -> str:
+    """Resolve only the canonical tmux targets accepted by `start`.
+
+    Supported forms: pane id, window index, session:window, or exact tmux
+    window name. Thread ids are intentionally rejected here because the second
+    positional argument is reserved for the explicit Codex thread id.
+    """
+    if is_pane_id(target):
+        return target
+
+    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
+        pane = resolve_pane_from_window_target(target)
+        if pane and is_pane_id(pane):
+            return pane
+        print(f"error: could not resolve window target '{target}'", file=sys.stderr)
+        sys.exit(1)
+
+    if is_thread_id(target):
+        print(
+            "error: start target must be a pane id, window index, session:window, or tmux window name",
+            file=sys.stderr,
+        )
+        print(
+            "hint: pass the thread id as the second positional argument: "
+            "acw start <target> <thread-id>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    pane = resolve_pane_from_window_name(target)
+    if pane and is_pane_id(pane):
+        return pane
+
+    if _tmux_socket_recovery_hint():
+        _print_tmux_unavailable_hint(target)
+        sys.exit(1)
+
+    print(f"error: could not resolve start target '{target}'", file=sys.stderr)
+    print(
+        "hint: use a pane id ('%6'), window name, or window index ('2')",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Thread ID detection
 # ---------------------------------------------------------------------------
@@ -647,7 +700,7 @@ def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
     """Parse logwatch.py command-line tokens into an info dict."""
     info: dict[str, str] = {
         "pane": "", "thread": "", "state": "",
-        "watch": "", "cwd": "", "msg_file": "", "msg_inline": "",
+        "watch": "", "cwd": "", "msg_file": "", "msg_inline": "", "tmux_socket": "",
     }
     i = 0
     while i < len(tokens):
@@ -674,9 +727,26 @@ def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
         elif tok == "--message":
             info["msg_inline"] = nxt
             i += 2
+        elif tok == "--tmux-socket":
+            info["tmux_socket"] = nxt
+            i += 2
         else:
             i += 1
     return info
+
+
+def _pane_exists_on_socket(pane: str, socket_path: str) -> bool:
+    if not pane or not socket_path:
+        return False
+    try:
+        out = subprocess.check_output(
+            ["tmux", "-S", socket_path, "display-message", "-p", "-t", pane, "#{pane_id}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return out == pane
 
 
 def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
@@ -689,6 +759,8 @@ def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
         return []
 
     results: list[dict[str, str]] = []
+    current_socket = _preferred_tmux_socket()
+    explicit_socket = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
     for line in ps_out.splitlines():
         line = line.strip()
         if not line:
@@ -715,6 +787,14 @@ def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
 
         if not info["pane"]:
             continue
+        row_socket = info.get("tmux_socket", "")
+        if current_socket:
+            if row_socket and row_socket != current_socket:
+                continue
+            if explicit_socket and not row_socket:
+                continue
+            if not row_socket and not _pane_exists_on_socket(info["pane"], current_socket):
+                continue
         if pane_filter and info["pane"] != pane_filter:
             continue
         results.append(info)
@@ -791,12 +871,14 @@ def _edit_message_interactive(initial: str = "") -> str | None:
 
 
 def _logwatch_cmd(pane: str, thread_id: str, message_args: list[str], key: str) -> list[str]:
+    tmux_socket = _preferred_tmux_socket()
     return [
         "python3",
         str(SCRIPT),
         "--cwd", PROJECT_CWD,
         "--pane", pane,
         "--thread-id", thread_id,
+        *(["--tmux-socket", tmux_socket] if tmux_socket else []),
         *message_args,
         "--cooldown-secs", "1.0",
         "--send-delay-secs", SEND_DELAY_SECS,
@@ -827,12 +909,12 @@ def cmd_start(argv: list[str]) -> None:
         print(
             "error: pane target is required\n"
             "usage: auto_continue_watchd.py start <pane-id|window-index|session:window> "
-            "[thread-id|auto] [--message TEXT | --message-file FILE]",
+            "[thread-id] [--message TEXT | --message-file FILE]",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    pane = resolve_pane_target(target)
+    pane = resolve_start_pane_target(target)
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
     ensure_tmux_window_rename_hook()

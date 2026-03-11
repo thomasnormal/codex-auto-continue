@@ -38,6 +38,31 @@ class WatchdUnitTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     acw.resolve_thread_id("%1", "auto")
 
+    def test_resolve_start_pane_target_rejects_thread_id(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                acw.resolve_start_pane_target(THREAD)
+        self.assertIn("start target must be", err.getvalue())
+
+    def test_resolve_start_pane_target_uses_window_name(self):
+        with patch.object(acw, "resolve_pane_from_window_name", return_value="%7"):
+            self.assertEqual("%7", acw.resolve_start_pane_target("formal"))
+
+    def test_watcher_rows_filter_to_current_tmux_socket(self):
+        ps_out = (
+            "101 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
+            "--thread-id 11111111-1111-1111-1111-111111111111 --tmux-socket /tmp/other.sock\n"
+            "202 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
+            "--thread-id 22222222-2222-2222-2222-222222222222 --tmux-socket /tmp/current.sock\n"
+        )
+        with patch.dict(acw.os.environ, {"AUTO_CONTINUE_TMUX_SOCKET": "/tmp/current.sock"}, clear=False):
+            with patch.object(acw.subprocess, "check_output", return_value=ps_out):
+                rows = acw.watcher_rows()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("202", rows[0]["pid"])
+        self.assertEqual("/tmp/current.sock", rows[0]["tmux_socket"])
+
     def test_load_sessions_reads_thread_keyed_state(self):
         session_file = f"/state/acw_session.{THREAD}.json"
         with patch.object(acw.glob, "glob", return_value=[session_file]):

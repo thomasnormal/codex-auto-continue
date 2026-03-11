@@ -148,6 +148,15 @@ class LogwatchUnitTests(unittest.TestCase):
             reason = logwatch.check_pane_for_errors("%11")
         self.assertEqual("Conversation interrupted", reason)
 
+    def test_check_pane_for_errors_matches_model_interrupted_banner(self):
+        with patch.object(
+            logwatch,
+            "tmux_capture_pane",
+            return_value="• Model interrupted to submit steer instructions.\n",
+        ):
+            reason = logwatch.check_pane_for_errors("%11")
+        self.assertEqual("Model interrupted to submit steer instructions", reason)
+
     def test_auto_pause_current_watcher_stops_process_for_pane_error(self):
         state = {"thread_id": THREAD, "message": "continue"}
         with patch.object(logwatch, "append_log") as append_log:
