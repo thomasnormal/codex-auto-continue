@@ -1641,19 +1641,6 @@ def _strip_rich_markup(text: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", text)
 
 
-def _status_wide_column_widths(term_w: int, fixed_width: int) -> tuple[int, int]:
-    """Return ``(last_agent_width, message_width)`` for the current terminal."""
-    available = max(28, term_w - fixed_width - 19)
-    if available <= 44:
-        message_w = max(12, available // 3)
-        last_agent_w = max(16, available - message_w)
-        return last_agent_w, message_w
-
-    message_w = max(16, min(28, available // 3))
-    last_agent_w = max(24, available - message_w)
-    return last_agent_w, message_w
-
-
 def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
     headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
     plain_rows: list[tuple[str, str, str, str, str, str]] = []
@@ -1783,28 +1770,29 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         _status_table_plain(rows_data)
         return
 
-    # Estimate wide-column widths from terminal width and the fixed columns.
+    # Estimate MESSAGE column width from terminal width and other columns.
     term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT")
     col_widths = [len(h) for h in headers]
     for row in rows_data:
-        for i in range(4):
+        for i in range(5):
             # Measure first line only, strip rich markup tags.
             text = row[i].split("\n")[0]
             text = re.sub(r"\[/?[^\]]*\]", "", text)
             col_widths[i] = max(col_widths[i], len(text))
-    last_agent_w, msg_col_w = _status_wide_column_widths(term_w, sum(col_widths))
+    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
+    msg_col_w = max(20, min(60, term_w - sum(col_widths) - 19))
 
     table = Table(show_lines=False, expand=True)
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
     table.add_column("STARTED", no_wrap=True)
     table.add_column("LAST_ACW", no_wrap=True)
-    table.add_column("LAST_AGENT", width=last_agent_w, max_width=last_agent_w)
-    table.add_column("MESSAGE", width=msg_col_w, max_width=msg_col_w)
+    table.add_column("LAST_AGENT", max_width=48)
+    table.add_column("MESSAGE", ratio=1, max_width=60)
 
     for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
-        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, last_agent_w)
+        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
             window_pane, state_value,
