@@ -161,6 +161,31 @@ class WatchdUnitTests(unittest.TestCase):
                     out = acw.run_tmux("list-sessions")
         self.assertEqual("ok", out)
 
+    def test_run_tmux_stale_socket_fallback_clears_tmux_env(self):
+        calls = []
+
+        def fake_check_output(cmd, stderr=None, text=None, env=None):
+            calls.append((cmd, env))
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(1, cmd)
+            return "ok"
+
+        env = {
+            "TMUX": "/tmp/tmux-1/default,1,0",
+            "TMUX_PANE": "%9",
+            "PATH": "/usr/bin",
+        }
+        with patch.dict(acw.os.environ, env, clear=True):
+            with patch.object(acw.subprocess, "check_output", side_effect=fake_check_output):
+                out = acw.run_tmux("list-sessions")
+
+        self.assertEqual("ok", out)
+        self.assertEqual(["tmux", "-S", "/tmp/tmux-1/default", "list-sessions"], calls[0][0])
+        self.assertEqual(["tmux", "list-sessions"], calls[1][0])
+        self.assertNotIn("TMUX", calls[1][1])
+        self.assertNotIn("TMUX_PANE", calls[1][1])
+        self.assertEqual("/usr/bin", calls[1][1]["PATH"])
+
     def test_tmux_socket_from_env(self):
         with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1013/default,22,0"}, clear=False):
             self.assertEqual("/tmp/tmux-1013/default", acw._tmux_socket_from_env())

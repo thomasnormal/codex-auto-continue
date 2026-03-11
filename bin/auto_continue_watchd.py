@@ -186,8 +186,14 @@ def run_tmux(*args: str) -> str | None:
             pass
     elif sock:
         # Socket override can become stale; fallback to default tmux server.
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         try:
-            return subprocess.check_output(["tmux"] + list(args), stderr=subprocess.DEVNULL, text=True)
+            return subprocess.check_output(
+                ["tmux"] + list(args),
+                stderr=subprocess.DEVNULL,
+                text=True,
+                env=env,
+            )
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
     return None
