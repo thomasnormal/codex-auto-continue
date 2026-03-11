@@ -167,18 +167,19 @@ View health with `acw status`.
 ```
 $ acw status
 Sessions: 3
-WINDOW      STATE    STARTED    LAST_MSG   LAST_ACW   MESSAGE
------------ -------- ---------- ---------- ---------- -------
-0:1:api     running  2d14h ago  0s ago     4m ago     msg:please continue working on the API...
-0:2:tests   running  1d08h ago  12s ago    8m ago     msg:continue writing tests for the auth...
-0:3:refac   paused   3d02h ago  1h22m ago  1h22m ago  msg:keep refactoring the database layer...
+WINDOW      STATE    STARTED    LAST_ACW   LAST_AGENT              MESSAGE
+----------- -------- ---------- ---------- ----------------------- ------------------------------
+0:1:api     running  2d14h ago  4m ago     Ran unit tests          msg:please continue working…
+0:2:tests   running  1d08h ago  8m ago     Edited auth middleware  msg:continue writing tests…
+0:3:refac   paused   3d02h ago  1h22m ago  Explored schema drift   msg:keep refactoring the…
 ```
 
 The columns show:
 - **WINDOW** — `session:index:name` (uses live tmux state, survives window reordering)
 - **STARTED** — when the Codex thread was created, from local Codex SQLite state
-- **LAST_MSG** — last recorded activity for the Codex thread, from local Codex SQLite state
 - **LAST_ACW** — when the watcher last sent a continue prompt
+- **LAST_AGENT** — recent assistant-visible text from the live tmux pane, falling back to the thread title when needed
+- **MESSAGE** — the stored continue prompt that `acw` will inject on the next completion
 
 ### Start with interactive editor
 

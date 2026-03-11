@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1465,6 +1466,35 @@ def _thread_times(thread_id: str) -> tuple[str, str]:
     return started, last_msg
 
 
+def _thread_title(thread_id: str) -> str:
+    """Return a stable thread summary from local Codex SQLite state."""
+    if not is_thread_id(thread_id):
+        return ""
+    state_dir = Path(STATE_DIR)
+    if not state_dir.is_dir():
+        return ""
+    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute(
+                "select title, first_user_message from threads where id = ?",
+                (thread_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            conn.close()
+        if not row:
+            continue
+        for value in row:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def _format_age(epoch: float) -> str:
     """Format an epoch as a human-friendly relative age string."""
     delta = time.time() - epoch
@@ -1481,6 +1511,85 @@ def _format_age(epoch: float) -> str:
     d = int(delta // 86400)
     h = int((delta % 86400) // 3600)
     return f"{d}d{h}h ago"
+
+
+_PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
+_SHELL_PROMPT_RE = re.compile(r"^\[[^\]]+\]\$\s*$")
+
+
+def _clean_pane_line_candidate(line: str) -> tuple[str, bool]:
+    """Return ``(candidate, preferred)`` for a pane line, or ``('', False)``."""
+    raw = line.rstrip()
+    stripped = raw.strip()
+    if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
+        return "", False
+
+    lowered = stripped.lower()
+    if stripped.startswith("› "):
+        return "", False
+    if "working (" in lowered and "esc to interrupt" in lowered:
+        return "", False
+    if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
+        return "", False
+    if stripped.startswith(("1. Yes", "2. No", "> You are in ")):
+        return "", False
+    if "do you trust the contents of this directory?" in lowered:
+        return "", False
+    if "? for shortcuts" in stripped:
+        return "", False
+    if "context left" in stripped and "gpt-" in stripped:
+        return "", False
+    if _SHELL_PROMPT_RE.match(stripped):
+        return "", False
+
+    preferred = False
+    candidate = stripped
+    if candidate.startswith("• "):
+        candidate = candidate[2:].strip()
+        preferred = True
+    elif candidate.startswith("◦ "):
+        candidate = candidate[2:].strip()
+    elif candidate.startswith("└ "):
+        candidate = candidate[2:].strip()
+    elif candidate.startswith("│ "):
+        candidate = candidate[2:].strip()
+
+    if not candidate or candidate.startswith("OpenAI Codex"):
+        return "", False
+    return candidate, preferred
+
+
+def _extract_last_agent_snippet(text: str) -> str:
+    """Extract a compact recent assistant-visible snippet from captured pane text."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    cutoff = len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].lstrip().startswith("› "):
+            cutoff = i
+            break
+    search = lines[:cutoff] if cutoff < len(lines) else lines
+    fallback = ""
+    for line in reversed(search):
+        candidate, preferred = _clean_pane_line_candidate(line)
+        if not candidate:
+            continue
+        if preferred:
+            return candidate
+        if not fallback:
+            fallback = candidate
+    return fallback
+
+
+def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
+    """Return a recent assistant snippet for a live pane, with thread-title fallback."""
+    if pane:
+        text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-40") or ""
+        snippet = _extract_last_agent_snippet(text)
+        if snippet:
+            return snippet
+    return _thread_title(thread_id)
 
 
 def _read_state_json(state_path: str) -> dict[str, str]:
@@ -1595,12 +1704,12 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     from rich.table import Table
 
     # Precompute row data to estimate column widths.
-    # (window_pane, state, started, last_msg, last_acw, msg_raw)
+    # (window_pane, state, started, last_acw, last_agent, msg_raw)
     rows_data: list[tuple[str, str, str, str, str, str]] = []
     for r, current_pane, window_label in resolved:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
-        started, last_msg = _thread_times(r["thread"])
+        started, _last_activity = _thread_times(r["thread"])
         last_acw = sj.get("last_continue_at", "")
         if last_acw:
             try:
@@ -1610,16 +1719,17 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
                 pass
         if not last_acw:
             last_acw = "-"
+        last_agent = _last_agent_snippet_for_pane(current_pane, r["thread"]) or "-"
         msg_raw = _message_summary_for_row(r)
         line1 = f"{window_label}/{current_pane}" if current_pane else window_label
         tid = r["thread"] if is_thread_id(r["thread"]) else ""
         short_tid = _short_thread_id(tid) if tid else ""
         window_pane = f"{line1}\n[dim]{short_tid}[/dim]" if short_tid else line1
-        rows_data.append((window_pane, state_value, started, last_msg, last_acw, msg_raw))
+        rows_data.append((window_pane, state_value, started, last_acw, last_agent, msg_raw))
 
     # Estimate MESSAGE column width from terminal width and other columns.
     term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_MSG", "LAST_ACW")
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT")
     col_widths = [len(h) for h in headers]
     for row in rows_data:
         for i in range(5):
@@ -1634,15 +1744,16 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
     table.add_column("STARTED", no_wrap=True)
-    table.add_column("LAST_MSG", no_wrap=True)
     table.add_column("LAST_ACW", no_wrap=True)
+    table.add_column("LAST_AGENT", max_width=48)
     table.add_column("MESSAGE", ratio=1, max_width=60)
 
-    for window_pane, state_value, started, last_msg, last_acw, msg_raw in rows_data:
+    for window_pane, state_value, started, last_acw, last_agent, msg_raw in rows_data:
+        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
             window_pane, _styled_state(state_value),
-            started, last_msg, last_acw, msg_summary,
+            started, last_acw, last_agent_summary, msg_summary,
         )
 
     Console().print(table)
@@ -1677,7 +1788,8 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         else:
             msg_full = "-"
 
-        started, last_msg = _thread_times(r["thread"])
+        started, last_activity = _thread_times(r["thread"])
+        last_agent = _last_agent_snippet_for_pane(current_pane, r["thread"]) or "-"
 
         last_acw = sj.get("last_continue_at", "-")
 
@@ -1688,8 +1800,9 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
         print(f"  {'STATE:':<16} {state_value}")
         print(f"  {'STARTED:':<16} {started}")
-        print(f"  {'LAST_MSG:':<16} {last_msg}")
+        print(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
         print(f"  {'LAST_ACW:':<16} {last_acw}")
+        print(f"  {'LAST_AGENT:':<16} {last_agent}")
         hd = sj.get("health_detail", "")
         if hd:
             print(f"  {'HEALTH_DETAIL:':<16} {hd}")
@@ -1772,9 +1885,10 @@ def cmd_status(argv: list[str]) -> None:
     # 1. Load all sessions from state files.
     sessions = _load_sessions()
 
-    # 2. Build maps from tmux (two scans total).
+    # 2. Build maps from tmux. The default summary path avoids the expensive
+    # thread->pane scan and instead trusts live watcher rows for pane identity.
     pane_window = _build_pane_window_map()
-    thread_pane = _build_thread_pane_map()
+    thread_pane = _build_thread_pane_map() if details else {}
 
     # 3. Build set of running watcher PIDs per pane.
     watcher_row_for_thread: dict[str, dict[str, str]] = {}

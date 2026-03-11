@@ -2,6 +2,8 @@
 
 ## 2026-03-11
 
+- Change: `acw status` now shows a live `LAST_AGENT` snippet extracted from each pane's recent visible Codex output, with a thread-title fallback when no good pane line is available. This makes the summary table act more like a control panel instead of just another timestamp view.
+- Change: sped up the default `acw status` path by skipping the expensive global tmux pane→thread scan. Summary mode now trusts live watcher rows for pane identity and only uses the slower full scan in `--details`, which cut local status latency from about 1.17s to about 0.29s on the main tmux server.
 - Change: removed rollout JSONL from the live watcher path. `auto_continue_logwatch.py` now drives completion from `~/.codex/log/codex-tui.log` only, including startup replay by scanning the recent log tail for a pending completion on the watched thread.
 - Change: replaced `acw status` `STARTED` / `LAST_MSG` rollout-derived timestamps with local Codex SQLite metadata. `STARTED` now comes from thread creation time in `threads.created_at`, and `LAST_MSG` comes from the latest thread activity recorded in `logs.ts` / `threads.updated_at`.
 - Realization: current Codex does not always populate the `logs.process_uuid -> thread_id` mapping early enough for `acw start` / `acw doctor` against a fresh plain `codex --full-auto` pane. Pane-local discovery now falls back to matching the pane cwd and live Codex process start time against the SQLite `threads` table, which keeps the real manager flows working without reintroducing rollout dependence.

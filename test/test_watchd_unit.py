@@ -46,6 +46,55 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "_format_age", side_effect=["started", "last-msg"]):
                 self.assertEqual(("started", "last-msg"), acw._thread_times(THREAD))
 
+    def test_last_agent_snippet_prefers_recent_bullet_summary(self):
+        pane = "\n".join([
+            "  └ some tool output",
+            "",
+            "• Ran unit tests",
+            "",
+            "◦ Working (4m 04s • esc to interrupt)",
+            "",
+            "› Summarize recent commits",
+            "",
+            "  gpt-5.4 xhigh · 21% left · ~/circt",
+        ])
+        self.assertEqual("Ran unit tests", acw._extract_last_agent_snippet(pane))
+
+    def test_status_summary_skips_global_thread_pane_scan(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        live_rows = [{
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_file": "",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
+                with patch.object(
+                    acw,
+                    "_build_thread_pane_map",
+                    side_effect=AssertionError("summary status should not scan all panes"),
+                ):
+                    with patch.object(acw, "watcher_rows", return_value=live_rows):
+                        with patch.object(acw, "_read_state_json", return_value={}):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                        out = io.StringIO()
+                                        with redirect_stdout(out):
+                                            acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Sessions: 1", text)
+        self.assertIn("Ran tests", text)
+
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
             with redirect_stderr(io.StringIO()):
