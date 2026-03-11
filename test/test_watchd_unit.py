@@ -186,6 +186,33 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertNotIn("TMUX_PANE", calls[1][1])
         self.assertEqual("/usr/bin", calls[1][1]["PATH"])
 
+    def test_tmux_socket_recovery_hint_uses_live_tmux_pid(self):
+        with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1013/default,22,0"}, clear=False):
+            with patch.object(acw.os.path, "exists", return_value=False):
+                with patch.object(
+                    acw.subprocess,
+                    "check_output",
+                    return_value="1996933 tmux\n",
+                ):
+                    hint = acw._tmux_socket_recovery_hint()
+        self.assertIn("kill -USR1 1996933", hint)
+        self.assertIn("/tmp/tmux-1013/default", hint)
+
+    def test_resolve_pane_target_prints_tmux_recovery_hint_for_window_name(self):
+        with patch.object(acw, "run_tmux", return_value=None):
+            with patch.object(
+                acw,
+                "_tmux_socket_recovery_hint",
+                return_value="hint: tmux socket is unreachable; recreate it with `kill -USR1 1996933`",
+            ):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    with self.assertRaises(SystemExit):
+                        acw.resolve_pane_target("four")
+        text = err.getvalue()
+        self.assertIn("tmux server is unavailable", text)
+        self.assertIn("kill -USR1 1996933", text)
+
     def test_status_uses_live_watcher_rows_when_tmux_metadata_is_unavailable(self):
         sessions = [{
             "thread_id": THREAD,
@@ -217,6 +244,29 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("PID:             1234", text)
         self.assertIn("STATE:           running", text)
         self.assertIn("WINDOW:          formal", text)
+
+    def test_status_prints_tmux_recovery_hint_when_metadata_is_unavailable(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={}):
+                with patch.object(acw, "_build_thread_pane_map", return_value={}):
+                    with patch.object(acw, "watcher_rows", return_value=[]):
+                        with patch.object(
+                            acw,
+                            "_tmux_socket_recovery_hint",
+                            return_value="hint: tmux socket is unreachable; recreate it with `kill -USR1 1996933`",
+                        ):
+                            err = io.StringIO()
+                            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                                acw.cmd_status([])
+        text = err.getvalue()
+        self.assertIn("tmux metadata is unavailable", text)
+        self.assertIn("kill -USR1 1996933", text)
 
     def test_tmux_socket_from_env(self):
         with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1013/default,22,0"}, clear=False):

@@ -101,6 +101,16 @@ rename polling).
 `acw status` resolves thread→pane mappings dynamically so the WINDOW and PANE
 columns reflect the current tmux layout.
 
+### Tmux Socket Recovery
+
+If tmux is still running but its socket path disappears, `acw` now prints a
+recovery hint instead of only reporting a generic tmux failure. In that case,
+recreate the socket with the suggested command, for example:
+
+```bash
+kill -USR1 1996933
+```
+
 ### Health Monitoring
 
 Each watcher tracks completion-source health, with `codex-tui.log` as the

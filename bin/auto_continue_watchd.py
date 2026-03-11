@@ -161,9 +161,7 @@ def _write_session_state(thread_id: str, data: dict) -> None:
 def run_tmux(*args: str) -> str | None:
     """Run a tmux command, trying socket env then fallback without TMUX env."""
     cmd: list[str] = ["tmux"]
-    sock = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
-    if not sock:
-        sock = _tmux_socket_from_env()
+    sock = _preferred_tmux_socket()
     if sock:
         cmd += ["-S", sock]
     cmd += list(args)
@@ -212,6 +210,11 @@ def _tmux_socket_from_env() -> str:
     return sock if sock else ""
 
 
+def _preferred_tmux_socket() -> str:
+    sock = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
+    return sock if sock else _tmux_socket_from_env()
+
+
 def _tmux_client_env_healthy() -> bool:
     """Return True when TMUX points to a live current client/server."""
     if not os.environ.get("TMUX", ""):
@@ -225,6 +228,62 @@ def _tmux_client_env_healthy() -> bool:
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+
+def _tmux_server_pids() -> list[str]:
+    try:
+        ps_out = subprocess.check_output(
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,comm="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+
+    pids: list[str] = []
+    for line in ps_out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_str, comm = parts
+        if pid_str.isdigit() and comm == "tmux":
+            pids.append(pid_str)
+    return pids
+
+
+def _tmux_socket_recovery_hint() -> str:
+    sock = _preferred_tmux_socket()
+    if not sock or os.path.exists(sock):
+        return ""
+
+    pids = _tmux_server_pids()
+    if not pids:
+        return ""
+    if len(pids) == 1:
+        return (
+            f"hint: tmux socket '{sock}' is unreachable; "
+            f"recreate it with `kill -USR1 {pids[0]}`"
+        )
+    joined = ", ".join(pids)
+    return (
+        f"hint: tmux socket '{sock}' is unreachable; "
+        f"if the right server is still running, recreate its socket with "
+        f"`kill -USR1 <pid>` (tmux pids: {joined})"
+    )
+
+
+def _print_tmux_unavailable_hint(target: str) -> None:
+    print(
+        f"error: tmux server is unavailable; cannot resolve window target '{target}'",
+        file=sys.stderr,
+    )
+    print(
+        "hint: start/reconnect tmux, or use a pane id if you already know it (for example '%6')",
+        file=sys.stderr,
+    )
+    recovery = _tmux_socket_recovery_hint()
+    if recovery:
+        print(recovery, file=sys.stderr)
 
 
 def resolve_pane_from_window_target(target: str) -> str | None:
@@ -244,14 +303,7 @@ def resolve_pane_from_window_target(target: str) -> str | None:
     fmt = "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{pane_index}"
     listing = run_tmux("list-panes", "-a", "-F", fmt)
     if listing is None:
-        print(
-            f"error: tmux server is unavailable; cannot resolve window target '{target}'",
-            file=sys.stderr,
-        )
-        print(
-            "hint: start/reconnect tmux, or use a pane id if you already know it (for example '%6')",
-            file=sys.stderr,
-        )
+        _print_tmux_unavailable_hint(target)
         return None
 
     rows: list[dict[str, str]] = []
@@ -389,6 +441,10 @@ def resolve_pane_target(target: str) -> str:
         for r in watcher_rows():
             if r["thread"].lower() == target.lower():
                 return r["pane"]
+
+    if _tmux_socket_recovery_hint():
+        _print_tmux_unavailable_hint(target)
+        sys.exit(1)
 
     print(f"error: no watcher or window found for '{target}'", file=sys.stderr)
     print(
@@ -1642,6 +1698,16 @@ def cmd_status(argv: list[str]) -> None:
         if tid and tid not in watcher_row_for_thread:
             watcher_row_for_thread[tid] = r
         watcher_pid_for_pane[r["pane"]] = r["pid"]
+
+    recovery = ""
+    if not pane_window and not thread_pane:
+        recovery = _tmux_socket_recovery_hint()
+        if recovery:
+            print(
+                "warning: tmux metadata is unavailable; status is falling back to live watcher rows",
+                file=sys.stderr,
+            )
+            print(recovery, file=sys.stderr)
 
     # 4. Merge: for each session, look up live pane and watcher status.
     resolved: list[tuple[dict[str, str], str, str]] = []
