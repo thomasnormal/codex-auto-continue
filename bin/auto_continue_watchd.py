@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from auto_continue_logwatch import discover_thread_for_pane as _discover_thread_for_pane
@@ -1640,6 +1641,13 @@ def _styled_state(state: str) -> str:
     return f"[{style}]{state}[/{style}]" if style else state
 
 
+_DOCTOR_RESULT_STYLES = {
+    "ok": "green",
+    "warn": "yellow",
+    "error": "bold red",
+}
+
+
 def _state_summary(state: str, sj: dict[str, str]) -> str:
     """Return a compact state cell, with inline detail for degraded rows."""
     detail = sj.get("health_detail", "").strip()
@@ -1650,6 +1658,7 @@ def _state_summary(state: str, sj: dict[str, str]) -> str:
 
 
 _MAX_MSG_LINES = 3
+_STATUS_SECTION_EVERY = 3
 
 
 def _clamp_visual_lines(text: str, max_lines: int, col_width: int) -> str:
@@ -1698,8 +1707,46 @@ def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) ->
 
     print("  ".join(_fmt(header, widths[i]) for i, header in enumerate(headers)))
     print("  ".join("-" * widths[i] for i in range(len(headers))))
-    for row in plain_rows:
+    separator = "  ".join("-" * widths[i] for i in range(len(headers)))
+    for idx, row in enumerate(plain_rows, 1):
         print("  ".join(_fmt(cell, widths[i]) for i, cell in enumerate(row)))
+        if idx % _STATUS_SECTION_EVERY == 0 and idx != len(plain_rows):
+            print(separator)
+
+
+def _status_target_for_row(row: dict[str, str], current_pane: str, window_label: str) -> str:
+    name = row.get("name", "").strip()
+    if name and name != "-":
+        return name
+    if window_label and ":" in window_label:
+        tail = window_label.rsplit(":", 1)[-1].strip()
+        if tail and tail != "-":
+            return tail
+    return current_pane or row.get("pane", "")
+
+
+def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
+    commands: list[str] = []
+    seen: set[str] = set()
+    for row, current_pane, window_label in resolved:
+        state = _compute_state(row, _read_state_json(row["state"]))
+        if state not in {"warn", "error", "stale", "dead"}:
+            continue
+        target = _status_target_for_row(row, current_pane, window_label)
+        if not target:
+            continue
+        cmd = f"acw doctor {shlex.quote(target)}"
+        if cmd in seen:
+            continue
+        seen.add(cmd)
+        commands.append(cmd)
+    return commands
+
+
+def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> None:
+    commands = _status_recommendations(resolved)
+    for cmd in commands:
+        print(f"Recommendation: run {cmd}")
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
@@ -1764,13 +1811,15 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     table.add_column("LAST_AGENT", max_width=48)
     table.add_column("MESSAGE", ratio=1, max_width=60)
 
-    for window_pane, state_value, started, last_acw, last_agent, msg_raw in rows_data:
+    for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
         last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
             window_pane, state_value,
             started, last_acw, last_agent_summary, msg_summary,
         )
+        if idx % _STATUS_SECTION_EVERY == 0 and idx != len(rows_data):
+            table.add_section()
 
     Console().print(table)
 
@@ -1831,6 +1880,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
             print(f"  {'WATCH_LOG:':<16} {r['watch']}")
         if r["state"]:
             print(f"  {'STATE_FILE:':<16} {r['state']}")
+    _print_status_recommendations(resolved)
 
 
 def _load_sessions() -> list[dict[str, str]]:
@@ -1948,6 +1998,7 @@ def cmd_status(argv: list[str]) -> None:
         _status_details(resolved)
     else:
         _status_table(resolved)
+        _print_status_recommendations(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -1997,9 +2048,29 @@ def _doctor_resolve_target(target: str) -> tuple[str, str]:
     return "", f"could not resolve target '{target}'"
 
 
-def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
+@dataclass
+class DoctorReport:
+    checks: list[tuple[str, str]]
+    result: str
+    exit_code: int
+    recommendations: list[str]
+
+
+def _doctor_recommendation_target(target: str, pane: str, rows: list[dict[str, str]]) -> str:
+    if target:
+        return target
+    if rows:
+        name = _read_session_state(rows[0].get("thread", "")).get("name", "").strip()
+        if name:
+            return name
+    return pane
+
+
+def _doctor_report(target: str = "") -> DoctorReport:
     checks: list[tuple[str, str]] = []
+    recommendations: list[str] = []
     errors = 0
+    warnings = 0
 
     ok, detail = _state_dir_is_writable()
     checks.append(("ok" if ok else "error", f"state dir writable: {detail}"))
@@ -2020,11 +2091,12 @@ def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
     if pane_error:
         checks.append(("error", pane_error))
         errors += 1
-        return checks, 1
+        return DoctorReport(checks=checks, result="error", exit_code=1, recommendations=recommendations)
 
     if not pane:
         checks.append(("info", "pane checks skipped: no target and TMUX_PANE not set"))
-        return checks, 1 if errors else 0
+        result = "error" if errors else "ok"
+        return DoctorReport(checks=checks, result=result, exit_code=1 if errors else 0, recommendations=recommendations)
 
     checks.append(("ok", f"pane resolved: {pane}"))
     tid = detect_thread_id_for_pane(pane)
@@ -2035,13 +2107,103 @@ def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
         errors += 1
 
     rows = watcher_rows(pane)
+    command_target = _doctor_recommendation_target(target, pane, rows)
     if rows:
         pid = rows[0].get("pid", "")
         checks.append(("ok", f"watcher running: pane={pane} pid={pid}"))
+        sj = _read_state_json(rows[0].get("state", ""))
+        watcher_state = _compute_state(rows[0], sj)
+        health_detail = sj.get("health_detail", "").strip()
+        if watcher_state == "running":
+            checks.append(("ok", "watcher health: running"))
+        elif watcher_state == "paused":
+            msg = "watcher paused"
+            if health_detail:
+                msg += f" - {health_detail}"
+            checks.append(("warn", msg))
+            warnings += 1
+            recommendations.append(f"acw resume {shlex.quote(command_target)}")
+        else:
+            msg = f"watcher health: {watcher_state}"
+            if health_detail:
+                msg += f" - {health_detail}"
+            level = "warn" if watcher_state in {"warn", "stale"} else "error"
+            checks.append((level, msg))
+            if level == "warn":
+                warnings += 1
+            else:
+                errors += 1
+            recommendations.append(f"acw restart {shlex.quote(command_target)}")
     else:
         checks.append(("info", f"no watcher running for pane {pane}"))
+        if tid and is_thread_id(tid):
+            recommendations.append(f"acw start {shlex.quote(command_target)} {tid}")
 
-    return checks, 1 if errors else 0
+    result = "error" if errors else ("warn" if warnings else "ok")
+    exit_code = 1 if errors else 0
+    return DoctorReport(
+        checks=checks,
+        result=result,
+        exit_code=exit_code,
+        recommendations=list(dict.fromkeys(recommendations)),
+    )
+
+
+def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
+    report = _doctor_report(target)
+    return report.checks, report.exit_code
+
+
+def _print_doctor_plain(report: DoctorReport) -> None:
+    print("Doctor")
+    print(f"  state_dir: {STATE_DIR}")
+    sock = _preferred_tmux_socket() or "(default)"
+    print(f"  tmux_socket: {sock}")
+    for level, message in report.checks:
+        print(f"[{level}] {message}")
+    if report.recommendations:
+        print()
+        for cmd in report.recommendations:
+            print(f"Recommendation: run {cmd}")
+    print(f"RESULT: {report.result}")
+
+
+def _print_doctor_rich(report: DoctorReport) -> None:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+    console.print(
+        Panel.fit(
+            f"state_dir: {STATE_DIR}\n"
+            f"tmux_socket: {_preferred_tmux_socket() or '(default)'}",
+            title="Doctor",
+            border_style="cyan",
+        )
+    )
+
+    table = Table(show_header=False, box=None, expand=True, pad_edge=False)
+    table.add_column("level", no_wrap=True)
+    table.add_column("message")
+    for level, message in report.checks:
+        style = _DOCTOR_RESULT_STYLES.get(level, "dim") if level != "info" else "dim"
+        table.add_row(f"[{style}]{level.upper()}[/{style}]", message)
+    console.print(table)
+
+    if report.recommendations:
+        body = "\n".join(f"[bold cyan]{cmd}[/bold cyan]" for cmd in report.recommendations)
+        console.print(
+            Panel.fit(
+                body,
+                title="Recommended Command",
+                border_style="yellow",
+            )
+        )
+
+    style = _DOCTOR_RESULT_STYLES.get(report.result, "")
+    result_text = f"[{style}]RESULT: {report.result}[/{style}]" if style else f"RESULT: {report.result}"
+    console.print(result_text)
 
 
 def cmd_doctor(argv: list[str]) -> None:
@@ -2052,16 +2214,13 @@ def cmd_doctor(argv: list[str]) -> None:
             sys.exit(2)
         target = argv[0]
 
-    checks, code = _doctor_checks(target)
-    print("Doctor")
-    print(f"  state_dir: {STATE_DIR}")
-    sock = _preferred_tmux_socket() or "(default)"
-    print(f"  tmux_socket: {sock}")
-    for level, message in checks:
-        print(f"[{level}] {message}")
-    print(f"RESULT: {'ok' if code == 0 else 'error'}")
-    if code:
-        sys.exit(code)
+    report = _doctor_report(target)
+    try:
+        _print_doctor_rich(report)
+    except ModuleNotFoundError:
+        _print_doctor_plain(report)
+    if report.exit_code:
+        sys.exit(report.exit_code)
 
 
 # ---------------------------------------------------------------------------

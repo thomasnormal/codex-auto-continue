@@ -5,6 +5,8 @@
 - Change: removed the remaining rollout-era evidence paths from the isolated real-Codex harness. The contract and integration suites now discover completed turns only from `codex-tui.log` and shell snapshots, matching the production watcher model.
 - Change: tightened the public CLI surface again. `cleanup` is now all-or-nothing, and thread-id selectors remain supported only as the explicit second positional argument to `acw start`.
 - Change: expanded the private real-Codex suite with manager-facing regressions for `doctor` on a plain shell pane, `start` failure on a non-Codex pane, and `status` rendering of a live `LAST_AGENT` snippet.
+- Change: `acw status` now prints follow-up `acw doctor <target>` recommendations for degraded rows, and `acw doctor` now evaluates watcher health and highlights a concrete next command like `acw restart <target>` or `acw start <target> <thread-id>`.
+- Change: added light section separators to the default `acw status` table every third watcher so larger dashboards are easier to scan.
 - Change: the default `acw status` table now includes a compact inline state detail for degraded rows. `warn`/`error`/auto-paused rows show a short `health_detail` snippet directly in the STATE cell, so operators do not need `--details` just to see the immediate cause.
 - Realization: `acw status` only worked in the main shell because `rich` was installed in the user's `~/.local`, not system-wide. The isolated real-Codex harness changed `HOME`, which exposed that hidden dependency immediately.
 - Change: `acw status` now falls back to a plain-text summary table when `rich` is unavailable, so the tool keeps working in isolated homes and fresh machines.

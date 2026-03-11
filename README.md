@@ -158,6 +158,11 @@ Each watcher tracks a small amount of operational health:
 
 View health with `acw status`.
 
+When the summary table shows a degraded watcher, `acw status` now prints a
+follow-up recommendation like `acw doctor uvm`. `acw doctor` also evaluates the
+watcher's current health and, when appropriate, highlights a concrete next
+command such as `acw restart uvm` or `acw start uvm <thread-id>`.
+
 ## Screenshots
 
 ### Status overview

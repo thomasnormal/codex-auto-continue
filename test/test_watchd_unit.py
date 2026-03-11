@@ -105,6 +105,44 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 1", text)
         self.assertIn("Ran tests", text)
 
+    def test_status_summary_prints_doctor_recommendation_for_warn(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        live_rows = [{
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_file": "",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
+                with patch.object(
+                    acw,
+                    "_build_thread_pane_map",
+                    side_effect=AssertionError("summary status should not scan all panes"),
+                ):
+                    with patch.object(acw, "watcher_rows", return_value=live_rows):
+                        with patch.object(
+                            acw,
+                            "_read_state_json",
+                            return_value={"health": "warn", "health_detail": "codex log missing"},
+                        ):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                        out = io.StringIO()
+                                        with redirect_stdout(out):
+                                            acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Recommendation: run acw doctor formal", text)
+
     def test_status_summary_falls_back_without_rich(self):
         sessions = [{
             "thread_id": THREAD,
@@ -153,6 +191,20 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("LAST_AGENT", text)
         self.assertIn("Ran tests", text)
         self.assertIn("warn / codex log missing", text)
+
+    def test_status_table_plain_adds_separator_every_third_row(self):
+        rows = [
+            ("w1", "running", "-", "-", "a1", "m1"),
+            ("w2", "running", "-", "-", "a2", "m2"),
+            ("w3", "running", "-", "-", "a3", "m3"),
+            ("w4", "running", "-", "-", "a4", "m4"),
+        ]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            acw._status_table_plain(rows)
+        lines = out.getvalue().splitlines()
+        separator_count = sum(1 for line in lines if set(line) <= {"-", " "} and "-" in line)
+        self.assertGreaterEqual(separator_count, 2)
 
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
@@ -204,6 +256,48 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("ok:tmux server reachable", rendered)
         self.assertIn("ok:pane resolved: %7", rendered)
         self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
+
+    def test_doctor_report_recommends_restart_for_warn_watcher(self):
+        row = {
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_file": "",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }
+        with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
+            with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
+                with patch.object(acw, "run_tmux", return_value="session\n"):
+                    with patch.object(acw, "_doctor_resolve_target", return_value=("%7", "")):
+                        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
+                            with patch.object(acw, "watcher_rows", return_value=[row]):
+                                with patch.object(
+                                    acw,
+                                    "_read_state_json",
+                                    return_value={"health": "warn", "health_detail": "rollout channel closed"},
+                                ):
+                                    report = acw._doctor_report("uvm")
+        self.assertEqual("warn", report.result)
+        self.assertEqual(0, report.exit_code)
+        self.assertIn("acw restart uvm", report.recommendations)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
+        self.assertIn("warn:watcher health: warn - rollout channel closed", rendered)
+
+    def test_doctor_plain_output_shows_recommended_command(self):
+        report = acw.DoctorReport(
+            checks=[("warn", "watcher health: warn - rollout channel closed")],
+            result="warn",
+            exit_code=0,
+            recommendations=["acw restart uvm"],
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            acw._print_doctor_plain(report)
+        text = out.getvalue()
+        self.assertIn("Recommendation: run acw restart uvm", text)
+        self.assertIn("RESULT: warn", text)
 
     def test_doctor_skips_pane_checks_without_target_or_current_pane(self):
         with patch.dict(acw.os.environ, {}, clear=True):
