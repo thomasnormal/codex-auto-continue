@@ -42,6 +42,9 @@ class WatchdUnitTests(unittest.TestCase):
     def test_compute_state_shows_dead_without_live_pid_even_if_health_was_ok(self):
         self.assertEqual("dead", acw._compute_state({"pid": ""}, {"health": "ok"}))
 
+    def test_compute_state_normalizes_legacy_stale_to_warn(self):
+        self.assertEqual("warn", acw._compute_state({"pid": "1234"}, {"health": "stale"}))
+
     def test_state_summary_shows_health_detail_for_warn(self):
         summary = acw._state_summary("warn", {"health_detail": "codex log missing for pane %3"})
         self.assertIn("warn", summary)
@@ -250,9 +253,9 @@ class WatchdUnitTests(unittest.TestCase):
                     with patch.object(acw, "run_tmux", return_value="session\n"):
                         with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
                             with patch.object(acw, "watcher_rows", return_value=[]):
-                                checks, code = acw._doctor_checks("")
-        self.assertEqual(0, code)
-        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+                                report = acw._doctor_report("")
+        self.assertEqual(0, report.exit_code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("ok:tmux server reachable", rendered)
         self.assertIn("ok:pane resolved: %7", rendered)
         self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
@@ -304,15 +307,15 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
                 with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
                     with patch.object(acw, "run_tmux", return_value="session\n"):
-                        checks, code = acw._doctor_checks("")
-        self.assertEqual(0, code)
-        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+                        report = acw._doctor_report("")
+        self.assertEqual(0, report.exit_code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("info:pane checks skipped", rendered)
 
     def test_doctor_rejects_explicit_dot_target(self):
-        checks, code = acw._doctor_checks(".")
-        self.assertEqual(1, code)
-        rendered = "\n".join(f"{level}:{msg}" for level, msg in checks)
+        report = acw._doctor_report(".")
+        self.assertEqual(1, report.exit_code)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("error:could not resolve target '.'", rendered)
 
     def test_load_sessions_reads_thread_keyed_state(self):

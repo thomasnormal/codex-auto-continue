@@ -4,6 +4,8 @@
 
 - Change: removed the remaining rollout-era evidence paths from the isolated real-Codex harness. The contract and integration suites now discover completed turns only from `codex-tui.log` and shell snapshots, matching the production watcher model.
 - Change: tightened the public CLI surface again. `cleanup` is now all-or-nothing, and thread-id selectors remain supported only as the explicit second positional argument to `acw start`.
+- Change: removed the last manager-side `stale` health state and normalized any persisted legacy `stale` watcher rows to `warn`, which matches the current codex-log-only health model.
+- Change: deleted the leftover `_doctor_checks()` compatibility wrapper. Tests now exercise `_doctor_report()` directly, so the real doctor UI and recommendation path are the only maintained implementation.
 - Change: expanded the private real-Codex suite with manager-facing regressions for `doctor` on a plain shell pane, `start` failure on a non-Codex pane, and `status` rendering of a live `LAST_AGENT` snippet.
 - Change: `acw status` now prints follow-up `acw doctor <target>` recommendations for degraded rows, and `acw doctor` now evaluates watcher health and highlights a concrete next command like `acw restart <target>` or `acw start <target> <thread-id>`.
 - Change: added light section separators to the default `acw status` table every third watcher so larger dashboards are easier to scan.

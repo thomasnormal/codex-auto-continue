@@ -1612,6 +1612,8 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
     if not pid:
         return "dead"
     h = sj.get("health", "")
+    if h == "stale":
+        h = "warn"
     if h and h != "ok":
         return h
     return "running"
@@ -1629,7 +1631,6 @@ def _message_summary_for_row(r: dict[str, str]) -> str:
 _STATE_STYLES = {
     "running": "green",
     "paused": "yellow",
-    "stale": "red",
     "warn": "dark_orange",
     "error": "bold red",
     "dead": "dim",
@@ -1730,7 +1731,7 @@ def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> 
     seen: set[str] = set()
     for row, current_pane, window_label in resolved:
         state = _compute_state(row, _read_state_json(row["state"]))
-        if state not in {"warn", "error", "stale", "dead"}:
+        if state not in {"warn", "error", "dead"}:
             continue
         target = _status_target_for_row(row, current_pane, window_label)
         if not target:
@@ -2127,7 +2128,7 @@ def _doctor_report(target: str = "") -> DoctorReport:
             msg = f"watcher health: {watcher_state}"
             if health_detail:
                 msg += f" - {health_detail}"
-            level = "warn" if watcher_state in {"warn", "stale"} else "error"
+            level = "warn" if watcher_state == "warn" else "error"
             checks.append((level, msg))
             if level == "warn":
                 warnings += 1
@@ -2147,12 +2148,6 @@ def _doctor_report(target: str = "") -> DoctorReport:
         exit_code=exit_code,
         recommendations=list(dict.fromkeys(recommendations)),
     )
-
-
-def _doctor_checks(target: str = "") -> tuple[list[tuple[str, str]], int]:
-    report = _doctor_report(target)
-    return report.checks, report.exit_code
-
 
 def _print_doctor_plain(report: DoctorReport) -> None:
     print("Doctor")

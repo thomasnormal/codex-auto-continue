@@ -253,7 +253,7 @@ runs twelve real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
-- a watcher regression test that proves health no longer depends on rollout state
+- a watcher regression test that proves watcher health no longer emits legacy rollout warnings
 - a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
 - a manager integration test that updates a watcher's message through `acw edit <pane>`
