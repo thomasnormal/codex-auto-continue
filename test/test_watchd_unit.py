@@ -20,11 +20,31 @@ THREAD = "11111111-1111-1111-1111-111111111111"
 
 
 class WatchdUnitTests(unittest.TestCase):
+    def test_main_help_prints_command_summary(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        with patch.object(acw.sys, "argv", ["auto_continue_watchd.py", "--help"]):
+            with redirect_stdout(out), redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    acw.main()
+        self.assertEqual(0, ctx.exception.code)
+        text = out.getvalue()
+        self.assertIn("Usage:", text)
+        self.assertIn("Commands:", text)
+        self.assertIn("doctor", text)
+        self.assertIn("Examples:", text)
+        self.assertEqual("", err.getvalue())
+
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
 
     def test_compute_state_shows_dead_without_live_pid_even_if_health_was_ok(self):
         self.assertEqual("dead", acw._compute_state({"pid": ""}, {"health": "ok"}))
+
+    def test_thread_times_formats_sqlite_metadata(self):
+        with patch.object(acw, "thread_times_from_state_db", return_value=(100.0, 150.0)):
+            with patch.object(acw, "_format_age", side_effect=["started", "last-msg"]):
+                self.assertEqual(("started", "last-msg"), acw._thread_times(THREAD))
 
     def test_resolve_thread_id_fails_when_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
@@ -286,7 +306,7 @@ class WatchdUnitTests(unittest.TestCase):
                 with patch.object(acw, "_build_thread_pane_map", return_value={}):
                     with patch.object(acw, "watcher_rows", return_value=live_rows):
                         with patch.object(acw, "_read_state_json", return_value={}):
-                            with patch.object(acw, "_rollout_times", return_value=("-", "-")):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
                                 with patch.object(acw, "_is_pid_stopped", return_value=False):
                                     out = io.StringIO()
                                     with redirect_stdout(out):

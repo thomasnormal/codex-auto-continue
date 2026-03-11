@@ -17,6 +17,8 @@ That's it. The watcher discovers the Codex thread for the pane and sends your
 message whenever a turn completes. If a thread-id cannot be discovered, `start`
 fails instead of running with an unknown thread.
 
+Run `acw --help` for the full command summary, target rules, and examples.
+
 `start` only accepts live tmux targets: pane id, window index, `session:window`,
 or exact tmux window name. If you already know the Codex thread id, pass it as
 the second positional argument: `acw start uvm <thread-id>`.
@@ -82,9 +84,8 @@ signals:
 - old Codex logs `post sampling token usage ... needs_follow_up=false`
 - current Codex logs `codex_core::tasks: close`
 
-It also checks rollout JSONL files under `~/.codex/sessions/` when available so
-startup can notice a pending completed turn that was already written before the
-watcher attached.
+On startup it also scans the recent tail of `codex-tui.log` so a watcher that
+attaches just after a completed turn can still send the next continue message.
 
 When a watched thread completes a turn, the watcher sends the continue message
 to the tmux pane.
@@ -102,7 +103,7 @@ collisions between your live server and the isolated real-Codex test harness.
 
 Automatic thread discovery is pane-local only. If `acw` cannot prove which
 thread belongs to the target pane yet, it waits instead of guessing from the
-most recent global Codex log or rollout activity.
+most recent global Codex log activity.
 
 Pid-based thread discovery is also bounded to the current Codex process
 lifetime, so `acw` will not reuse stale thread ids from an older process that
@@ -136,7 +137,7 @@ Run `acw doctor` for environment checks. Inside tmux, `acw doctor` also checks
 the current pane when `TMUX_PANE` is available:
 
 ```bash
-$ acw doctor .
+$ acw doctor
 Doctor
   state_dir: /home/user/.codex
   tmux_socket: /tmp/tmux-1000/default
@@ -151,13 +152,11 @@ RESULT: ok
 
 ### Health Monitoring
 
-Each watcher tracks completion-source health, with `codex-tui.log` as the
-primary source and rollout JSONL as a supplemental source when present:
+Each watcher tracks a small amount of operational health:
 
-- **ok** — the watcher has a usable completion source
-- **stale** — a rollout file exists but has stopped updating before Codex log completion has been proven
-- **warn** — no rollout file has been found yet, or rollout recording closed and the watcher is continuing via `codex-tui.log`
-- **error** — rollout recording closed before the watcher observed a matching completion in `codex-tui.log`
+- **ok** — the watcher has a thread id and a readable `codex-tui.log`
+- **warn** — the watcher is still waiting for a pane-local thread id, or `codex-tui.log` is missing
+- **paused** / **dead** — process state, not log-source state
 
 View health with `acw status`.
 
@@ -177,8 +176,8 @@ WINDOW      STATE    STARTED    LAST_MSG   LAST_ACW   MESSAGE
 
 The columns show:
 - **WINDOW** — `session:index:name` (uses live tmux state, survives window reordering)
-- **STARTED** — when the Codex thread was created
-- **LAST_MSG** — last activity in the Codex session (rollout file mtime)
+- **STARTED** — when the Codex thread was created, from local Codex SQLite state
+- **LAST_MSG** — last recorded activity for the Codex thread, from local Codex SQLite state
 - **LAST_ACW** — when the watcher last sent a continue prompt
 
 ### Start with interactive editor
@@ -247,7 +246,7 @@ runs nine real-Codex tests:
 
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
-- a watcher regression test that ensures `rollout channel closed` is not reported as a hard error when `codex-tui.log` is still driving completion
+- a watcher regression test that proves health no longer depends on rollout state
 - a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
 - a manager integration test that updates a watcher's message through `acw edit <pane>`

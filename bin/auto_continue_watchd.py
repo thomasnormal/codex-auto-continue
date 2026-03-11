@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from auto_continue_logwatch import discover_thread_for_pane as _discover_thread_for_pane
+from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,46 @@ if not os.path.isfile(DEFAULT_MSG_FILE):
 LEGACY_PID_FILE = os.path.join(STATE_DIR, "auto_continue_logwatch.pid")
 
 os.makedirs(STATE_DIR, exist_ok=True)
+
+HELP_TEXT = f"""Usage:
+  auto_continue_watchd.py status [target] [--details]
+  auto_continue_watchd.py start <target> [thread-id] [--message TEXT | --message-file FILE]
+  auto_continue_watchd.py stop [target]
+  auto_continue_watchd.py pause [target|*]
+  auto_continue_watchd.py resume [target|*]
+  auto_continue_watchd.py restart [target|*]
+  auto_continue_watchd.py edit <target>
+  auto_continue_watchd.py cleanup [target]
+  auto_continue_watchd.py doctor [target]
+
+Commands:
+  status    Show watcher state. Default command when no subcommand is given.
+  start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
+  stop      Stop one watcher, one pane's watchers, or all watchers.
+  pause     Send SIGSTOP to one watcher or all watchers.
+  resume    Send SIGCONT to one paused watcher or all watchers.
+  restart   Restart one watcher or all running watchers.
+  edit      Edit the stored continue message for a running watcher, then restart it.
+  cleanup   Remove stale watcher files, or one saved session state by selector.
+  doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
+
+Targets:
+  start/edit expect a live tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
+  stop/pause/resume/restart/status/doctor also accept thread ids where that is unambiguous.
+  pause, resume, and restart accept '*' to act on all watchers. Bare '*' must usually be quoted in the shell.
+
+Examples:
+  auto_continue_watchd.py
+  auto_continue_watchd.py status --details
+  auto_continue_watchd.py start %6 --message "continue"
+  auto_continue_watchd.py start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
+  auto_continue_watchd.py edit %6
+  auto_continue_watchd.py restart
+  auto_continue_watchd.py doctor
+
+Default message file:
+  {DEFAULT_MSG_FILE}
+"""
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -1416,53 +1457,11 @@ def _build_thread_pane_map() -> dict[str, str]:
     return mapping
 
 
-SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
-
-ROLLOUT_FILENAME_RE = re.compile(
-    r"^rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-"
-    + THREAD_ID_RE.pattern + r"\.jsonl$"
-)
-
-
-def _find_rollout_for_thread(thread_id: str) -> str | None:
-    """Return the path to the rollout JSONL file for *thread_id*, or None."""
-    if not thread_id or not is_thread_id(thread_id):
-        return None
-    pattern = os.path.join(SESSIONS_DIR, "*", "*", "*", f"rollout-*-{thread_id}.jsonl")
-    matches = glob.glob(pattern)
-    if not matches:
-        return None
-    return max(matches, key=os.path.getmtime)
-
-
-def _rollout_times(thread_id: str) -> tuple[str, str]:
-    """Return (started, last_message) for a thread from its rollout file.
-
-    *started* is parsed from the filename; *last_message* from the file mtime.
-    Both are returned as ``HH:MM:SS`` (today) or ``Mon DD HH:MM`` (older).
-    """
-    path = _find_rollout_for_thread(thread_id)
-    if not path:
-        return "-", "-"
-
-    # Started: parse from filename.
-    m = ROLLOUT_FILENAME_RE.match(os.path.basename(path))
-    if m:
-        started_epoch = time.mktime(time.strptime(
-            f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
-            "%Y-%m-%d %H:%M:%S",
-        ))
-        started = _format_age(started_epoch)
-    else:
-        started = "-"
-
-    # Last message: file mtime.
-    try:
-        mtime = os.path.getmtime(path)
-        last_msg = _format_age(mtime)
-    except OSError:
-        last_msg = "-"
-
+def _thread_times(thread_id: str) -> tuple[str, str]:
+    """Return (started, last_message) for a thread from local Codex SQLite state."""
+    started_at, last_activity_at = thread_times_from_state_db(thread_id)
+    started = _format_age(started_at) if started_at else "-"
+    last_msg = _format_age(last_activity_at) if last_activity_at else "-"
     return started, last_msg
 
 
@@ -1601,7 +1600,7 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     for r, current_pane, window_label in resolved:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
-        started, last_msg = _rollout_times(r["thread"])
+        started, last_msg = _thread_times(r["thread"])
         last_acw = sj.get("last_continue_at", "")
         if last_acw:
             try:
@@ -1678,7 +1677,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         else:
             msg_full = "-"
 
-        started, last_msg = _rollout_times(r["thread"])
+        started, last_msg = _thread_times(r["thread"])
 
         last_acw = sj.get("last_continue_at", "-")
 
@@ -2059,6 +2058,12 @@ def cleanup_stale_files() -> None:
 # ---------------------------------------------------------------------------
 
 
+def print_help(file=None) -> None:
+    if file is None:
+        file = sys.stdout
+    print(HELP_TEXT, file=file)
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         subcmd = "status"
@@ -2066,6 +2071,10 @@ def main() -> None:
     else:
         subcmd = sys.argv[1]
         rest = sys.argv[2:]
+
+    if subcmd in ("-h", "--help", "help"):
+        print_help()
+        raise SystemExit(0)
 
     # Only clean up stale files on commands that mutate state.  Read-only
     # commands (status, pause, resume) skip the cleanup overhead (ps scan +
@@ -2089,12 +2098,7 @@ def main() -> None:
     if subcmd in commands:
         commands[subcmd](rest)
     else:
-        print(
-            "usage: auto_continue_watchd.py {start|stop|pause|resume|restart|cleanup|status|edit|doctor} "
-            "[pane-id|window-index|session:window|.] [thread-id] "
-            "[--message TEXT | --message-file FILE]",
-            file=sys.stderr,
-        )
+        print_help(file=sys.stderr)
         sys.exit(2)
 
 

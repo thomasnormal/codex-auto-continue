@@ -49,7 +49,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertTrue(state_file.is_file(), self.harness.diagnostics())
         self.assertIn("test continue", pane_text, self.harness.diagnostics())
 
-    def test_watcher_does_not_report_rollout_channel_closed_as_error(self):
+    def test_watcher_health_no_longer_depends_on_rollout(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
         self.harness.start_watcher(first_turn.thread_id)
@@ -59,7 +59,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         watch_log = self.harness.wait_for_continue_sent()
 
         self.assertNotIn(
-            "health: error - rollout channel closed",
+            "rollout",
             watch_log,
             self.harness.diagnostics(),
         )

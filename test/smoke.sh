@@ -11,6 +11,7 @@ python3 -m py_compile "$ROOT/bin/auto_continue_watchd.py"
 python3 -m py_compile "$ROOT/bin/auto_continue_logwatch.py"
 
 echo "[smoke] usage output"
+python3 "$ROOT/bin/auto_continue_watchd.py" --help >/dev/null
 python3 "$ROOT/bin/auto_continue_watchd.py" bogus >/dev/null 2>&1 || true
 
 echo "[smoke] ok"

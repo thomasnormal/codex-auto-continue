@@ -2,6 +2,10 @@
 
 ## 2026-03-11
 
+- Change: removed rollout JSONL from the live watcher path. `auto_continue_logwatch.py` now drives completion from `~/.codex/log/codex-tui.log` only, including startup replay by scanning the recent log tail for a pending completion on the watched thread.
+- Change: replaced `acw status` `STARTED` / `LAST_MSG` rollout-derived timestamps with local Codex SQLite metadata. `STARTED` now comes from thread creation time in `threads.created_at`, and `LAST_MSG` comes from the latest thread activity recorded in `logs.ts` / `threads.updated_at`.
+- Realization: current Codex does not always populate the `logs.process_uuid -> thread_id` mapping early enough for `acw start` / `acw doctor` against a fresh plain `codex --full-auto` pane. Pane-local discovery now falls back to matching the pane cwd and live Codex process start time against the SQLite `threads` table, which keeps the real manager flows working without reintroducing rollout dependence.
+- Change: replaced the old one-line fallback usage string with a real top-level `acw --help` output. The help text now documents commands, target forms, wildcard behavior, and common examples, and smoke tests exercise the actual help path.
 - Change: the real-Codex harness now writes an owner pid file for each private `real-codex-*` workspace and reaps stale private harness directories on startup. That cleanup also kills lingering tmux servers and watcher processes whose temp tree was deleted after an interrupted run.
 - Change: added `acw doctor`, a first-pass environment and pane diagnostic command. It checks tmux reachability, `~/.codex` writability, Codex auth state, and, when a target pane is available, thread detection plus watcher presence.
 - Realization: the explicit `.` pane shorthand for `start`/`edit` was not a good fit for this CLI. The current-pane flow is now limited to `acw doctor` with no target inside tmux; mutating commands stay explicit about which pane they touch.

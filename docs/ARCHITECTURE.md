@@ -9,9 +9,9 @@
     thread-keyed session state, and status/cleanup.
 - `bin/auto_continue_logwatch.py`
   - Event engine.
-  - Primarily tails `~/.codex/log/codex-tui.log`.
-  - Uses rollout JSONL under `~/.codex/sessions/` as a supplemental startup and
-    health source when present.
+  - Tails `~/.codex/log/codex-tui.log`.
+  - Replays the recent log tail on startup so a watcher can catch a completion
+    that happened just before it attached.
   - On a supported completion signal for the watched thread, sends the message
     to the target tmux pane.
 
@@ -19,11 +19,11 @@
 
 1. `start` resolves pane + thread ID and writes thread-keyed session metadata.
 2. `watchd` launches `auto_continue_logwatch.py` with pane/thread/message arguments.
-3. The watcher reads `codex-tui.log`, optionally correlates rollout JSONL, and
-   emits the message via `tmux send-keys`.
+3. The watcher reads `codex-tui.log` and emits the message via `tmux send-keys`.
 4. `watchd` keeps the stored window name synchronized via a tmux
    `window-renamed` hook.
-5. Runtime state/logs live under `~/.codex/`.
+5. Runtime state/logs live under `~/.codex/`, and `status` reads local Codex
+   SQLite state for thread creation/last-activity timestamps.
 
 ## Runtime Files
 
