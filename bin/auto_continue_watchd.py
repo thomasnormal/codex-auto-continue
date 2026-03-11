@@ -1532,21 +1532,20 @@ def _read_state_json(state_path: str) -> dict[str, str]:
 
 
 def _resolve_message(r: dict[str, str]) -> tuple[str, str]:
-    """Return (mode, value) from session state or watcher row args.
+    """Return (mode, value), preferring canonical persisted session state.
 
     mode is 'file', 'inline', or '' if no message is found.
     """
-    if r.get("msg_inline"):
-        return "inline", r["msg_inline"]
-    if r.get("msg_file"):
-        return "file", r["msg_file"]
-
     tid = r.get("thread", "")
     if tid and is_thread_id(tid):
         ss = _read_session_state(tid)
         msg = ss.get("message", "")
         if msg:
             return "inline", msg
+    if r.get("msg_file"):
+        return "file", r["msg_file"]
+    if r.get("msg_inline"):
+        return "inline", r["msg_inline"]
     return "", ""
 
 
@@ -1642,6 +1641,19 @@ def _strip_rich_markup(text: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", text)
 
 
+def _status_wide_column_widths(term_w: int, fixed_width: int) -> tuple[int, int]:
+    """Return ``(last_agent_width, message_width)`` for the current terminal."""
+    available = max(28, term_w - fixed_width - 19)
+    if available <= 44:
+        message_w = max(12, available // 3)
+        last_agent_w = max(16, available - message_w)
+        return last_agent_w, message_w
+
+    message_w = max(16, min(28, available // 3))
+    last_agent_w = max(24, available - message_w)
+    return last_agent_w, message_w
+
+
 def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
     headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
     plain_rows: list[tuple[str, str, str, str, str, str]] = []
@@ -1678,6 +1690,32 @@ def _status_target_for_row(row: dict[str, str], current_pane: str, window_label:
         if tail and tail != "-":
             return tail
     return current_pane or row.get("pane", "")
+
+
+def _sort_session_key(session_name: str) -> tuple[int, object]:
+    if session_name.isdigit():
+        return 0, int(session_name)
+    return 1, session_name
+
+
+def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, object], int, int, str]:
+    row, current_pane, window_label = item
+    match = re.match(r"([^:]+):(\d+):", window_label)
+    if match:
+        session_name = match.group(1)
+        window_index = int(match.group(2))
+    else:
+        session_name = "~"
+        window_index = 10**9
+
+    pane_number = 10**9
+    pane = current_pane or row.get("pane", "")
+    if is_pane_id(pane):
+        try:
+            pane_number = int(pane[1:])
+        except ValueError:
+            pass
+    return (_sort_session_key(session_name), window_index, pane_number, window_label)
 
 
 def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
@@ -1745,29 +1783,28 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         _status_table_plain(rows_data)
         return
 
-    # Estimate MESSAGE column width from terminal width and other columns.
+    # Estimate wide-column widths from terminal width and the fixed columns.
     term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT")
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
     col_widths = [len(h) for h in headers]
     for row in rows_data:
-        for i in range(5):
+        for i in range(4):
             # Measure first line only, strip rich markup tags.
             text = row[i].split("\n")[0]
             text = re.sub(r"\[/?[^\]]*\]", "", text)
             col_widths[i] = max(col_widths[i], len(text))
-    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
-    msg_col_w = max(20, min(60, term_w - sum(col_widths) - 19))
+    last_agent_w, msg_col_w = _status_wide_column_widths(term_w, sum(col_widths))
 
     table = Table(show_lines=False, expand=True)
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
     table.add_column("STARTED", no_wrap=True)
     table.add_column("LAST_ACW", no_wrap=True)
-    table.add_column("LAST_AGENT", max_width=48)
-    table.add_column("MESSAGE", ratio=1, max_width=60)
+    table.add_column("LAST_AGENT", width=last_agent_w, max_width=last_agent_w)
+    table.add_column("MESSAGE", width=msg_col_w, max_width=msg_col_w)
 
     for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
-        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
+        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, last_agent_w)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
             window_pane, state_value,
@@ -1947,7 +1984,7 @@ def cmd_status(argv: list[str]) -> None:
         print("(none)")
         return
 
-    resolved.sort(key=lambda t: t[2])
+    resolved.sort(key=_status_sort_key)
 
     if details:
         _status_details(resolved)

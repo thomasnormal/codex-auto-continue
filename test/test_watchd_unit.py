@@ -54,6 +54,27 @@ class WatchdUnitTests(unittest.TestCase):
         summary = acw._state_summary("running", {"health_detail": "should stay hidden"})
         self.assertEqual("[green]running[/green]", summary)
 
+    def test_resolve_message_prefers_persisted_session_message_over_ps_inline(self):
+        row = {
+            "thread": THREAD,
+            "msg_inline": "continue",
+            "msg_file": "",
+        }
+        with patch.object(acw, "_read_session_state", return_value={"message": "continue by aot_plan_7.md"}):
+            self.assertEqual(("inline", "continue by aot_plan_7.md"), acw._resolve_message(row))
+
+    def test_status_sort_key_orders_by_numeric_window_index(self):
+        rows = [
+            ({"pane": "%10"}, "%10", "0:10:aot2"),
+            ({"pane": "%1"}, "%1", "0:1:disc"),
+            ({"pane": "%2"}, "%2", "0:2:ddr3"),
+        ]
+        ordered = sorted(rows, key=acw._status_sort_key)
+        self.assertEqual(
+            ["0:1:disc", "0:2:ddr3", "0:10:aot2"],
+            [item[2] for item in ordered],
+        )
+
     def test_thread_times_formats_sqlite_metadata(self):
         with patch.object(acw, "thread_times_from_state_db", return_value=(100.0, 150.0)):
             with patch.object(acw, "_format_age", side_effect=["started", "last-msg"]):
