@@ -10,6 +10,7 @@ builds log ``needs_follow_up=false`` and newer builds log
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import re
@@ -20,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 import threading
-from typing import Optional
+from typing import Callable, Literal, Optional
 
 try:
     from watchdog.observers import Observer as _WatchdogObserver
@@ -70,6 +71,12 @@ def is_thread_id(s: str) -> bool:
 
 HEALTH_CHECK_INTERVAL = 30.0   # seconds between periodic health checks
 STARTUP_GRACE_SECS = 60.0
+
+
+@dataclass(frozen=True)
+class TmuxSendResult:
+    status: Literal["ok", "error", "interrupted"]
+    detail: str = ""
 
 
 def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
@@ -283,40 +290,71 @@ def tmux_cancel_mode_if_needed(pane: str) -> None:
         run_tmux(["send-keys", "-t", pane, "-X", "cancel"], capture_output=False)
 
 
-def _tmux_send_once(pane: str, msg: str, enter_delay_secs: float) -> tuple[bool, str]:
+def _interrupt_reason(
+    interrupt_checker: Optional[Callable[[], Optional[str]]],
+) -> Optional[str]:
+    if interrupt_checker is None:
+        return None
+    return interrupt_checker()
+
+
+def _tmux_send_once(
+    pane: str,
+    msg: str,
+    enter_delay_secs: float,
+    interrupt_checker: Optional[Callable[[], Optional[str]]] = None,
+) -> TmuxSendResult:
     send_text = run_tmux(["send-keys", "-t", pane, "-l", msg])
-    if enter_delay_secs > 0.0:
-        time.sleep(enter_delay_secs)
-    send_enter = run_tmux(["send-keys", "-t", pane, "C-m"])
-    ok = send_text.returncode == 0 and send_enter.returncode == 0
-    detail_parts = []
     if send_text.returncode != 0:
-        detail_parts.append(f"send-text rc={send_text.returncode}")
-    if send_enter.returncode != 0:
-        detail_parts.append(f"send-enter rc={send_enter.returncode}")
-    for label, proc in (("send-text", send_text), ("send-enter", send_enter)):
-        for stream_name, stream in (("stderr", proc.stderr), ("stdout", proc.stdout)):
+        detail_parts = [f"send-text rc={send_text.returncode}"]
+        for stream_name, stream in (("stderr", send_text.stderr), ("stdout", send_text.stdout)):
             text = (stream or "").strip()
             if text:
-                detail_parts.append(f"{label} {stream_name}={text}")
-    return ok, "; ".join(detail_parts)
+                detail_parts.append(f"send-text {stream_name}={text}")
+        return TmuxSendResult("error", "; ".join(detail_parts))
+
+    reason = _interrupt_reason(interrupt_checker)
+    if reason:
+        return TmuxSendResult("interrupted", reason)
+
+    if enter_delay_secs > 0.0:
+        time.sleep(enter_delay_secs)
+    reason = _interrupt_reason(interrupt_checker)
+    if reason:
+        return TmuxSendResult("interrupted", reason)
+
+    send_enter = run_tmux(["send-keys", "-t", pane, "C-m"])
+    if send_enter.returncode == 0:
+        return TmuxSendResult("ok")
+
+    detail_parts = [f"send-enter rc={send_enter.returncode}"]
+    for stream_name, stream in (("stderr", send_enter.stderr), ("stdout", send_enter.stdout)):
+        text = (stream or "").strip()
+        if text:
+            detail_parts.append(f"send-enter {stream_name}={text}")
+    return TmuxSendResult("error", "; ".join(detail_parts))
 
 
-def tmux_send(pane: str, msg: str, enter_delay_secs: float) -> tuple[bool, str]:
+def tmux_send(
+    pane: str,
+    msg: str,
+    enter_delay_secs: float,
+    interrupt_checker: Optional[Callable[[], Optional[str]]] = None,
+) -> TmuxSendResult:
     # If user is browsing scrollback, leave copy mode before injecting text.
     tmux_cancel_mode_if_needed(pane)
-    ok, detail = _tmux_send_once(pane, msg, enter_delay_secs)
-    if ok:
-        return True, ""
+    result = _tmux_send_once(pane, msg, enter_delay_secs, interrupt_checker=interrupt_checker)
+    if result.status != "error":
+        return result
 
     # One retry after a best-effort mode cancel handles transient mode races.
     tmux_cancel_mode_if_needed(pane)
-    ok_retry, detail_retry = _tmux_send_once(pane, msg, enter_delay_secs)
-    if ok_retry:
-        return True, ""
-    if detail and detail_retry:
-        return False, f"{detail}; retry: {detail_retry}"
-    return False, detail_retry or detail
+    retry = _tmux_send_once(pane, msg, enter_delay_secs, interrupt_checker=interrupt_checker)
+    if retry.status != "error":
+        return retry
+    if result.detail and retry.detail:
+        return TmuxSendResult("error", f"{result.detail}; retry: {retry.detail}")
+    return TmuxSendResult("error", retry.detail or result.detail)
 
 
 def read_state(path: Path) -> dict:
@@ -726,8 +764,18 @@ def main() -> int:
             if args.send_delay_secs > 0.0:
                 time.sleep(args.send_delay_secs)
 
-            ok, send_error = tmux_send(args.pane, msg, max(0.0, args.enter_delay_secs))
-            if ok:
+            pane_error = check_pane_for_errors(args.pane)
+            if pane_error:
+                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
+                continue
+
+            send_result = tmux_send(
+                args.pane,
+                msg,
+                max(0.0, args.enter_delay_secs),
+                interrupt_checker=lambda: check_pane_for_errors(args.pane),
+            )
+            if send_result.status == "ok":
                 last_send_time = tnow
                 last_sent_turn = turn_id
                 last_sent_thread = thread_id
@@ -740,13 +788,15 @@ def main() -> int:
                 state["health_detail"] = health_detail
                 write_state(state_file, state)
                 append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
+            elif send_result.status == "interrupted":
+                auto_pause_current_watcher(send_result.detail, watch_log, state_file, state)
             else:
-                if send_error:
+                if send_result.detail:
                     append_log(
                         watch_log,
                         (
                             "error: tmux send failed "
-                            f"turn={turn_id} thread={thread_id} detail={send_error}"
+                            f"turn={turn_id} thread={thread_id} detail={send_result.detail}"
                         ),
                     )
                 else:

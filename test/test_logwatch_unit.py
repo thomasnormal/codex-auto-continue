@@ -318,6 +318,29 @@ class LogwatchUnitTests(unittest.TestCase):
         self.assertEqual("2026-03-11 12:34:56", written_state["health_ts"])
         kill.assert_called_once_with(logwatch.os.getpid(), logwatch.signal.SIGSTOP)
 
+    def test_tmux_send_interrupts_after_text_before_enter(self):
+        calls = []
+
+        def fake_run_tmux(args, capture_output=True):
+            calls.append((list(args), capture_output))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.object(logwatch, "run_tmux", side_effect=fake_run_tmux):
+            with patch.object(logwatch, "tmux_cancel_mode_if_needed"):
+                with patch.object(logwatch.time, "sleep"):
+                    result = logwatch.tmux_send(
+                        "%11",
+                        "continue",
+                        0.1,
+                        interrupt_checker=lambda: "Conversation interrupted",
+                    )
+
+        self.assertEqual("interrupted", result.status)
+        self.assertEqual("Conversation interrupted", result.detail)
+        send_key_calls = [cmd for cmd, _ in calls if cmd[:3] == ["send-keys", "-t", "%11"]]
+        self.assertIn(["send-keys", "-t", "%11", "-l", "continue"], send_key_calls)
+        self.assertFalse(any(cmd[-1] == "C-m" for cmd in send_key_calls))
+
     def test_run_tmux_falls_back_when_explicit_socket_is_stale(self):
         calls = []
 

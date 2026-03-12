@@ -2,6 +2,8 @@
 
 ## 2026-03-11
 
+- Change: closed the remaining interrupt race in `auto_continue_logwatch.py`. The watcher now re-checks for pane-visible Codex interrupt banners after the pre-send delay and again after typing the continue message but before pressing Enter, so a user `Esc` no longer needs a second interrupt to avoid one final `continue`.
+- Change: strengthened the isolated real-Codex interrupt regression so it now proves both outcomes: the watcher auto-pauses on the real `Conversation interrupted` banner, and the watch log never records `continue: sent` for that interrupted turn.
 - Change: removed the remaining rollout-era evidence paths from the isolated real-Codex harness. The contract and integration suites now discover completed turns only from `codex-tui.log` and shell snapshots, matching the production watcher model.
 - Change: tightened the public CLI surface again. `cleanup` is now all-or-nothing, and thread-id selectors remain supported only as the explicit second positional argument to `acw start`.
 - Change: removed the last manager-side `stale` health state and normalized any persisted legacy `stale` watcher rows to `warn`, which matches the current codex-log-only health model.

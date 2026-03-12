@@ -83,6 +83,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         state_text = state_file.read_text(encoding="utf-8", errors="ignore")
         self.assertIn("pause: auto-pausing watcher", watch_log)
+        self.assertNotIn("continue: sent", watch_log, self.harness.diagnostics())
         self.assertIn("auto-paused:", state_text)
 
     def test_manager_start_works_for_plain_full_auto_codex_pane(self):
