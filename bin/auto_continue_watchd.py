@@ -106,7 +106,7 @@ Commands:
   start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
   stop      Stop one watcher, one pane's watchers, or all watchers.
   pause     Send SIGSTOP to one watcher or all watchers.
-  resume    Send SIGCONT to one paused watcher or all watchers.
+  resume    Restart one paused watcher or all paused watchers from current state.
   restart   Restart one watcher or all running watchers.
   edit      Edit the stored continue message for a running watcher, then restart it.
   cleanup   Remove stale watcher files.
@@ -1192,7 +1192,7 @@ def cmd_pause(argv: list[str]) -> None:
 
 
 def cmd_resume(argv: list[str]) -> None:
-    """Resume paused watcher(s) by sending SIGCONT."""
+    """Resume paused watcher(s) by restarting from current state."""
     pane_arg = argv[0] if argv else ""
 
     if pane_arg and pane_arg != "*":
@@ -1206,14 +1206,12 @@ def cmd_resume(argv: list[str]) -> None:
             if not _is_pid_stopped(pid):
                 print(f"not paused: pane={pane} pid={pid_str}")
             else:
-                try:
-                    os.kill(pid, signal.SIGCONT)
-                    print(f"resumed: pane={pane} pid={pid_str}")
-                except OSError as e:
-                    print(f"error: could not resume pid={pid_str}: {e}", file=sys.stderr)
+                print(f"resuming paused watcher via restart: pane={pane} pid={pid_str}")
+                _restart_one(pane_arg, pane, [])
+                break
         return
 
-    had_any = False
+    paused_panes: list[str] = []
     for r in watcher_rows():
         pid_str = r["pid"]
         if not pid_str.isdigit():
@@ -1221,15 +1219,15 @@ def cmd_resume(argv: list[str]) -> None:
         pid = int(pid_str)
         if not _is_pid_stopped(pid):
             continue
-        had_any = True
-        try:
-            os.kill(pid, signal.SIGCONT)
-            print(f"resumed: pane={r['pane']} pid={pid_str}")
-        except OSError as e:
-            print(f"error: could not resume pid={pid_str}: {e}", file=sys.stderr)
+        if r["pane"]:
+            paused_panes.append(r["pane"])
 
-    if not had_any:
+    if not paused_panes:
         print("no paused watchers")
+        return
+
+    print(f"resuming {len(paused_panes)} paused watcher(s) via restart")
+    _restart_panes(paused_panes)
 
 
 def _restart_panes(panes: list[str]) -> None:

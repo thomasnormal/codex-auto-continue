@@ -121,6 +121,10 @@ acw restart
 Quoted `'*'` is accepted too, but an unquoted `*` will be expanded by your
 shell before `acw` sees it.
 
+`resume` restarts paused watchers from the current pane/thread state instead of
+thawing the old stopped process. That avoids replaying buffered Codex log
+history after a long pause.
+
 ## Continue Message
 
 If you do not pass `--message` or `--message-file`, `acw start` opens `$EDITOR`

@@ -595,13 +595,29 @@ class WatchdUnitTests(unittest.TestCase):
         rows = [
             {"pane": "%1", "pid": "101"},
             {"pane": "%2", "pid": "202"},
+            {"pane": "%3", "pid": "303"},
         ]
         with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "_is_pid_stopped", side_effect=[True, False]):
-                with patch.object(acw.os, "kill") as kill:
-                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with patch.object(acw, "_is_pid_stopped", side_effect=[True, False, True]):
+                with patch.object(acw, "_restart_panes") as restart_panes:
+                    out = io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
                         acw.cmd_resume(["*"])
-        kill.assert_called_once_with(101, acw.signal.SIGCONT)
+        restart_panes.assert_called_once_with(["%1", "%3"])
+        self.assertIn("resuming 2 paused watcher(s) via restart", out.getvalue())
+
+    def test_resume_target_restarts_paused_watcher_instead_of_sigcont(self):
+        with patch.object(acw, "resolve_pane_target", return_value="%7"):
+            with patch.object(acw, "watcher_pids_for_pane", return_value=["1234"]):
+                with patch.object(acw, "_is_pid_stopped", return_value=True):
+                    with patch.object(acw, "_restart_one") as restart_one:
+                        with patch.object(acw.os, "kill") as kill:
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw.cmd_resume(["aot"])
+        restart_one.assert_called_once_with("aot", "%7", [])
+        kill.assert_not_called()
+        self.assertIn("resuming paused watcher via restart: pane=%7 pid=1234", out.getvalue())
 
     def test_restart_star_restarts_all_live_panes(self):
         rows = [
