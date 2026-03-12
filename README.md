@@ -12,6 +12,12 @@ recover from tmux problems without losing control of the pane.
 
 ![acw status dashboard](docs/assets/acw-status-screenshot.svg)
 
+Useful project docs:
+
+- [Contributing](CONTRIBUTING.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Security policy](SECURITY.md)
+
 ## Requirements
 
 - Linux
@@ -245,6 +251,10 @@ kill -USR1 1996933
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, fast test
 commands, real-Codex test guidance, and tmux safety rules.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for responsible disclosure guidance.
 
 ## How It Works
 
