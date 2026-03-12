@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: rewrote `README.md` around the actual user workflow instead of repo-internal implementation detail. The top-level doc now leads with `uv` installation, Quick Start, everyday commands, interrupt behavior, `doctor`, troubleshooting, and a short development/testing section.
 - Change: added first-class Python packaging metadata in `pyproject.toml` so the CLI can be installed with `uv tool install --editable .` and exposed as the `acw` command without a shell alias.
 - Change: made the default continue prompt self-contained for installed users. `auto_continue_watchd.py` now creates `~/.codex/auto_continue.message.txt` from a bundled template instead of falling back to a repo-relative example file that disappears once the tool is installed into a uv-managed environment.
 - Change: switched user interrupts from auto-pause to one-turn skip mode. `auto_continue_logwatch.py` now treats Codex `interrupt received` log lines as an instruction to skip the interrupted completion, keep the watcher alive, and resume normal auto-continue after the next manual prompt finishes.
