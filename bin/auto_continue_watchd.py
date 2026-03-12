@@ -67,23 +67,39 @@ PROJECT_CWD = resolve_project_cwd()
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".codex")
 SEND_DELAY_SECS = os.environ.get("AUTO_CONTINUE_SEND_DELAY_SECS", "0.25")
 ENTER_DELAY_SECS = os.environ.get("AUTO_CONTINUE_ENTER_DELAY_SECS", "0.15")
-
-DEFAULT_MSG_FILE = os.path.join(STATE_DIR, "auto_continue.message.txt")
-if not os.path.isfile(DEFAULT_MSG_FILE):
-    DEFAULT_MSG_FILE = str(REPO_ROOT / "examples" / "messages" / "default_continue_message.txt")
+DEFAULT_MESSAGE_TEXT = (
+    "please continue with the workstream.\n\n"
+    "Keep momentum, validate changes, and move to the next highest-value task.\n"
+)
 
 os.makedirs(STATE_DIR, exist_ok=True)
 
-HELP_TEXT = f"""Usage:
-  auto_continue_watchd.py status [target] [--details]
-  auto_continue_watchd.py start <target> [thread-id] [--message TEXT | --message-file FILE]
-  auto_continue_watchd.py stop [target]
-  auto_continue_watchd.py pause [target|*]
-  auto_continue_watchd.py resume [target|*]
-  auto_continue_watchd.py restart [target|*]
-  auto_continue_watchd.py edit <target>
-  auto_continue_watchd.py cleanup
-  auto_continue_watchd.py doctor [target]
+
+def ensure_default_message_file(state_dir: str = STATE_DIR) -> str:
+    path = os.path.join(state_dir, "auto_continue.message.txt")
+    if os.path.isfile(path):
+        return path
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        Path(path).write_text(DEFAULT_MESSAGE_TEXT, encoding="utf-8")
+    except OSError:
+        return path
+    return path
+
+
+DEFAULT_MSG_FILE = ensure_default_message_file()
+
+def build_help_text(prog: str) -> str:
+    return f"""Usage:
+  {prog} status [target] [--details]
+  {prog} start <target> [thread-id] [--message TEXT | --message-file FILE]
+  {prog} stop [target]
+  {prog} pause [target|*]
+  {prog} resume [target|*]
+  {prog} restart [target|*]
+  {prog} edit <target>
+  {prog} cleanup
+  {prog} doctor [target]
 
 Commands:
   status    Show watcher state. Default command when no subcommand is given.
@@ -101,13 +117,13 @@ Targets:
   pause, resume, and restart accept '*' to act on all watchers. Bare '*' must usually be quoted in the shell.
 
 Examples:
-  auto_continue_watchd.py
-  auto_continue_watchd.py status --details
-  auto_continue_watchd.py start %6 --message "continue"
-  auto_continue_watchd.py start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
-  auto_continue_watchd.py edit %6
-  auto_continue_watchd.py restart
-  auto_continue_watchd.py doctor
+  {prog}
+  {prog} status --details
+  {prog} start %6 --message "continue"
+  {prog} start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
+  {prog} edit %6
+  {prog} restart
+  {prog} doctor
 
 Default message file:
   {DEFAULT_MSG_FILE}
@@ -2258,7 +2274,8 @@ def cleanup_stale_files() -> None:
 def print_help(file=None) -> None:
     if file is None:
         file = sys.stdout
-    print(HELP_TEXT, file=file)
+    prog = os.path.basename(sys.argv[0]) or "acw"
+    print(build_help_text(prog), file=file)
 
 
 def main() -> None:

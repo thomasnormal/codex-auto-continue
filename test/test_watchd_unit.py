@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import tempfile
 import subprocess
 import unittest
 import builtins
@@ -35,6 +37,22 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("doctor", text)
         self.assertIn("Examples:", text)
         self.assertEqual("", err.getvalue())
+
+    def test_main_help_uses_invoked_program_name(self):
+        out = io.StringIO()
+        with patch.object(acw.sys, "argv", ["acw", "--help"]):
+            with redirect_stdout(out):
+                with self.assertRaises(SystemExit):
+                    acw.main()
+        self.assertIn("Usage:\n  acw status", out.getvalue())
+
+    def test_ensure_default_message_file_creates_bundled_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o700)
+            path = acw.ensure_default_message_file(tmpdir)
+            self.assertEqual(f"{tmpdir}/auto_continue.message.txt", path)
+            self.assertTrue(Path(path).is_file())
+            self.assertEqual(acw.DEFAULT_MESSAGE_TEXT, Path(path).read_text(encoding="utf-8"))
 
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))

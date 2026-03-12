@@ -14,4 +14,10 @@ echo "[smoke] usage output"
 python3 "$ROOT/bin/auto_continue_watchd.py" --help >/dev/null
 python3 "$ROOT/bin/auto_continue_watchd.py" bogus >/dev/null 2>&1 || true
 
+echo "[smoke] uv tool entrypoint"
+(
+  umask 022
+  UV_NO_CACHE=1 uv tool run --from "$ROOT" acw --help >/dev/null
+)
+
 echo "[smoke] ok"

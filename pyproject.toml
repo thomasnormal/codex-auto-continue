@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-auto-continue"
+version = "0.1.0"
+description = "Auto-send a follow-up prompt to Codex in tmux after each completed turn."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Thomas Ahle" },
+]
+keywords = ["codex", "tmux", "automation", "cli"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Utilities",
+]
+
+[project.scripts]
+acw = "auto_continue_watchd:main"
+
+[tool.setuptools]
+package-dir = {"" = "bin"}
+py-modules = ["auto_continue_watchd", "auto_continue_logwatch"]

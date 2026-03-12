@@ -5,8 +5,14 @@ Auto-send a follow-up prompt to Codex in tmux after each completed turn.
 ## Quick Start
 
 ```bash
-# Add an alias (optional but recommended)
-alias acw='python3 /path/to/codex-auto-continue/bin/auto_continue_watchd.py'
+# Install the CLI from a local checkout.
+uv tool install --editable /path/to/codex-auto-continue
+
+# From inside the repo, this works too:
+uv tool install --editable .
+
+# If you update the repo later:
+uv tool install --editable --reinstall /path/to/codex-auto-continue
 
 acw start 2        # window index — opens $EDITOR for the message
 acw start %6       # or pane id
@@ -16,6 +22,9 @@ acw start uvm      # or tmux window name
 That's it. The watcher discovers the Codex thread for the pane and sends your
 message whenever a turn completes. If a thread-id cannot be discovered, `start`
 fails instead of running with an unknown thread.
+
+Use `uv tool run --from /path/to/codex-auto-continue acw --help` if you want to
+try the CLI without installing it first.
 
 Run `acw --help` for the full command summary, target rules, and examples.
 
@@ -72,7 +81,8 @@ To edit the message for a running watcher:
 acw edit 2    # opens $EDITOR with the current message
 ```
 
-Default message location: `~/.codex/auto_continue.message.txt`, falling back to `examples/messages/default_continue_message.txt`.
+Default message location: `~/.codex/auto_continue.message.txt`. `acw` creates it
+from the bundled template on first run if it does not exist yet.
 
 ## How It Works
 

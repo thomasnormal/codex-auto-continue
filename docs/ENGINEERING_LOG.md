@@ -2,6 +2,8 @@
 
 ## 2026-03-11
 
+- Change: added first-class Python packaging metadata in `pyproject.toml` so the CLI can be installed with `uv tool install --editable .` and exposed as the `acw` command without a shell alias.
+- Change: made the default continue prompt self-contained for installed users. `auto_continue_watchd.py` now creates `~/.codex/auto_continue.message.txt` from a bundled template instead of falling back to a repo-relative example file that disappears once the tool is installed into a uv-managed environment.
 - Change: switched user interrupts from auto-pause to one-turn skip mode. `auto_continue_logwatch.py` now treats Codex `interrupt received` log lines as an instruction to skip the interrupted completion, keep the watcher alive, and resume normal auto-continue after the next manual prompt finishes.
 - Change: made pane interrupt detection prompt-aware. A `Conversation interrupted` banner now only counts if it appears after the most recent visible `›` prompt, which prevents stale interrupt banners from suppressing later manual turns.
 - Change: strengthened the isolated real-Codex interrupt regression so it now proves the full operator flow: `Escape` skips exactly the interrupted turn, the watcher stays running, and automation resumes after the user's next manual prompt.
