@@ -12,6 +12,9 @@ license = { file = "LICENSE" }
 authors = [
   { name = "Thomas Ahle" },
 ]
+dependencies = [
+  "rich>=13.7",
+]
 keywords = ["codex", "tmux", "automation", "cli"]
 classifiers = [
   "Environment :: Console",
@@ -23,6 +26,12 @@ classifiers = [
   "Topic :: Software Development :: Build Tools",
   "Topic :: Utilities",
 ]
+
+[project.urls]
+Homepage = "https://github.com/thomasnormal/codex-auto-continue"
+Repository = "https://github.com/thomasnormal/codex-auto-continue"
+Issues = "https://github.com/thomasnormal/codex-auto-continue/issues"
+CI = "https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.yml"
 
 [project.scripts]
 acw = "auto_continue_watchd:main"

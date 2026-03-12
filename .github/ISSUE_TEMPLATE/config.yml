@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Troubleshooting and onboarding
+    url: https://github.com/thomasnormal/codex-auto-continue#troubleshooting
+    about: Check the README first for install, doctor, and tmux recovery guidance.

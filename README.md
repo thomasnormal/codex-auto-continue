@@ -23,6 +23,8 @@ recover from tmux problems without losing control of the pane.
 `rich` is optional. If it is installed, `acw status` uses the formatted table;
 otherwise it falls back to a plain-text summary.
 
+Installed via `uv`, `rich` is included automatically.
+
 ## Install
 
 Install from a local checkout with `uv`:
@@ -238,6 +240,11 @@ tmux socket disappeared
 ```bash
 kill -USR1 1996933
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, fast test
+commands, real-Codex test guidance, and tmux safety rules.
 
 ## How It Works
 

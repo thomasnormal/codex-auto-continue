@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a concrete `acw` bug or regression.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include the exact `acw` command, tmux target, and any relevant `doctor` output.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: List the exact commands or steps needed to trigger the issue.
+      placeholder: |
+        1. Start Codex in tmux window `uvm`
+        2. Run `acw start uvm`
+        3. Press `Escape`
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste the most relevant command output.
+      placeholder: |
+        acw
+        acw status --details <target>
+        acw doctor <target>
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Linux distro, tmux version, Codex version, and how you installed `acw`.
+    validations:
+      required: true

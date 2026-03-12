@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an operator-facing improvement to `acw`.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is awkward or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should the tool do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include example commands, screenshots, or operator constraints if they matter.
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This affects tmux behavior or socket handling.
+        - label: This affects Codex integration or interrupt handling.
+        - label: This affects onboarding, docs, or packaging.

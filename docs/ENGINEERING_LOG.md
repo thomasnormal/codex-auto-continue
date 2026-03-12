@@ -2,6 +2,9 @@
 
 ## 2026-03-11
 
+- Change: polished the GitHub/project surface further. `pyproject.toml` now includes canonical project URLs and installs `rich` as a normal runtime dependency so `uv tool install .` gives the formatted status/doctor UI by default instead of depending on the user's ambient Python environment.
+- Change: added `CONTRIBUTING.md` and GitHub issue templates for bug reports and feature requests. The repo now gives contributors a concrete development/test path and asks for the tmux/Codex diagnostics that actually matter for reproducing watcher bugs.
+
 - Change: added a first-pass GitHub repo surface: a CI workflow for smoke/unit tests, Dependabot for GitHub Actions and Python packaging metadata, and a pull request template with the expected verification steps.
 - Change: added a top-of-README dashboard screenshot and badges so the project page looks like a real tool instead of a bare source repository.
 - Change: rewrote `README.md` around the actual user workflow instead of repo-internal implementation detail. The top-level doc now leads with `uv` installation, Quick Start, everyday commands, interrupt behavior, `doctor`, troubleshooting, and a short development/testing section.
