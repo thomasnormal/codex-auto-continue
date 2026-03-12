@@ -3,7 +3,8 @@ __pycache__/
 *.pyo
 *.swp
 .DS_Store
+build/
+*.egg-info/
 
 # Local runtime state when running from this repo root.
 .codex/
-

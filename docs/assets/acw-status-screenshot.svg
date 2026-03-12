@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="860" viewBox="0 0 1400 860" role="img" aria-labelledby="title desc">
+  <title id="title">acw status dashboard screenshot</title>
+  <desc id="desc">Illustrated screenshot of the acw control panel showing running, warn, and paused Codex watchers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="100%" stop-color="#131c2f"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1728"/>
+      <stop offset="100%" stop-color="#17233a"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#020617" flood-opacity="0.45"/>
+    </filter>
+    <style>
+      text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .label { fill: #93a4bf; font-size: 22px; }
+      .value { fill: #e2e8f0; font-size: 24px; }
+      .head { fill: #8fb3ff; font-size: 20px; letter-spacing: 1px; }
+      .cell { fill: #d8e1ee; font-size: 20px; }
+      .muted { fill: #8fa0ba; font-size: 18px; }
+      .running { fill: #71e39a; }
+      .warn { fill: #ffb454; }
+      .paused { fill: #ffd166; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="860" fill="url(#bg)"/>
+  <circle cx="1220" cy="110" r="170" fill="#1d4ed8" opacity="0.18"/>
+  <circle cx="180" cy="760" r="220" fill="#059669" opacity="0.10"/>
+
+  <g filter="url(#shadow)">
+    <rect x="90" y="78" width="1220" height="704" rx="28" fill="url(#panel)" stroke="#26344f" stroke-width="2"/>
+    <rect x="90" y="78" width="1220" height="70" rx="28" fill="#0b1220"/>
+    <circle cx="128" cy="113" r="10" fill="#fb7185"/>
+    <circle cx="158" cy="113" r="10" fill="#fbbf24"/>
+    <circle cx="188" cy="113" r="10" fill="#34d399"/>
+    <text x="230" y="121" fill="#dbe5f4" font-size="28" font-weight="700">acw status</text>
+    <text x="1110" y="121" fill="#71e39a" font-size="20">running 7 | warn 1 | paused 1</text>
+
+    <text class="label" x="132" y="192">Sessions: 9</text>
+    <text class="label" x="1138" y="192">Recommendation: run acw doctor avip</text>
+
+    <rect x="124" y="220" width="1152" height="58" rx="14" fill="#10192a"/>
+    <text class="head" x="154" y="257">WINDOW/PANE</text>
+    <text class="head" x="420" y="257">STATE</text>
+    <text class="head" x="560" y="257">STARTED</text>
+    <text class="head" x="718" y="257">LAST_ACW</text>
+    <text class="head" x="896" y="257">LAST_AGENT</text>
+    <text class="head" x="1138" y="257">MESSAGE</text>
+
+    <g>
+      <rect x="124" y="292" width="1152" height="96" rx="16" fill="#111b2e"/>
+      <text class="cell" x="154" y="329">0:0:gaps/%0</text>
+      <text class="cell running" x="420" y="329">running</text>
+      <text class="cell" x="560" y="329">5d14h ago</text>
+      <text class="cell" x="718" y="329">19m ago</text>
+      <text class="cell" x="896" y="329">Ran test/Conversion/ImportVerilog...</text>
+      <text class="cell" x="1138" y="329">msg:continue</text>
+      <text class="muted" x="154" y="362">019cc20c…b9ea</text>
+      <text class="muted" x="1138" y="362">Test and commit regularly</text>
+    </g>
+
+    <g>
+      <rect x="124" y="402" width="1152" height="96" rx="16" fill="#10192a"/>
+      <text class="cell" x="154" y="439">0:3:uvm/%3</text>
+      <text class="cell warn" x="420" y="439">warn</text>
+      <text class="muted" x="420" y="468">codex log missing</text>
+      <text class="cell" x="560" y="439">8h29m ago</text>
+      <text class="cell" x="718" y="439">5m ago</text>
+      <text class="cell" x="896" y="439">Ran git status --short</text>
+      <text class="cell" x="1138" y="439">msg:continue</text>
+      <text class="muted" x="154" y="472">019cdd12…d3ee</text>
+    </g>
+
+    <g>
+      <rect x="124" y="512" width="1152" height="96" rx="16" fill="#111b2e"/>
+      <text class="cell" x="154" y="549">0:4:ship/%4</text>
+      <text class="cell paused" x="420" y="549">paused</text>
+      <text class="muted" x="420" y="578">auto-paused: authentication failed</text>
+      <text class="cell" x="560" y="549">9d0h ago</text>
+      <text class="cell" x="718" y="549">17m ago</text>
+      <text class="cell" x="896" y="549">I’m starting a broader staging validation run...</text>
+      <text class="cell" x="1138" y="549">msg:continue</text>
+      <text class="muted" x="154" y="582">019cb070…581a</text>
+    </g>
+
+    <g>
+      <rect x="124" y="622" width="1152" height="96" rx="16" fill="#10192a"/>
+      <text class="cell" x="154" y="659">0:8:avip/%8</text>
+      <text class="cell warn" x="420" y="659">warn</text>
+      <text class="muted" x="420" y="688">skip armed after interrupt</text>
+      <text class="cell" x="560" y="659">8h02m ago</text>
+      <text class="cell" x="718" y="659">8m ago</text>
+      <text class="cell" x="896" y="659">Waiting for background terminal...</text>
+      <text class="cell" x="1138" y="659">msg:continue</text>
+      <text class="muted" x="154" y="692">019cdd2b…5ccc</text>
+    </g>
+  </g>
+</svg>

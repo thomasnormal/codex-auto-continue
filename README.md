@@ -1,11 +1,16 @@
 # codex-auto-continue
 
+[![CI](https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.yml/badge.svg)](https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `acw` watches a Codex tmux pane and sends your follow-up prompt after each
 completed turn.
 
 It is designed for long-running Codex sessions where you want a stable
 "continue" loop, but still want to interrupt, inspect, edit the prompt, or
 recover from tmux problems without losing control of the pane.
+
+![acw status dashboard](docs/assets/acw-status-screenshot.svg)
 
 ## Requirements
 
@@ -279,6 +284,11 @@ The real suite:
 - runs real Codex sessions
 - does not touch your existing tmux sessions
 - stores failure artifacts under `~/.codex/auto-continue-e2e-tmp/failures/`
+
+GitHub Actions runs the fast path on pushes and pull requests:
+
+- `bash test/smoke.sh`
+- `python3 -m unittest test.test_watchd_unit test.test_logwatch_unit test.test_real_codex_harness_unit`
 
 Current real-Codex coverage includes:
 

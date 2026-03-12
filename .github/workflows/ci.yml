@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-and-unit:
+    name: Smoke and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install tmux and pstree
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux psmisc
+
+      - name: Run smoke checks
+        run: bash test/smoke.sh
+
+      - name: Run unit tests
+        run: python3 -m unittest test.test_watchd_unit test.test_logwatch_unit test.test_real_codex_harness_unit
