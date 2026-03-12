@@ -64,7 +64,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
             self.harness.diagnostics(),
         )
 
-    def test_watcher_auto_pauses_on_interrupt_banner(self):
+    def test_watcher_skips_interrupted_turn_and_resumes_after_manual_prompt(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
         state_file = self.harness.start_watcher(first_turn.thread_id)
@@ -76,15 +76,22 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.harness.wait_for_pane_contains("Working", timeout=30.0)
         self.harness.send_escape()
         watch_log = self.harness.wait_for_watch_log_contains(
-            "pause: auto-pausing watcher",
+            "skip: interrupted turn=",
             timeout=45.0,
         )
-        self.harness.wait_for_watcher_stopped(timeout=15.0)
+        self.assertIsNone(self.harness.watcher_proc.poll(), self.harness.diagnostics())
+        self.assertIn("skip: interrupted turn=", watch_log)
+        self.assertNotIn("continue: sent", watch_log, self.harness.diagnostics())
+
+        self.harness.send_codex_prompt("say exactly RESUMED and nothing else")
+        watch_log = self.harness.wait_for_continue_sent()
+        pane_text = self.harness.wait_for_pane_contains("test continue", timeout=60.0)
 
         state_text = state_file.read_text(encoding="utf-8", errors="ignore")
-        self.assertIn("pause: auto-pausing watcher", watch_log)
-        self.assertNotIn("continue: sent", watch_log, self.harness.diagnostics())
-        self.assertIn("auto-paused:", state_text)
+        self.assertIn("continue: sent", watch_log)
+        self.assertIn("skip: interrupted turn=", watch_log)
+        self.assertNotIn("auto-paused:", state_text)
+        self.assertIn("test continue", pane_text, self.harness.diagnostics())
 
     def test_manager_start_works_for_plain_full_auto_codex_pane(self):
         self.harness.rename_window("fullauto")

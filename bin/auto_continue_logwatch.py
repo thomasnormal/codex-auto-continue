@@ -54,6 +54,11 @@ TASK_CLOSE_RE = re.compile(
     r'turn\{[^}]*turn.id=([^ ]+)[^}]*\}: codex_core::tasks: close\b'
 )
 
+INTERRUPT_RE = re.compile(
+    r"session_loop\{thread_id=([0-9a-f\-]+)\}.*"
+    r"codex_core::codex: interrupt received: abort current task, if any\b"
+)
+
 STATE_DIR = Path.home() / ".codex"
 
 
@@ -79,6 +84,14 @@ class TmuxSendResult:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CodexLogEvent:
+    kind: Literal["completion", "interrupt"]
+    thread_id: str
+    turn_id: str = ""
+    detail: str = ""
+
+
 def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
     """Return a normalized completion event from codex-tui.log."""
     m = EVENT_RE.search(line)
@@ -90,6 +103,13 @@ def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
         return m.group(1), m.group(2), "false"
 
     return None
+
+
+def parse_codex_log_interrupt(line: str) -> Optional[str]:
+    m = INTERRUPT_RE.search(line)
+    if not m:
+        return None
+    return m.group(1)
 
 
 def compute_health(
@@ -204,16 +224,22 @@ def run_tmux(args: list[str], *, capture_output: bool = True) -> subprocess.Comp
     return rc
 
 
-PANE_ERROR_PATTERNS = [
+PANE_INTERRUPT_PATTERNS = [
     re.compile(r"conversation interrupted", re.IGNORECASE),
     re.compile(r"model interrupted to submit steer instructions", re.IGNORECASE),
+]
+
+PROMPT_MARKER_RE = re.compile(r"(?m)^› ")
+
+
+PANE_ERROR_PATTERNS = [
+    re.compile(r"unauthorized|authentication.*(failed|error)", re.IGNORECASE),
     re.compile(r"something went wrong\? hit /feedback", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),
     re.compile(r"try again at\b", re.IGNORECASE),
     re.compile(r"exceeded.*quota", re.IGNORECASE),
     re.compile(r"billing", re.IGNORECASE),
-    re.compile(r"unauthorized|authentication.*(failed|error)", re.IGNORECASE),
 ]
 
 
@@ -225,14 +251,41 @@ def tmux_capture_pane(pane: str, lines: int = 20) -> str:
     return ""
 
 
-def check_pane_for_errors(pane: str) -> Optional[str]:
-    """Return the first matched error string from the pane, or None."""
+def _check_pane_for_patterns(pane: str, patterns: list[re.Pattern[str]]) -> Optional[str]:
     text = tmux_capture_pane(pane, lines=20)
-    for pat in PANE_ERROR_PATTERNS:
+    for pat in patterns:
         m = pat.search(text)
         if m:
             return m.group(0)
     return None
+
+
+def check_pane_for_interrupt(pane: str) -> Optional[str]:
+    """Return a fresh interrupt banner from the pane, or None.
+
+    Interrupt banners linger in scrollback after the user submits a new prompt.
+    Treat them as active only when they appear after the most recent visible
+    prompt marker.
+    """
+    text = tmux_capture_pane(pane, lines=20)
+    last_prompt = None
+    for match in PROMPT_MARKER_RE.finditer(text):
+        last_prompt = match.start()
+    for pat in PANE_INTERRUPT_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        if last_prompt is not None and m.start() < last_prompt:
+            continue
+        return m.group(0)
+    return None
+
+
+def check_pane_for_errors(pane: str) -> Optional[str]:
+    """Return the first matched non-interrupt error string from the pane, or None."""
+    if check_pane_for_interrupt(pane):
+        return None
+    return _check_pane_for_patterns(pane, PANE_ERROR_PATTERNS)
 
 
 def auto_pause_current_watcher(reason: str, watch_log: Path, state_file: Path, state: dict) -> None:
@@ -618,8 +671,10 @@ def main() -> int:
 
     # Read initial state from session state file.
     state = read_state(state_file)
-    last_sent_turn = str(state.get("last_sent_turn", ""))
-    last_sent_thread = str(state.get("last_sent_thread", state.get("thread_id", "")))
+    last_handled_turn = str(state.get("last_handled_turn", state.get("last_sent_turn", "")))
+    last_handled_thread = str(
+        state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
+    )
 
     if not watched_thread:
         append_log(watch_log, "warn: could not auto-discover thread id yet; waiting for first event")
@@ -632,6 +687,24 @@ def main() -> int:
     health_detail = ""
     last_health_check = 0.0
     watcher_start = time.time()
+    interrupt_skip_armed = False
+
+    def mark_handled_turn(turn_id: str, thread_id: str) -> None:
+        nonlocal last_handled_turn, last_handled_thread
+        last_handled_turn = turn_id
+        last_handled_thread = thread_id
+        state["last_handled_turn"] = turn_id
+        state["last_handled_thread"] = thread_id
+
+    def skip_interrupted_turn(turn_id: str, thread_id: str, reason: str) -> None:
+        nonlocal interrupt_skip_armed
+        interrupt_skip_armed = False
+        mark_handled_turn(turn_id, thread_id)
+        write_state(state_file, state)
+        append_log(
+            watch_log,
+            f"skip: interrupted turn={turn_id} thread={thread_id} reason={reason}",
+        )
 
     def update_health(now: float) -> None:
         nonlocal health, health_detail
@@ -666,7 +739,7 @@ def main() -> int:
     pending_initial_event: Optional[tuple[str, str, str]] = None
     if watched_thread and codex_log.exists():
         pending_initial_event = check_codex_log_tail_for_pending(
-            codex_log, watched_thread, last_sent_turn, last_sent_thread,
+            codex_log, watched_thread, last_handled_turn, last_handled_thread,
             watch_log,
         )
 
@@ -707,12 +780,12 @@ def main() -> int:
     while True:
         _wake_event.clear()
 
-        events: list[tuple[str, str, str]] = []
+        events: list[CodexLogEvent] = []
         tnow = time.time()
 
         # Inject the pending startup event on the first iteration only.
         if pending_initial_event is not None:
-            events.append(pending_initial_event)
+            events.append(CodexLogEvent("completion", *pending_initial_event))
             pending_initial_event = None
 
         # --- Poll codex-tui.log ---
@@ -724,9 +797,19 @@ def main() -> int:
                 line = codex_fh.readline()
                 if not line:
                     break
+                interrupt_thread = parse_codex_log_interrupt(line)
+                if interrupt_thread:
+                    events.append(
+                        CodexLogEvent(
+                            "interrupt",
+                            interrupt_thread,
+                            detail="Conversation interrupted",
+                        )
+                    )
+                    continue
                 event = parse_codex_log_event(line)
                 if event:
-                    events.append(event)
+                    events.append(CodexLogEvent("completion", *event))
             # Detect truncation/rotation.
             try:
                 if codex_fh.tell() > codex_log.stat().st_size:
@@ -737,8 +820,9 @@ def main() -> int:
                 codex_fh = None
 
         # --- Process collected events ---
-        for thread_id, turn_id, needs_follow_up in events:
+        for event in events:
             tnow = time.time()
+            thread_id = event.thread_id
 
             if auto_mode:
                 if not watched_thread:
@@ -747,9 +831,27 @@ def main() -> int:
 
             if thread_id != watched_thread:
                 continue
+
+            if event.kind == "interrupt":
+                if not interrupt_skip_armed:
+                    interrupt_skip_armed = True
+                    append_log(watch_log, f"skip: armed after interrupt thread={thread_id}")
+                continue
+
+            turn_id = event.turn_id
+            needs_follow_up = event.detail
             if needs_follow_up != "false":
                 continue
-            if turn_id == last_sent_turn and thread_id == last_sent_thread:
+            if turn_id == last_handled_turn and thread_id == last_handled_thread:
+                continue
+
+            if interrupt_skip_armed:
+                skip_interrupted_turn(turn_id, thread_id, "Conversation interrupted")
+                continue
+
+            pane_interrupt = check_pane_for_interrupt(args.pane)
+            if pane_interrupt:
+                skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
                 continue
 
             pane_error = check_pane_for_errors(args.pane)
@@ -764,6 +866,11 @@ def main() -> int:
             if args.send_delay_secs > 0.0:
                 time.sleep(args.send_delay_secs)
 
+            pane_interrupt = check_pane_for_interrupt(args.pane)
+            if pane_interrupt:
+                skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
+                continue
+
             pane_error = check_pane_for_errors(args.pane)
             if pane_error:
                 auto_pause_current_watcher(pane_error, watch_log, state_file, state)
@@ -773,15 +880,12 @@ def main() -> int:
                 args.pane,
                 msg,
                 max(0.0, args.enter_delay_secs),
-                interrupt_checker=lambda: check_pane_for_errors(args.pane),
+                interrupt_checker=lambda: check_pane_for_interrupt(args.pane),
             )
             if send_result.status == "ok":
                 last_send_time = tnow
-                last_sent_turn = turn_id
-                last_sent_thread = thread_id
+                mark_handled_turn(turn_id, thread_id)
                 now = now_ts()
-                state["last_sent_turn"] = turn_id
-                state["last_sent_thread"] = thread_id
                 state["thread_id"] = watched_thread
                 state["last_continue_at"] = now
                 state["health"] = health
@@ -789,7 +893,7 @@ def main() -> int:
                 write_state(state_file, state)
                 append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
             elif send_result.status == "interrupted":
-                auto_pause_current_watcher(send_result.detail, watch_log, state_file, state)
+                skip_interrupted_turn(turn_id, thread_id, send_result.detail)
             else:
                 if send_result.detail:
                     append_log(

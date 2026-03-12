@@ -216,11 +216,11 @@ paused: pane=%1 pid=48201
 paused: pane=%2 pid=48305
 ```
 
-Watchers also auto-pause when the pane shows a Codex-level interruption or
-account error banner, such as `Conversation interrupted`, `Model interrupted to
-submit steer instructions`, auth failures, or quota/usage-limit errors. Resume
-them explicitly with `acw resume <target>` after you have handled the issue in
-the pane.
+Watchers skip one follow-up turn after a user interrupt (`Escape`), then stay
+running so automation resumes after the next manual prompt completes. They still
+auto-pause on real Codex error banners such as auth failures or
+quota/usage-limit errors. Resume those explicitly with `acw resume <target>`
+after you have handled the issue in the pane.
 
 If a watcher process is gone, `acw status` now reports it as `dead` even if the
 last persisted health snapshot was `ok`.
@@ -254,7 +254,7 @@ runs thirteen real-Codex tests:
 - a Codex contract test that proves which completion signals the current Codex build emits
 - a watcher integration test that verifies `auto_continue_logwatch.py` sends the continue prompt
 - a watcher regression test that proves watcher health no longer emits legacy rollout warnings
-- a watcher regression test that sends `Escape` in the isolated tmux pane and verifies the watcher auto-pauses on the real interrupt banner
+- a watcher regression test that sends `Escape` in the isolated tmux pane, verifies the interrupted turn is skipped, and verifies automation resumes after the next manual prompt
 - a manager integration test that starts a watcher against a plain `codex --full-auto` pane
 - a manager integration test that starts a watcher against a `codex resume <thread-id>` pane
 - a manager integration test that updates a watcher's message through `acw edit <pane>`

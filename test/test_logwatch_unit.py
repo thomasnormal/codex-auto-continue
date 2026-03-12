@@ -189,6 +189,14 @@ class LogwatchUnitTests(unittest.TestCase):
         )
         self.assertEqual((THREAD, TURN, "false"), logwatch.parse_codex_log_event(line))
 
+    def test_parse_codex_log_interrupt_parses_interrupt_line(self):
+        line = (
+            f'2026-03-10T13:42:21Z INFO session_loop{{thread_id={THREAD}}}:'
+            'submission_dispatch{submission.id="019cdd28-ef22-7433-807d-ea621f490168"}: '
+            "codex_core::codex: interrupt received: abort current task, if any"
+        )
+        self.assertEqual(THREAD, logwatch.parse_codex_log_interrupt(line))
+
     def test_discover_thread_id_uses_pane_local_discovery(self):
         line = (
             f'2026-03-10T13:42:21Z INFO session_loop{{thread_id={THREAD}}}:'
@@ -281,32 +289,60 @@ class LogwatchUnitTests(unittest.TestCase):
         finally:
             log_path.unlink(missing_ok=True)
 
-    def test_check_pane_for_errors_matches_conversation_interrupted(self):
+    def test_check_pane_for_interrupt_matches_conversation_interrupted(self):
         text = (
             "■ Conversation interrupted - tell the model what to do differently.\n"
             "Something went wrong? Hit /feedback to report the issue.\n"
         )
         with patch.object(logwatch, "tmux_capture_pane", return_value=text):
-            reason = logwatch.check_pane_for_errors("%11")
+            reason = logwatch.check_pane_for_interrupt("%11")
         self.assertEqual("Conversation interrupted", reason)
 
-    def test_check_pane_for_errors_matches_model_interrupted_banner(self):
+    def test_check_pane_for_interrupt_matches_model_interrupted_banner(self):
         with patch.object(
             logwatch,
             "tmux_capture_pane",
             return_value="• Model interrupted to submit steer instructions.\n",
         ):
-            reason = logwatch.check_pane_for_errors("%11")
+            reason = logwatch.check_pane_for_interrupt("%11")
         self.assertEqual("Model interrupted to submit steer instructions", reason)
 
-    def test_auto_pause_current_watcher_stops_process_for_pane_error(self):
+    def test_check_pane_for_interrupt_ignores_stale_banner_before_new_prompt(self):
+        text = (
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "\n"
+            "› say exactly RESUMED and nothing else\n"
+            "\n"
+            "• RESUMED\n"
+        )
+        with patch.object(logwatch, "tmux_capture_pane", return_value=text):
+            self.assertIsNone(logwatch.check_pane_for_interrupt("%11"))
+
+    def test_check_pane_for_errors_ignores_interrupt_banner(self):
+        text = (
+            "■ Conversation interrupted - tell the model what to do differently.\n"
+            "Something went wrong? Hit /feedback to report the issue.\n"
+        )
+        with patch.object(logwatch, "tmux_capture_pane", return_value=text):
+            self.assertIsNone(logwatch.check_pane_for_errors("%11"))
+
+    def test_check_pane_for_errors_matches_auth_banner(self):
+        with patch.object(
+            logwatch,
+            "tmux_capture_pane",
+            return_value="Authentication failed. Something went wrong? Hit /feedback.\n",
+        ):
+            reason = logwatch.check_pane_for_errors("%11")
+        self.assertEqual("Authentication failed", reason)
+
+    def test_auto_pause_current_watcher_stops_process_for_error_banner(self):
         state = {"thread_id": THREAD, "message": "continue"}
         with patch.object(logwatch, "append_log") as append_log:
             with patch.object(logwatch, "write_state") as write_state:
                 with patch.object(logwatch.os, "kill") as kill:
                     with patch.object(logwatch, "now_ts", return_value="2026-03-11 12:34:56"):
                         logwatch.auto_pause_current_watcher(
-                            "Conversation interrupted",
+                            "Authentication failed",
                             Path("/tmp/acw.log"),
                             Path("/tmp/acw.json"),
                             state,
@@ -314,7 +350,7 @@ class LogwatchUnitTests(unittest.TestCase):
         append_log.assert_called_once()
         write_state.assert_called_once()
         written_state = write_state.call_args.args[1]
-        self.assertEqual("auto-paused: Conversation interrupted", written_state["health_detail"])
+        self.assertEqual("auto-paused: Authentication failed", written_state["health_detail"])
         self.assertEqual("2026-03-11 12:34:56", written_state["health_ts"])
         kill.assert_called_once_with(logwatch.os.getpid(), logwatch.signal.SIGSTOP)
 
