@@ -80,6 +80,14 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "_read_session_state", return_value={"message": "continue by aot_plan_7.md"}):
             self.assertEqual(("inline", "continue by aot_plan_7.md"), acw._resolve_message(row))
 
+    def test_message_summary_shows_prompt_without_msg_prefix(self):
+        row = {
+            "thread": THREAD,
+            "msg_inline": "continue",
+        }
+        with patch.object(acw, "_read_session_state", return_value={"message": "continue by docs/DDR3_PLAN.md"}):
+            self.assertEqual("continue by docs/DDR3_PLAN.md", acw._message_summary_for_row(row))
+
     def test_edit_prefers_persisted_session_message_over_stale_inline_message(self):
         rows = [{
             "pane": "%2",

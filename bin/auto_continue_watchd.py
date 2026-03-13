@@ -1657,7 +1657,7 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
 def _message_summary_for_row(r: dict[str, str]) -> str:
     mode, value = _resolve_message(r)
     if mode == "inline" and value:
-        return f"msg:{value}"
+        return value
     return "-"
 
 
