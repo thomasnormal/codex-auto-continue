@@ -187,6 +187,7 @@ User interrupt behavior is intentionally different from real Codex failures.
 Real Codex error banners still auto-pause the watcher, including:
 
 - authentication failures
+- remote compact task failures
 - quota / usage limit failures
 - similar pane-visible Codex errors
 

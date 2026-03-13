@@ -234,6 +234,7 @@ PROMPT_MARKER_RE = re.compile(r"(?m)^› ")
 
 PANE_ERROR_PATTERNS = [
     re.compile(r"unauthorized|authentication.*(failed|error)", re.IGNORECASE),
+    re.compile(r"error running remote compact task", re.IGNORECASE),
     re.compile(r"something went wrong\? hit /feedback", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),

@@ -335,6 +335,15 @@ class LogwatchUnitTests(unittest.TestCase):
             reason = logwatch.check_pane_for_errors("%11")
         self.assertEqual("Authentication failed", reason)
 
+    def test_check_pane_for_errors_matches_remote_compact_banner(self):
+        text = (
+            "■ Error running remote compact task: We're currently experiencing high demand, "
+            "which may cause temporary errors.\n"
+        )
+        with patch.object(logwatch, "tmux_capture_pane", return_value=text):
+            reason = logwatch.check_pane_for_errors("%11")
+        self.assertEqual("Error running remote compact task", reason)
+
     def test_auto_pause_current_watcher_stops_process_for_error_banner(self):
         state = {"thread_id": THREAD, "message": "continue"}
         with patch.object(logwatch, "append_log") as append_log:

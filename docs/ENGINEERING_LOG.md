@@ -2,6 +2,7 @@
 
 ## 2026-03-11
 
+- Change: added pane-error detection for Codex `Error running remote compact task` failures. These transient remote-compact errors now auto-pause the watcher like auth/quota failures instead of letting `acw` keep injecting `continue` into a failing pane.
 - Change: `acw resume` now restarts paused watchers instead of sending `SIGCONT` to the stopped process. A long-paused watcher can accumulate many unread `codex-tui.log` completions; thawing it would replay historical turns and queue duplicate pending steers in the pane. Restarting from current pane state avoids that backlog replay.
 - Change: added standard community-health docs for the GitHub repo surface. The project now has a `SECURITY.md` disclosure policy, a default `CODEOWNERS` file, and README links to the deeper architecture/contributing/security docs so the landing page points people at the right follow-up material.
 - Change: polished the GitHub/project surface further. `pyproject.toml` now includes canonical project URLs and installs `rich` as a normal runtime dependency so `uv tool install .` gives the formatted status/doctor UI by default instead of depending on the user's ambient Python environment.
