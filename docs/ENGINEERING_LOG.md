@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: `acw restart` and `acw resume` now prefer the existing watcher's recorded thread id over fresh pane-based thread discovery. This avoids paused watchers being rebound to whatever Codex thread happens to be visible in the pane at restart time, which could otherwise produce duplicate-thread warnings against unrelated live agents.
 - Change: removed the `msg:` prefix from the status-table MESSAGE column. The table now shows the saved continue prompt text directly, which is easier to scan and matches what `acw edit` opens.
 - Change: removed `--message-file` support from the CLI and watcher process. `acw` now treats continue prompts as plain message text only: either passed with `--message` or edited interactively, then persisted in the session state for restart/edit/status paths.
 - Change: `acw edit` now seeds the editor from the canonical persisted session message for that watcher, instead of trusting the inline `--message` text still visible in the running `auto_continue_logwatch.py` process. This fixes paused/recovered watchers like `ddr3` showing the default workstream placeholder in `edit` even though `status` already showed the correct saved plan message.

@@ -1282,7 +1282,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
             resolved_thread = thread_arg.lower()
     else:
         _print_progress(f"restart: resolving Codex thread for pane={pane}")
-        resolved_thread = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
+        resolved_thread = thread_from_running_watcher_for_pane(pane) or detect_thread_id_for_pane(pane) or ""
     if resolved_thread:
         _print_progress(f"restart: thread_id={resolved_thread}")
     else:

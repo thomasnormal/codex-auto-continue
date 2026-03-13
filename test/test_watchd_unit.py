@@ -20,6 +20,7 @@ import auto_continue_watchd as acw  # noqa: E402
 
 
 THREAD = "11111111-1111-1111-1111-111111111111"
+OTHER_THREAD = "22222222-2222-2222-2222-222222222222"
 
 
 class WatchdUnitTests(unittest.TestCase):
@@ -842,14 +843,24 @@ class WatchdUnitTests(unittest.TestCase):
         restart_codex.assert_called_once_with("%7", THREAD)
         cmd_start.assert_called_once_with(["%7", THREAD, "--message", "continue"])
 
+    def test_restart_target_prefers_existing_watcher_thread_over_live_pane_detection(self):
+        with patch.object(acw, "detect_thread_id_for_pane", return_value=OTHER_THREAD):
+            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=THREAD):
+                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
+                    with patch.object(acw, "stop_pane_watchers"):
+                        with patch.object(acw, "cmd_start") as cmd_start:
+                            acw._restart_one("ddr3", "%2", [])
+        cmd_start.assert_called_once_with(["%2", THREAD, "--message", "continue"])
+
     def test_restart_target_prints_progress_steps(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
-            with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
-                with patch.object(acw, "stop_pane_watchers"):
-                    with patch.object(acw, "cmd_start"):
-                        out = io.StringIO()
-                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                            acw._restart_one("bugs", "%7", [])
+            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
+                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
+                    with patch.object(acw, "stop_pane_watchers"):
+                        with patch.object(acw, "cmd_start"):
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw._restart_one("bugs", "%7", [])
         text = out.getvalue()
         self.assertIn("restart: preparing pane=%7", text)
         self.assertIn("restart: resolving Codex thread for pane=%7", text)
