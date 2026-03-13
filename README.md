@@ -103,14 +103,14 @@ acw status --details Show full watcher details
 acw start <target>   Start a watcher
 acw stop [target]    Stop one watcher or all watchers
 acw pause [target]   Pause one watcher or all watchers
-acw resume [target]  Resume one paused watcher or all paused watchers
+acw resume [target]  Resume one or more paused watchers, or all paused watchers
 acw restart [target] Restart one watcher or all watchers
 acw edit <target>    Edit the stored continue prompt, then restart
 acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
 acw cleanup          Remove stale watcher files
 ```
 
-For all-watcher operations, prefer the no-target forms:
+For all-watcher operations, use the no-target forms:
 
 ```bash
 acw pause
@@ -118,17 +118,24 @@ acw resume
 acw restart
 ```
 
-Quoted `'*'` is accepted too, but an unquoted `*` will be expanded by your
-shell before `acw` sees it.
-
 `resume` restarts paused watchers from the current pane/thread state instead of
 thawing the old stopped process. That avoids replaying buffered Codex log
 history after a long pause.
+
+`resume` also accepts multiple explicit targets:
+
+```bash
+acw resume formal aot
+```
 
 For a single target, `acw restart <target> --restart-codex` also relaunches
 Codex in that pane with `codex resume <thread-id>` before restarting the
 watcher. This is the same-session restart path when the pane needs a fresh
 Codex process, not just a fresh watcher.
+
+`acw restart` with no target now also recovers dead watchers whose Codex panes
+are still live. It restarts from the saved thread/message state instead of
+requiring a fresh `acw start`.
 
 ## Continue Message
 
@@ -141,6 +148,7 @@ Examples:
 ```bash
 acw start %0 --message "continue and focus on tests"
 acw start tests --message-file /path/to/message.txt
+acw resume formal aot
 acw restart bugs --restart-codex
 acw edit tests
 ```

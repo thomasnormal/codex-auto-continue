@@ -332,14 +332,20 @@ class RealCodexHarness:
     def manager_watch_log(self) -> Path:
         if not self.pane_id:
             raise RuntimeError("pane not initialized")
-        pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", self.pane_id)
-        return self.codex_dir / f"auto_continue_logwatch.{pane_key}.log"
+        return self.manager_watch_log_for_pane(self.pane_id)
 
     @property
     def manager_pid_file(self) -> Path:
         if not self.pane_id:
             raise RuntimeError("pane not initialized")
-        pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", self.pane_id)
+        return self.manager_pid_file_for_pane(self.pane_id)
+
+    def manager_watch_log_for_pane(self, pane_id: str) -> Path:
+        pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", pane_id)
+        return self.codex_dir / f"auto_continue_logwatch.{pane_key}.log"
+
+    def manager_pid_file_for_pane(self, pane_id: str) -> Path:
+        pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", pane_id)
         return self.codex_dir / f"auto_continue_logwatch.{pane_key}.pid"
 
     def start(self) -> None:
@@ -384,7 +390,10 @@ class RealCodexHarness:
         return self.tmux(*args).stdout.strip()
 
     def send_keys(self, *keys: str, literal: bool = False) -> None:
-        cmd = ["send-keys", "-t", self.pane_id]
+        self.send_keys_to_pane(self.pane_id, *keys, literal=literal)
+
+    def send_keys_to_pane(self, pane_id: str, *keys: str, literal: bool = False) -> None:
+        cmd = ["send-keys", "-t", pane_id]
         if literal:
             cmd.append("-l")
         cmd.extend(keys)
@@ -419,6 +428,11 @@ class RealCodexHarness:
         self.send_keys(prompt, literal=True)
         time.sleep(0.2)
         self.send_keys("C-m")
+
+    def send_codex_prompt_to_pane(self, pane_id: str, prompt: str) -> None:
+        self.send_keys_to_pane(pane_id, prompt, literal=True)
+        time.sleep(0.2)
+        self.send_keys_to_pane(pane_id, "C-m")
 
     def send_escape(self) -> None:
         self.send_keys("Escape")
@@ -507,10 +521,19 @@ class RealCodexHarness:
         )
 
     def wait_for_manager_watcher_started(self, thread_id: str, timeout: float = 15.0) -> None:
+        self.wait_for_manager_watcher_started_in_pane(self.pane_id, thread_id, timeout=timeout)
+
+    def wait_for_manager_watcher_started_in_pane(
+        self,
+        pane_id: str,
+        thread_id: str,
+        timeout: float = 15.0,
+    ) -> None:
+        log_path = self.manager_watch_log_for_pane(pane_id)
         self._wait_for(
-            lambda: self.manager_watch_log.is_file()
-            and f"watch: pane={self.pane_id} thread_id={thread_id}"
-            in self.manager_watch_log.read_text(encoding="utf-8", errors="ignore"),
+            lambda: log_path.is_file()
+            and f"watch: pane={pane_id} thread_id={thread_id}"
+            in log_path.read_text(encoding="utf-8", errors="ignore"),
             timeout=timeout,
             description="manager watcher startup",
         )
@@ -546,6 +569,9 @@ class RealCodexHarness:
 
         return self._wait_for_value(_probe, timeout=timeout, description=f"codex log containing {needle!r}")
 
+    def reset_codex_log_baseline(self) -> None:
+        self._codex_log_baseline = self._line_count(self.codex_log)
+
     def wait_for_first_completed_turn(self, timeout: float = 60.0) -> TurnObservation:
         def _probe() -> Optional[TurnObservation]:
             lines = self.new_codex_log_lines()
@@ -562,6 +588,9 @@ class RealCodexHarness:
     def capture_pane(self, lines: int = 80) -> str:
         return self.tmux_stdout("capture-pane", "-t", self.pane_id, "-p", "-S", f"-{lines}")
 
+    def capture_pane_for_pane(self, pane_id: str, lines: int = 80) -> str:
+        return self.tmux_stdout("capture-pane", "-t", pane_id, "-p", "-S", f"-{lines}")
+
     def wait_for_pane_contains(self, needle: str, timeout: float = 30.0, lines: int = 120) -> str:
         def _probe() -> Optional[str]:
             text = self.capture_pane(lines=lines)
@@ -571,8 +600,55 @@ class RealCodexHarness:
 
         return self._wait_for_value(_probe, timeout=timeout, description=f"pane text {needle!r}")
 
+    def wait_for_pane_contains_in_pane(
+        self,
+        pane_id: str,
+        needle: str,
+        timeout: float = 30.0,
+        lines: int = 120,
+    ) -> str:
+        def _probe() -> Optional[str]:
+            text = self.capture_pane_for_pane(pane_id, lines=lines)
+            if needle in text:
+                return text
+            return None
+
+        return self._wait_for_value(_probe, timeout=timeout, description=f"pane text {needle!r}")
+
     def wait_for_watcher_stopped(self, timeout: float = 15.0) -> None:
         self._wait_for(self._watcher_is_stopped, timeout=timeout, description="watcher stopped")
+
+    def wait_for_manager_watcher_stopped_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
+        pid_file = self.manager_pid_file_for_pane(pane_id)
+
+        def _stopped() -> bool:
+            if not pid_file.is_file():
+                return True
+            try:
+                pid_text = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                return False
+            if not pid_text.isdigit():
+                return True
+            return not self._pid_is_alive(int(pid_text))
+
+        self._wait_for(_stopped, timeout=timeout, description="manager watcher stopped")
+
+    def wait_for_manager_watcher_paused_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
+        pid_file = self.manager_pid_file_for_pane(pane_id)
+
+        def _paused() -> bool:
+            if not pid_file.is_file():
+                return False
+            try:
+                pid_text = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                return False
+            if not pid_text.isdigit():
+                return False
+            return self._pid_is_stopped(int(pid_text))
+
+        self._wait_for(_paused, timeout=timeout, description="manager watcher paused")
 
     def recent_codex_log(self, lines: int = 120) -> str:
         if not self.codex_log.is_file():
@@ -721,10 +797,14 @@ class RealCodexHarness:
         return len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
 
     def _read_manager_pid(self) -> Optional[int]:
-        if not self.manager_pid_file.is_file():
+        return self._read_manager_pid_for_pane(self.pane_id)
+
+    def _read_manager_pid_for_pane(self, pane_id: str) -> Optional[int]:
+        pid_file = self.manager_pid_file_for_pane(pane_id)
+        if not pid_file.is_file():
             return None
         try:
-            text = self.manager_pid_file.read_text(encoding="utf-8").strip()
+            text = pid_file.read_text(encoding="utf-8").strip()
         except OSError:
             return None
         return int(text) if text.isdigit() else None
@@ -735,6 +815,16 @@ class RealCodexHarness:
             return True
         except OSError:
             return False
+
+    def _pid_is_stopped(self, pid: int) -> bool:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            env=self.process_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode == 0 and proc.stdout.strip().startswith("T")
 
     def _tmux_server_pid(self) -> int:
         proc = subprocess.run(

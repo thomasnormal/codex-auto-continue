@@ -94,9 +94,9 @@ def build_help_text(prog: str) -> str:
   {prog} status [target] [--details]
   {prog} start <target> [thread-id] [--message TEXT | --message-file FILE]
   {prog} stop [target]
-  {prog} pause [target|*]
-  {prog} resume [target|*]
-  {prog} restart [target|*]
+  {prog} pause [target]
+  {prog} resume [target ...]
+  {prog} restart [target]
   {prog} edit <target>
   {prog} cleanup
   {prog} doctor [target]
@@ -105,22 +105,23 @@ Commands:
   status    Show watcher state. Default command when no subcommand is given.
   start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
   stop      Stop one watcher, one pane's watchers, or all watchers.
-  pause     Send SIGSTOP to one watcher or all watchers.
-  resume    Restart one paused watcher or all paused watchers from current state.
-  restart   Restart one watcher or all running watchers. Use --restart-codex on a single target to relaunch Codex with the same thread.
+  pause     Send SIGSTOP to one watcher, or all watchers when no target is given.
+  resume    Restart one or more paused watchers, or all paused watchers, from current state.
+  restart   Restart one watcher or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running watcher, then restart it.
   cleanup   Remove stale watcher files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
 Targets:
   Commands with a target accept a tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
-  pause, resume, and restart accept '*' to act on all watchers. Bare '*' must usually be quoted in the shell.
+  pause, resume, and restart act on all watchers when no target is given. resume also accepts multiple explicit targets.
 
 Examples:
   {prog}
   {prog} status --details
   {prog} start %6 --message "continue"
   {prog} start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
+  {prog} resume formal aot
   {prog} restart bugs --restart-codex
   {prog} edit %6
   {prog} restart
@@ -353,7 +354,7 @@ def _print_tmux_unavailable_hint(target: str) -> None:
         print(recovery, file=sys.stderr)
 
 
-def resolve_pane_from_window_target(target: str) -> str | None:
+def resolve_pane_from_window_target(target: str, quiet: bool = False) -> str | None:
     """Resolve a window index or session:window to a pane id."""
     m = re.fullmatch(r"(\d+)", target)
     if m:
@@ -370,7 +371,8 @@ def resolve_pane_from_window_target(target: str) -> str | None:
     fmt = "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{pane_index}"
     listing = run_tmux("list-panes", "-a", "-F", fmt)
     if listing is None:
-        _print_tmux_unavailable_hint(target)
+        if not quiet:
+            _print_tmux_unavailable_hint(target)
         return None
 
     rows: list[dict[str, str]] = []
@@ -417,14 +419,15 @@ def resolve_pane_from_window_target(target: str) -> str | None:
             requested_session = active_session
         else:
             csv = ",".join(sorted(session_seen))
-            print(
-                f"error: window '{requested_window}' is ambiguous across tmux sessions: {csv}",
-                file=sys.stderr,
-            )
-            print(
-                f"hint: use 'session:window' (for example '0:{requested_window}') or a pane id (for example '%6')",
-                file=sys.stderr,
-            )
+            if not quiet:
+                print(
+                    f"error: window '{requested_window}' is ambiguous across tmux sessions: {csv}",
+                    file=sys.stderr,
+                )
+                print(
+                    f"hint: use 'session:window' (for example '0:{requested_window}') or a pane id (for example '%6')",
+                    file=sys.stderr,
+                )
             return None
 
     selected = ""
@@ -444,7 +447,7 @@ def resolve_pane_from_window_target(target: str) -> str | None:
     return selected if is_pane_id(selected) else None
 
 
-def resolve_pane_from_window_name(name: str) -> str | None:
+def resolve_pane_from_window_name(name: str, quiet: bool = False) -> str | None:
     """Resolve a window name to a pane id.  Returns None if not found or ambiguous."""
     fmt = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_active}"
     listing = run_tmux("list-panes", "-a", "-F", fmt)
@@ -469,10 +472,11 @@ def resolve_pane_from_window_name(name: str) -> str | None:
     unique_windows = {(s, w) for s, w, _, _ in matches}
     if len(unique_windows) > 1:
         labels = ", ".join(f"{s}:{w}" for s, w in sorted(unique_windows))
-        print(
-            f"error: window name '{name}' is ambiguous across windows: {labels}",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"error: window name '{name}' is ambiguous across windows: {labels}",
+                file=sys.stderr,
+            )
         return None
 
     # Multiple panes in the same window — pick the active one, else first.
@@ -979,7 +983,12 @@ def cmd_start(argv: list[str]) -> None:
         )
         sys.exit(1)
 
+    if thread_arg and thread_arg != "auto":
+        print(f"start: using explicit thread_id for pane={pane}")
+    else:
+        print(f"start: resolving Codex thread for pane={pane}")
     thread_id = resolve_thread_id(pane, thread_arg)
+    print(f"start: thread_id={thread_id}")
 
     # Warn if another watcher is already running for the same thread_id.
     if is_thread_id(thread_id):
@@ -1169,9 +1178,12 @@ def cmd_stop(argv: list[str]) -> None:
 
 def cmd_pause(argv: list[str]) -> None:
     """Pause watcher(s) by sending SIGSTOP."""
+    if argv and argv[0] == "*":
+        print("error: '*' is no longer supported for pause; use 'acw pause' with no target", file=sys.stderr)
+        sys.exit(2)
     pane_arg = argv[0] if argv else ""
 
-    if pane_arg and pane_arg != "*":
+    if pane_arg:
         pane = resolve_pane_target(pane_arg)
         pids = watcher_pids_for_pane(pane)
         if not pids:
@@ -1211,22 +1223,29 @@ def cmd_pause(argv: list[str]) -> None:
 
 def cmd_resume(argv: list[str]) -> None:
     """Resume paused watcher(s) by restarting from current state."""
-    pane_arg = argv[0] if argv else ""
+    if "*" in argv:
+        print("error: '*' is no longer supported for resume; use 'acw resume' with no target", file=sys.stderr)
+        sys.exit(2)
 
-    if pane_arg and pane_arg != "*":
-        pane = resolve_pane_target(pane_arg)
-        pids = watcher_pids_for_pane(pane)
-        if not pids:
-            print(f"not running: pane={pane}")
-            return
-        for pid_str in pids:
-            pid = int(pid_str)
-            if not _is_pid_stopped(pid):
-                print(f"not paused: pane={pane} pid={pid_str}")
-            else:
-                print(f"resuming paused watcher via restart: pane={pane} pid={pid_str}")
-                _restart_one(pane_arg, pane, [])
-                break
+    if argv:
+        seen_panes: set[str] = set()
+        for pane_arg in argv:
+            pane = resolve_pane_target(pane_arg)
+            if pane in seen_panes:
+                continue
+            seen_panes.add(pane)
+            pids = watcher_pids_for_pane(pane)
+            if not pids:
+                print(f"not running: pane={pane}")
+                continue
+            for pid_str in pids:
+                pid = int(pid_str)
+                if not _is_pid_stopped(pid):
+                    print(f"not paused: pane={pane} pid={pid_str}")
+                else:
+                    print(f"resuming paused watcher via restart: pane={pane} pid={pid_str}")
+                    _restart_one(pane_arg, pane, [])
+                    break
         return
 
     paused_panes: list[str] = []
@@ -1263,6 +1282,19 @@ def _restart_panes(panes: list[str]) -> None:
         print("no live panes to restart")
 
 
+def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 15.0) -> bool:
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-80") or ""
+        if "Do you trust the contents of this directory?" in text:
+            if run_tmux("send-keys", "-t", pane, "C-m") is None:
+                print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
+                sys.exit(1)
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
     if run_tmux("send-keys", "-t", pane, "C-c") is None:
         print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
@@ -1274,11 +1306,13 @@ def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
     if run_tmux("send-keys", "-t", pane, "C-m") is None:
         print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
         sys.exit(1)
+    _accept_directory_trust_prompt_in_pane(pane)
 
 
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
+    print(f"restart: preparing pane={pane}")
 
     thread_arg, msg_mode, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
 
@@ -1290,9 +1324,15 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         if is_thread_id(thread_arg):
             resolved_thread = thread_arg.lower()
     else:
+        print(f"restart: resolving Codex thread for pane={pane}")
         resolved_thread = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
+    if resolved_thread:
+        print(f"restart: thread_id={resolved_thread}")
+    else:
+        print(f"restart: thread_id unresolved for pane={pane}")
 
     if not msg_explicit:
+        print(f"restart: loading saved continue message for pane={pane}")
         if resolved_thread and is_thread_id(resolved_thread):
             ss = _read_session_state(resolved_thread)
             msg = ss.get("message", "")
@@ -1314,12 +1354,14 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
             )
             sys.exit(1)
 
+    print(f"restart: stopping watcher for pane={pane}")
     stop_pane_watchers(pane)
 
     if restart_codex:
         print(f"restarting codex: pane={pane} thread_id={resolved_thread}")
         _restart_codex_in_pane(pane, resolved_thread)
 
+    print(f"restart: starting watcher for pane={pane}")
     start_args: list[str] = [pane]
     if thread_arg:
         start_args.append(thread_arg)
@@ -1337,19 +1379,35 @@ def cmd_restart(argv: list[str]) -> None:
         target = rest.pop(0)
     else:
         target = ""
-    if not target or target == "*":
+    if target == "*":
+        print("error: '*' is no longer supported for restart; use 'acw restart' with no target", file=sys.stderr)
+        sys.exit(2)
+    if not target:
         if rest:
-            selector = "restart '*'" if target == "*" else "restart"
-            print(f"error: {selector} does not accept additional arguments", file=sys.stderr)
+            print("error: restart does not accept additional arguments", file=sys.stderr)
             sys.exit(2)
-        panes = sorted({r["pane"] for r in watcher_rows() if r.get("pane")})
+        panes = {r["pane"] for r in watcher_rows() if r.get("pane")}
+        live_threads = {
+            r["thread"].lower()
+            for r in watcher_rows()
+            if is_thread_id(r.get("thread", ""))
+        }
+        thread_pane = _build_thread_pane_map()
+        for session in _load_sessions():
+            thread_id = session["thread_id"].lower()
+            if thread_id in live_threads:
+                continue
+            pane = thread_pane.get(thread_id, "")
+            if is_pane_id(pane):
+                panes.add(pane)
+        panes = sorted(panes)
         if not panes:
-            print("no running watchers to restart")
+            print("no live panes to restart")
             return
         _restart_panes(panes)
         return
 
-    pane = resolve_pane_target(target)
+    pane = _resolve_restart_pane_target(target)
     _restart_one(target, pane, rest)
 
 
@@ -1441,7 +1499,12 @@ def _build_thread_pane_map() -> dict[str, str]:
             pane_id, shell_pid = parts[0], parts[1]
             if not pane_id or not shell_pid.isdigit():
                 continue
-            for tid in _threads_from_pstree(shell_pid):
+            tids = _threads_from_pstree(shell_pid)
+            if not tids:
+                fallback_tid = _discover_thread_for_pane(pane_id)
+                if fallback_tid:
+                    tids = [fallback_tid]
+            for tid in tids:
                 mapping[tid] = pane_id
     return mapping
 
@@ -1953,6 +2016,65 @@ def _load_sessions() -> list[dict[str, str]]:
     return candidates
 
 
+def _saved_session_panes_for_target(target: str) -> list[str]:
+    sessions = _load_sessions()
+    thread_pane = _build_thread_pane_map()
+
+    panes: list[str] = []
+    seen: set[str] = set()
+    for session in sessions:
+        thread_id = session["thread_id"].lower()
+        if is_thread_id(target):
+            if thread_id != target.lower():
+                continue
+        elif session.get("name", "") != target:
+            continue
+        pane = thread_pane.get(thread_id, "")
+        if not is_pane_id(pane) or pane in seen:
+            continue
+        seen.add(pane)
+        panes.append(pane)
+    return panes
+
+
+def _resolve_restart_pane_target(target: str) -> str:
+    if is_pane_id(target):
+        return target
+
+    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
+        pane = resolve_pane_from_window_target(target)
+        if pane and is_pane_id(pane):
+            return pane
+        print(f"error: could not resolve window target '{target}'", file=sys.stderr)
+        sys.exit(1)
+
+    pane = resolve_pane_from_window_name(target, quiet=True)
+    if pane and is_pane_id(pane):
+        return pane
+
+    saved_panes = _saved_session_panes_for_target(target)
+    if len(saved_panes) == 1:
+        return saved_panes[0]
+    if len(saved_panes) > 1:
+        joined = ", ".join(saved_panes)
+        print(
+            f"error: saved session target '{target}' is ambiguous across live panes: {joined}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _tmux_socket_recovery_hint():
+        _print_tmux_unavailable_hint(target)
+        sys.exit(1)
+
+    print(f"error: no watcher, window, or live Codex pane found for '{target}'", file=sys.stderr)
+    print(
+        "hint: use a pane id ('%6'), window name, window index ('2'), or a saved session name with a live Codex pane",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def cmd_status(argv: list[str]) -> None:
     pane_arg = ""
     details = False
@@ -2293,6 +2415,7 @@ def cleanup_stale_files() -> None:
         tid = r.get("thread", "")
         if tid:
             live_threads.add(tid.lower())
+    live_thread_panes = {tid.lower() for tid in _build_thread_pane_map()}
 
     # Log files for dead watchers.
     keep_logs: set[str] = set()
@@ -2311,7 +2434,8 @@ def cleanup_stale_files() -> None:
     for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
         base = os.path.basename(sf)
         tid = base.removeprefix("acw_session.").removesuffix(".json")
-        if tid.lower() not in live_threads:
+        tid_lower = tid.lower()
+        if tid_lower not in live_threads and tid_lower not in live_thread_panes:
             Path(sf).unlink(missing_ok=True)
 
 

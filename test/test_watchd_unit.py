@@ -398,7 +398,7 @@ class WatchdUnitTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 acw.cmd_cleanup(["aot"])
 
-    def test_cleanup_stale_files_removes_dead_session_state(self):
+    def test_cleanup_stale_files_removes_dead_session_state_without_live_pane(self):
         session_file = f"/state/acw_session.{THREAD}.json"
 
         def fake_glob(pattern):
@@ -414,9 +414,31 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw.Path, "unlink") as unlink:
-                    acw.cleanup_stale_files()
+                with patch.object(acw, "_build_thread_pane_map", return_value={}):
+                    with patch.object(acw.Path, "unlink") as unlink:
+                        acw.cleanup_stale_files()
         unlink.assert_called_once_with(missing_ok=True)
+
+    def test_cleanup_stale_files_keeps_dead_session_state_with_live_pane(self):
+        session_file = f"/state/acw_session.{THREAD}.json"
+
+        def fake_glob(pattern):
+            if pattern.endswith("auto_continue_logwatch.*.pid"):
+                return []
+            if pattern.endswith("auto_continue_logwatch*.log"):
+                return []
+            if pattern.endswith("auto_continue_logwatch*.runner.log"):
+                return []
+            if pattern.endswith("acw_session.*.json"):
+                return [session_file]
+            return []
+
+        with patch.object(acw.glob, "glob", side_effect=fake_glob):
+            with patch.object(acw, "watcher_rows", return_value=[]):
+                with patch.object(acw, "_build_thread_pane_map", return_value={THREAD: "%7"}):
+                    with patch.object(acw.Path, "unlink") as unlink:
+                        acw.cleanup_stale_files()
+        unlink.assert_not_called()
 
     def test_build_thread_pane_map_uses_tmux_process_tree(self):
         def fake_tmux(*args):
@@ -427,6 +449,18 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "run_tmux", side_effect=fake_tmux):
             with patch.object(acw, "_threads_from_pstree", return_value=[THREAD]):
                 mapping = acw._build_thread_pane_map()
+        self.assertEqual("%7", mapping[THREAD])
+
+    def test_build_thread_pane_map_falls_back_to_pane_local_thread_discovery(self):
+        def fake_tmux(*args):
+            if args[:4] == ("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"):
+                return "%7\t1234\n"
+            return None
+
+        with patch.object(acw, "run_tmux", side_effect=fake_tmux):
+            with patch.object(acw, "_threads_from_pstree", return_value=[]):
+                with patch.object(acw, "_discover_thread_for_pane", return_value=THREAD):
+                    mapping = acw._build_thread_pane_map()
         self.assertEqual("%7", mapping[THREAD])
 
     def test_run_tmux_avoids_cross_server_fallback_when_client_healthy(self):
@@ -573,7 +607,7 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1013/default,22,0"}, clear=False):
             self.assertEqual("/tmp/tmux-1013/default", acw._tmux_socket_from_env())
 
-    def test_pause_star_pauses_all_watchers(self):
+    def test_pause_without_target_pauses_all_watchers(self):
         rows = [
             {"pane": "%1", "pid": "101"},
             {"pane": "%2", "pid": "202"},
@@ -582,7 +616,7 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "_is_pid_stopped", return_value=False):
                 with patch.object(acw.os, "kill") as kill:
                     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        acw.cmd_pause(["*"])
+                        acw.cmd_pause([])
         self.assertEqual(
             [
                 ((101, acw.signal.SIGSTOP),),
@@ -591,7 +625,15 @@ class WatchdUnitTests(unittest.TestCase):
             kill.call_args_list,
         )
 
-    def test_resume_star_resumes_all_paused_watchers(self):
+    def test_pause_rejects_star_selector(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                acw.cmd_pause(["*"])
+        self.assertEqual(2, ctx.exception.code)
+        self.assertIn("use 'acw pause' with no target", err.getvalue())
+
+    def test_resume_without_target_resumes_all_paused_watchers(self):
         rows = [
             {"pane": "%1", "pid": "101"},
             {"pane": "%2", "pid": "202"},
@@ -602,9 +644,17 @@ class WatchdUnitTests(unittest.TestCase):
                 with patch.object(acw, "_restart_panes") as restart_panes:
                     out = io.StringIO()
                     with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                        acw.cmd_resume(["*"])
+                        acw.cmd_resume([])
         restart_panes.assert_called_once_with(["%1", "%3"])
         self.assertIn("resuming 2 paused watcher(s) via restart", out.getvalue())
+
+    def test_resume_rejects_star_selector(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                acw.cmd_resume(["*"])
+        self.assertEqual(2, ctx.exception.code)
+        self.assertIn("use 'acw resume' with no target", err.getvalue())
 
     def test_resume_target_restarts_paused_watcher_instead_of_sigcont(self):
         with patch.object(acw, "resolve_pane_target", return_value="%7"):
@@ -619,25 +669,55 @@ class WatchdUnitTests(unittest.TestCase):
         kill.assert_not_called()
         self.assertIn("resuming paused watcher via restart: pane=%7 pid=1234", out.getvalue())
 
-    def test_restart_star_restarts_all_live_panes(self):
-        rows = [
-            {"pane": "%1", "pid": "101"},
-            {"pane": "%2", "pid": "202"},
-        ]
+    def test_resume_multiple_targets_restarts_each_paused_target(self):
+        resolved = {"formal": "%6", "aot": "%7"}
 
-        def fake_tmux(*args):
-            if args[:4] == ("display-message", "-p", "-t", "%1"):
-                return "%1\n"
-            if args[:4] == ("display-message", "-p", "-t", "%2"):
-                return "%2\n"
-            return None
+        def fake_pids(pane: str) -> list[str]:
+            return {"%6": ["111"], "%7": ["222"]}[pane]
 
-        with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "run_tmux", side_effect=fake_tmux):
-                with patch.object(acw, "_restart_panes") as restart_panes:
-                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        acw.cmd_restart(["*"])
-        restart_panes.assert_called_once_with(["%1", "%2"])
+        with patch.object(acw, "resolve_pane_target", side_effect=lambda target: resolved[target]):
+            with patch.object(acw, "watcher_pids_for_pane", side_effect=fake_pids):
+                with patch.object(acw, "_is_pid_stopped", return_value=True):
+                    with patch.object(acw, "_restart_one") as restart_one:
+                        out = io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                            acw.cmd_resume(["formal", "aot"])
+        self.assertEqual(
+            [
+                (("formal", "%6", []),),
+                (("aot", "%7", []),),
+            ],
+            restart_one.call_args_list,
+        )
+        text = out.getvalue()
+        self.assertIn("resuming paused watcher via restart: pane=%6 pid=111", text)
+        self.assertIn("resuming paused watcher via restart: pane=%7 pid=222", text)
+
+    def test_resume_multiple_targets_continues_when_one_is_not_paused(self):
+        resolved = {"formal": "%6", "aot": "%7"}
+
+        def fake_pids(pane: str) -> list[str]:
+            return {"%6": ["111"], "%7": ["222"]}[pane]
+
+        with patch.object(acw, "resolve_pane_target", side_effect=lambda target: resolved[target]):
+            with patch.object(acw, "watcher_pids_for_pane", side_effect=fake_pids):
+                with patch.object(acw, "_is_pid_stopped", side_effect=[False, True]):
+                    with patch.object(acw, "_restart_one") as restart_one:
+                        out = io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                            acw.cmd_resume(["formal", "aot"])
+        restart_one.assert_called_once_with("aot", "%7", [])
+        text = out.getvalue()
+        self.assertIn("not paused: pane=%6 pid=111", text)
+        self.assertIn("resuming paused watcher via restart: pane=%7 pid=222", text)
+
+    def test_restart_rejects_star_selector(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                acw.cmd_restart(["*"])
+        self.assertEqual(2, ctx.exception.code)
+        self.assertIn("use 'acw restart' with no target", err.getvalue())
 
     def test_restart_without_target_restarts_all_live_panes(self):
         rows = [
@@ -659,6 +739,51 @@ class WatchdUnitTests(unittest.TestCase):
                         acw.cmd_restart([])
         restart_panes.assert_called_once_with(["%1", "%2"])
 
+    def test_restart_without_target_includes_recoverable_dead_sessions(self):
+        rows = [{"pane": "%1", "pid": "101", "thread": THREAD}]
+        sessions = [
+            {"thread_id": THREAD, "name": "formal", "message": "continue", "state_file": "/tmp/one"},
+            {
+                "thread_id": "22222222-2222-2222-2222-222222222222",
+                "name": "aot",
+                "message": "continue",
+                "state_file": "/tmp/two",
+            },
+        ]
+
+        def fake_tmux(*args):
+            if args[:4] == ("display-message", "-p", "-t", "%1"):
+                return "%1\n"
+            if args[:4] == ("display-message", "-p", "-t", "%9"):
+                return "%9\n"
+            return None
+
+        with patch.object(acw, "watcher_rows", return_value=rows):
+            with patch.object(acw, "_load_sessions", return_value=sessions):
+                with patch.object(acw, "_build_thread_pane_map", return_value={
+                    "22222222-2222-2222-2222-222222222222": "%9",
+                }):
+                    with patch.object(acw, "run_tmux", side_effect=fake_tmux):
+                        with patch.object(acw, "_restart_panes") as restart_panes:
+                            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                                acw.cmd_restart([])
+        restart_panes.assert_called_once_with(["%1", "%9"])
+
+    def test_restart_target_falls_back_to_dead_session_thread_mapping(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/tmp/one",
+        }]
+        with patch.object(acw, "resolve_pane_target", side_effect=SystemExit(1)):
+            with patch.object(acw, "_load_sessions", return_value=sessions):
+                with patch.object(acw, "_build_thread_pane_map", return_value={THREAD: "%6"}):
+                    with patch.object(acw, "_restart_one") as restart_one:
+                        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                            acw.cmd_restart(["formal"])
+        restart_one.assert_called_once_with("formal", "%6", [])
+
     def test_restart_target_with_restart_codex_relaunches_same_thread(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
             with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=THREAD):
@@ -670,6 +795,22 @@ class WatchdUnitTests(unittest.TestCase):
         stop_watchers.assert_called_once_with("%7")
         restart_codex.assert_called_once_with("%7", THREAD)
         cmd_start.assert_called_once_with(["%7", THREAD, "--message", "continue"])
+
+    def test_restart_target_prints_progress_steps(self):
+        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
+            with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
+                with patch.object(acw, "stop_pane_watchers"):
+                    with patch.object(acw, "cmd_start"):
+                        out = io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                            acw._restart_one("bugs", "%7", [])
+        text = out.getvalue()
+        self.assertIn("restart: preparing pane=%7", text)
+        self.assertIn("restart: resolving Codex thread for pane=%7", text)
+        self.assertIn(f"restart: thread_id={THREAD}", text)
+        self.assertIn("restart: loading saved continue message for pane=%7", text)
+        self.assertIn("restart: stopping watcher for pane=%7", text)
+        self.assertIn("restart: starting watcher for pane=%7", text)
 
     def test_restart_target_with_restart_codex_fails_when_thread_unknown(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
@@ -686,7 +827,8 @@ class WatchdUnitTests(unittest.TestCase):
     def test_restart_codex_in_pane_sends_resume_command(self):
         with patch.object(acw, "run_tmux", return_value="") as run_tmux:
             with patch.object(acw.time, "sleep") as sleep:
-                acw._restart_codex_in_pane("%7", THREAD)
+                with patch.object(acw, "_accept_directory_trust_prompt_in_pane") as accept_trust:
+                    acw._restart_codex_in_pane("%7", THREAD)
         self.assertEqual(
             [
                 (("send-keys", "-t", "%7", "C-c"),),
@@ -696,6 +838,27 @@ class WatchdUnitTests(unittest.TestCase):
             run_tmux.call_args_list,
         )
         sleep.assert_called_once_with(0.2)
+        accept_trust.assert_called_once_with("%7")
+
+    def test_accept_directory_trust_prompt_in_pane_confirms_prompt(self):
+        with patch.object(
+            acw,
+            "run_tmux",
+            side_effect=[
+                "Do you trust the contents of this directory?",
+                "",
+            ],
+        ) as run_tmux:
+            with patch.object(acw.time, "sleep") as sleep:
+                self.assertTrue(acw._accept_directory_trust_prompt_in_pane("%7", timeout_secs=0.5))
+        self.assertEqual(
+            [
+                (("capture-pane", "-t", "%7", "-p", "-S", "-80"),),
+                (("send-keys", "-t", "%7", "C-m"),),
+            ],
+            run_tmux.call_args_list,
+        )
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

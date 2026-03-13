@@ -119,6 +119,68 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertIn("resolved: target=resume pane=", start.stdout, self.harness.diagnostics())
         self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
 
+    def test_manager_resume_accepts_multiple_targets(self):
+        self.harness.rename_window("formal")
+        self.harness.start_codex("say exactly FORMALDONE and nothing else")
+        formal_turn = self.harness.wait_for_first_completed_turn()
+        formal_pane = self.harness.pane_id
+
+        self.harness.new_window("aot")
+        self.harness.start_codex("say exactly AOTDONE and nothing else")
+        aot_turn = self.harness.wait_for_first_completed_turn()
+        aot_pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "formal", "--message", "continue formal")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.run_manager("start", "aot", "--message", "continue aot")
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+        formal_pid_before = self.harness._read_manager_pid_for_pane(formal_pane)
+        aot_pid_before = self.harness._read_manager_pid_for_pane(aot_pane)
+
+        self.harness.run_manager("pause", "formal")
+        self.harness.run_manager("pause", "aot")
+        self.harness.wait_for_manager_watcher_paused_in_pane(formal_pane)
+        self.harness.wait_for_manager_watcher_paused_in_pane(aot_pane)
+
+        resume = self.harness.run_manager("resume", "formal", "aot")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        self.assertIn("resolved: target=formal pane=", resume.stdout, self.harness.diagnostics())
+        self.assertIn("resolved: target=aot pane=", resume.stdout, self.harness.diagnostics())
+        self.assertTrue(self.harness.manager_pid_file_for_pane(formal_pane).is_file(), self.harness.diagnostics())
+        self.assertTrue(self.harness.manager_pid_file_for_pane(aot_pane).is_file(), self.harness.diagnostics())
+        self.assertNotEqual(formal_pid_before, self.harness._read_manager_pid_for_pane(formal_pane))
+        self.assertNotEqual(aot_pid_before, self.harness._read_manager_pid_for_pane(aot_pane))
+
+    def test_manager_restart_restart_codex_reuses_same_thread(self):
+        self.harness.rename_window("bugs")
+        self.harness.start_codex("say exactly BUGSDONE and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        bugs_pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "bugs", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started_in_pane(bugs_pane, first_turn.thread_id)
+        watcher_pid_before = self.harness._read_manager_pid_for_pane(bugs_pane)
+
+        restart = self.harness.run_manager("restart", "bugs", "--restart-codex")
+        self.harness.wait_for_manager_watcher_started_in_pane(bugs_pane, first_turn.thread_id)
+        self.harness.wait_for_pane_contains_in_pane(
+            bugs_pane,
+            f"codex resume {first_turn.thread_id}",
+            timeout=30.0,
+        )
+        self.harness.reset_codex_log_baseline()
+        self.harness.send_codex_prompt_to_pane(
+            bugs_pane,
+            "say exactly RESTARTRESUMEOK and nothing else",
+        )
+        resumed_turn = self.harness.wait_for_first_completed_turn(timeout=60.0)
+
+        self.assertIn("restarting codex: pane=", restart.stdout, self.harness.diagnostics())
+        self.assertEqual(first_turn.thread_id, resumed_turn.thread_id, self.harness.diagnostics())
+        self.assertNotEqual(watcher_pid_before, self.harness._read_manager_pid_for_pane(bugs_pane))
+
     def test_manager_edit_updates_message_for_current_pane(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
@@ -173,6 +235,21 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("deadwatch", status.stdout, self.harness.diagnostics())
         self.assertIn("STATE:           dead", status.stdout, self.harness.diagnostics())
+
+    def test_manager_restart_without_target_recovers_dead_watcher(self):
+        self.harness.rename_window("recoverdead")
+        self.harness.start_codex("say exactly RECOVERDEAD and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        self.harness.run_manager("start", "recoverdead", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started_in_pane(self.harness.pane_id, first_turn.thread_id)
+        watcher_pid_before = self.harness._read_manager_pid_for_pane(self.harness.pane_id)
+
+        self.harness.stop_manager_watcher()
+        restart = self.harness.run_manager("restart")
+        self.harness.wait_for_manager_watcher_started_in_pane(self.harness.pane_id, first_turn.thread_id)
+
+        self.assertIn("--- restarting", restart.stdout, self.harness.diagnostics())
+        self.assertNotEqual(watcher_pid_before, self.harness._read_manager_pid_for_pane(self.harness.pane_id))
 
     def test_manager_status_summary_shows_recent_last_agent_text(self):
         token = "CONTROLPANELTOKEN"

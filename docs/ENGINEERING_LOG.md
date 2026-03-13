@@ -2,6 +2,11 @@
 
 ## 2026-03-13
 
+- Change: `acw start` and `acw restart` now print step-by-step progress messages while they resolve the pane thread, load the saved continue message, stop the old watcher, optionally relaunch Codex, and start the new watcher. This makes slow restarts easier to interpret without inventing a fake percentage bar.
+- Change: removed `'*'` as a supported selector for `acw pause`, `acw resume`, and `acw restart`. The no-target forms are now the only all-watchers syntax, which avoids shell-expansion confusion and keeps the CLI surface smaller.
+- Change: `acw resume` now accepts multiple explicit targets, so commands like `acw resume formal aot` restart each paused watcher instead of silently acting on only the first positional target.
+- Change: `acw restart` now recovers dead watchers when their Codex pane is still live. The manager keeps saved `acw_session.<thread>.json` state for threads that still resolve to a pane, includes those recoverable panes in `restart` with no target, and can resolve a saved session name back to a live pane even after the watcher pid is gone.
+- Change: `acw restart <target> --restart-codex` now handles Codex's directory-trust prompt during the in-pane `codex resume <thread-id>` relaunch path, which was required for the real-Codex end-to-end restart flow to complete reliably in a fresh isolated home.
 - Change: added `acw restart <target> --restart-codex` for same-session pane recovery. The manager now resolves the current thread id first, sends `codex resume <thread-id>` into the target tmux pane, and then restarts the watcher with the persisted continue message. If the thread id cannot be proven, the command fails before tearing down the existing watcher.
 
 ## 2026-03-11
