@@ -2394,11 +2394,11 @@ def cmd_cleanup(argv: list[str]) -> None:
     if argv:
         print("error: cleanup does not accept a target", file=sys.stderr)
         sys.exit(2)
-    cleanup_stale_files()
+    cleanup_stale_files(remove_dead_sessions=True)
     print("cleanup: removed stale files")
 
 
-def cleanup_stale_files() -> None:
+def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
     """Remove files for watchers that are no longer running."""
     # PID files for dead processes.
     for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
@@ -2415,7 +2415,6 @@ def cleanup_stale_files() -> None:
         tid = r.get("thread", "")
         if tid:
             live_threads.add(tid.lower())
-    live_thread_panes = {tid.lower() for tid in _build_thread_pane_map()}
 
     # Log files for dead watchers.
     keep_logs: set[str] = set()
@@ -2430,7 +2429,12 @@ def cleanup_stale_files() -> None:
             if lf not in keep_logs:
                 Path(lf).unlink(missing_ok=True)
 
-    # Session files for threads without a running watcher.
+    if not remove_dead_sessions:
+        return
+
+    live_thread_panes = {tid.lower() for tid in _build_thread_pane_map()}
+
+    # Session files for threads without a running watcher or live Codex pane.
     for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
         base = os.path.basename(sf)
         tid = base.removeprefix("acw_session.").removesuffix(".json")

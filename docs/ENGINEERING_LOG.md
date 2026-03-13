@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: split stale-file cleanup into a fast default path and an explicit deep cleanup path. Mutating commands such as `acw edit` and `acw restart` no longer do the expensive global pane->thread recovery scan just to prune dead session files; only explicit `acw cleanup` pays that cost. This drops common command latency from roughly 12s to well under 1s in the current tmux/Codex environment.
 - Change: `acw start` and `acw restart` now print step-by-step progress messages while they resolve the pane thread, load the saved continue message, stop the old watcher, optionally relaunch Codex, and start the new watcher. This makes slow restarts easier to interpret without inventing a fake percentage bar.
 - Change: removed `'*'` as a supported selector for `acw pause`, `acw resume`, and `acw restart`. The no-target forms are now the only all-watchers syntax, which avoids shell-expansion confusion and keeps the CLI surface smaller.
 - Change: `acw resume` now accepts multiple explicit targets, so commands like `acw resume formal aot` restart each paused watcher instead of silently acting on only the first positional target.

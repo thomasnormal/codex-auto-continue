@@ -398,6 +398,28 @@ class WatchdUnitTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 acw.cmd_cleanup(["aot"])
 
+    def test_cleanup_stale_files_default_keeps_session_state(self):
+        session_file = f"/state/acw_session.{THREAD}.json"
+
+        def fake_glob(pattern):
+            if pattern.endswith("auto_continue_logwatch.*.pid"):
+                return []
+            if pattern.endswith("auto_continue_logwatch*.log"):
+                return []
+            if pattern.endswith("auto_continue_logwatch*.runner.log"):
+                return []
+            if pattern.endswith("acw_session.*.json"):
+                return [session_file]
+            return []
+
+        with patch.object(acw.glob, "glob", side_effect=fake_glob):
+            with patch.object(acw, "watcher_rows", return_value=[]):
+                with patch.object(acw, "_build_thread_pane_map") as thread_map:
+                    with patch.object(acw.Path, "unlink") as unlink:
+                        acw.cleanup_stale_files()
+        thread_map.assert_not_called()
+        self.assertEqual([], unlink.call_args_list)
+
     def test_cleanup_stale_files_removes_dead_session_state_without_live_pane(self):
         session_file = f"/state/acw_session.{THREAD}.json"
 
@@ -416,7 +438,7 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "watcher_rows", return_value=[]):
                 with patch.object(acw, "_build_thread_pane_map", return_value={}):
                     with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files()
+                        acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_called_once_with(missing_ok=True)
 
     def test_cleanup_stale_files_keeps_dead_session_state_with_live_pane(self):
@@ -437,7 +459,7 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "watcher_rows", return_value=[]):
                 with patch.object(acw, "_build_thread_pane_map", return_value={THREAD: "%7"}):
                     with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files()
+                        acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_not_called()
 
     def test_build_thread_pane_map_uses_tmux_process_tree(self):
