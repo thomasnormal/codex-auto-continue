@@ -163,6 +163,10 @@ acw edit tests
 - recent visible agent output from the pane
 - the stored continue message
 
+It also flags invariant errors directly when the pane, watcher process,
+Codex thread, and saved session state stop matching 1:1. `acw` no longer
+silently merges those mismatches into a single “best guess” row.
+
 Use:
 
 ```bash
@@ -225,8 +229,11 @@ It checks:
 - whether the target pane resolves
 - whether a Codex thread is discoverable
 - whether a watcher is running, paused, degraded, or dead
+- whether the pane, watcher, Codex thread, and saved session identity still
+  match cleanly
 
-It also prints an explicit recommended next command when appropriate.
+It also prints an explicit recommended next command when appropriate, and it
+fails instead of guessing when identity is ambiguous.
 
 ## Troubleshooting
 
@@ -276,8 +283,10 @@ Supported completion signals:
 - current Codex: `codex_core::tasks: close`
 
 Thread discovery is pane-local. `acw` maps the pane's live Codex process to the
-thread id using the process tree and Codex's local SQLite state. It does not
-guess from unrelated global activity.
+thread id using only direct process-owned evidence: the process tree, Codex's
+local SQLite pid mapping, an explicit `codex resume <thread-id>` argv, or the
+thread id embedded in the live process's open Codex session files. It does not
+guess from cwd, timing, or unrelated global activity.
 
 Canonical watcher/session state is stored under:
 

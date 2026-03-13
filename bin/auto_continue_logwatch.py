@@ -68,6 +68,7 @@ def _session_state_path(thread_id: str) -> Path:
 THREAD_ID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+PSTREE_PROCESS_PID_RE = re.compile(r"(?<!\{)[A-Za-z0-9_.+-]+\((\d+)\)")
 
 THREAD_LINE_RE = re.compile(r"session_loop\{thread_id=([0-9a-f\-]+)\}")
 
@@ -497,49 +498,6 @@ def thread_times_from_state_db(thread_id: str, state_dir: Path = STATE_DIR) -> t
     return best
 
 
-def _thread_from_state_db_cwd(
-    cwd: str,
-    process_started_at: Optional[float],
-    state_dir: Path = STATE_DIR,
-) -> Optional[str]:
-    """Return the thread whose recorded cwd/start time best matches the pane process."""
-    if not cwd or not state_dir.is_dir():
-        return None
-
-    started_at = int(process_started_at) if process_started_at is not None else None
-    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        except sqlite3.Error:
-            continue
-        try:
-            query = (
-                "select id "
-                "from threads "
-                "where cwd = ? and id is not null and id != '' "
-            )
-            params: list[object] = [cwd]
-            if started_at is not None:
-                query += "and created_at between ? and ? "
-                params.extend([started_at - 120, started_at + 120])
-                query += "order by abs(created_at - ?) asc, updated_at desc limit 1"
-                params.append(started_at)
-            else:
-                query += "order by updated_at desc, created_at desc limit 1"
-            row = conn.execute(query, params).fetchone()
-        except sqlite3.Error:
-            row = None
-        finally:
-            conn.close()
-
-        if not row:
-            continue
-        thread_id = str(row[0]).lower()
-        if is_thread_id(thread_id):
-            return thread_id
-    return None
-
-
 def _thread_from_state_db_pid(pid: str, state_dir: Path = STATE_DIR) -> Optional[str]:
     """Return the most recent thread_id logged by the Codex process *pid*."""
     if not pid.isdigit() or not state_dir.is_dir():
@@ -577,6 +535,65 @@ def _thread_from_state_db_pid(pid: str, state_dir: Path = STATE_DIR) -> Optional
     return None
 
 
+def _thread_id_from_cmdline_fields(fields: list[str]) -> Optional[str]:
+    for idx, field in enumerate(fields):
+        if field == "resume" and idx + 1 < len(fields):
+            candidate = fields[idx + 1].lower()
+            if is_thread_id(candidate):
+                return candidate
+
+    candidates = sorted({field.lower() for field in fields if is_thread_id(field)})
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _thread_id_from_text_candidates(candidates: list[str]) -> Optional[str]:
+    matches = sorted(
+        {
+            match.group(0).lower()
+            for text in candidates
+            for match in THREAD_ID_RE.finditer(text)
+        }
+    )
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _thread_from_procfs_cmdline(pid: str) -> Optional[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    fields = [chunk.decode("utf-8", "replace") for chunk in raw.split(b"\0") if chunk]
+    return _thread_id_from_cmdline_fields(fields)
+
+
+def _thread_from_procfs_open_files(pid: str) -> Optional[str]:
+    try:
+        fd_names = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return None
+
+    targets: list[str] = []
+    for fd_name in fd_names:
+        try:
+            targets.append(os.readlink(f"/proc/{pid}/fd/{fd_name}"))
+        except OSError:
+            continue
+    return _thread_id_from_text_candidates(targets)
+
+
+def _thread_from_codex_procfs(pid: str) -> Optional[str]:
+    """Read thread identity directly from the live Codex process.
+
+    This is intentionally non-heuristic: it uses Codex-owned process data such
+    as argv and currently open session files rather than cwd/timing guesses.
+    """
+    return _thread_from_procfs_cmdline(pid) or _thread_from_procfs_open_files(pid)
+
+
 def thread_from_codex_pid(pid: str) -> Optional[str]:
     """If *pid* is a codex process, return its thread_id from local Codex state."""
     try:
@@ -585,11 +602,16 @@ def thread_from_codex_pid(pid: str) -> Optional[str]:
             return None
     except OSError:
         return None
-    return _thread_from_state_db_pid(pid)
+    return _thread_from_state_db_pid(pid) or _thread_from_codex_procfs(pid)
 
 
 def discover_thread_for_pane(pane: str) -> Optional[str]:
-    """Discover the thread_id for the codex process running in *pane*."""
+    """Discover the thread_id for the codex process running in *pane*.
+
+    This is intentionally strict: if the live Codex process cannot be mapped to
+    a thread_id directly, return ``None`` rather than guessing from cwd or
+    timing heuristics.
+    """
     rc = run_tmux(["list-panes", "-t", pane, "-F", "#{pane_pid}"])
     if rc.returncode != 0 or not rc.stdout.strip():
         return None
@@ -602,16 +624,8 @@ def discover_thread_for_pane(pane: str) -> Optional[str]:
             return None
     except FileNotFoundError:
         return None
-    codex_pids: list[str] = []
-    for pid in re.findall(r"\((\d+)\)", result.stdout):
-        codex_pids.append(pid)
+    for pid in PSTREE_PROCESS_PID_RE.findall(result.stdout):
         tid = thread_from_codex_pid(pid)
-        if tid:
-            return tid
-    pane_cwd = tmux_pane_cwd(pane)
-    for pid in codex_pids:
-        started_at = _process_start_epoch(pid)
-        tid = _thread_from_state_db_cwd(pane_cwd, started_at)
         if tid:
             return tid
     return None

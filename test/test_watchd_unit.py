@@ -23,6 +23,88 @@ THREAD = "11111111-1111-1111-1111-111111111111"
 OTHER_THREAD = "22222222-2222-2222-2222-222222222222"
 
 
+def _session_record(
+    thread_id: str,
+    *,
+    name: str = "formal",
+    message: str = "continue",
+    state_file: str = "/state/acw_session.json",
+    health: str = "",
+    health_detail: str = "",
+    health_ts: str = "",
+    last_continue_at: str = "",
+) -> acw.SavedSessionRecord:
+    return acw.SavedSessionRecord(
+        thread_id=thread_id.lower(),
+        name=name,
+        message=message,
+        state_file=state_file,
+        health=health,
+        health_detail=health_detail,
+        health_ts=health_ts,
+        last_continue_at=last_continue_at,
+    )
+
+
+def _watcher_record(
+    pane: str,
+    thread_id: str,
+    *,
+    pid: str = "1234",
+    state_file: str = "/state/acw_session.json",
+    watch_log: str = "/state/watch.log",
+    cwd: str = "/repo",
+    message_inline: str = "continue",
+    tmux_socket: str = "",
+) -> acw.LiveWatcherRecord:
+    return acw.LiveWatcherRecord(
+        pid=pid,
+        pane=pane,
+        thread_id=thread_id.lower(),
+        state_file=state_file,
+        watch_log=watch_log,
+        cwd=cwd,
+        message_inline=message_inline,
+        tmux_socket=tmux_socket,
+    )
+
+
+def _pane_record(
+    pane_id: str,
+    thread_id: str,
+    *,
+    window_label: str = "0:7:formal",
+    window_name: str = "formal",
+    shell_pid: str = "7777",
+    detected_thread_source: str = "pid",
+    detected_thread_detail: str = "",
+    has_codex_process: bool = True,
+) -> acw.LivePaneRecord:
+    return acw.LivePaneRecord(
+        pane_id=pane_id,
+        window_label=window_label,
+        window_name=window_name,
+        shell_pid=shell_pid,
+        detected_thread=thread_id.lower(),
+        detected_thread_source=detected_thread_source if thread_id else "",
+        detected_thread_detail=detected_thread_detail,
+        has_codex_process=has_codex_process,
+    )
+
+
+def _snapshot(
+    *,
+    panes: tuple[acw.LivePaneRecord, ...] = (),
+    watchers: tuple[acw.LiveWatcherRecord, ...] = (),
+    sessions: tuple[acw.SavedSessionRecord, ...] = (),
+) -> acw.RuntimeSnapshot:
+    return acw.RuntimeSnapshot(
+        panes=tuple(panes),
+        watchers=tuple(watchers),
+        sessions=tuple(sessions),
+    )
+
+
 class WatchdUnitTests(unittest.TestCase):
     def test_main_help_prints_command_summary(self):
         out = io.StringIO()
@@ -90,24 +172,15 @@ class WatchdUnitTests(unittest.TestCase):
             self.assertEqual("continue by docs/DDR3_PLAN.md", acw._message_summary_for_row(row))
 
     def test_edit_prefers_persisted_session_message_over_stale_inline_message(self):
-        rows = [{
-            "pane": "%2",
-            "thread": THREAD,
-            "msg_inline": acw.DEFAULT_MESSAGE_TEXT,
-            "pid": "1234",
-        }]
-
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%2", THREAD, window_label="0:2:ddr3", window_name="ddr3"),),
+            watchers=(_watcher_record("%2", THREAD, message_inline=acw.DEFAULT_MESSAGE_TEXT),),
+            sessions=(_session_record(THREAD, name="ddr3", message="continue by docs/DDR3_PLAN.md"),),
+        ))
         with patch.object(acw, "resolve_pane_target", return_value="%2"):
-            with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
-                with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
-                    with patch.object(acw, "watcher_rows", return_value=rows):
-                        with patch.object(
-                            acw,
-                            "_read_session_state",
-                            return_value={"message": "continue by docs/DDR3_PLAN.md"},
-                        ):
-                            with patch.object(acw, "_edit_message_interactive", return_value=None) as edit_message:
-                                acw.cmd_edit(["ddr3"])
+            with patch.object(acw, "_build_runtime_model", return_value=model):
+                with patch.object(acw, "_edit_message_interactive", return_value=None) as edit_message:
+                    acw.cmd_edit(["ddr3"])
 
         edit_message.assert_called_once_with("continue by docs/DDR3_PLAN.md")
 
@@ -143,163 +216,115 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual("Ran unit tests", acw._extract_last_agent_snippet(pane))
 
     def test_status_summary_skips_global_thread_pane_scan(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        live_rows = [{
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
-                with patch.object(
-                    acw,
-                    "_build_thread_pane_map",
-                    side_effect=AssertionError("summary status should not scan all panes"),
-                ):
-                    with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(acw, "_read_state_json", return_value={}):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
-                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                        out = io.StringIO()
-                                        with redirect_stdout(out):
-                                            acw.cmd_status([])
+        snapshot = _snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="formal"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
         text = out.getvalue()
         self.assertIn("Sessions: 1", text)
         self.assertIn("Ran tests", text)
 
     def test_status_summary_includes_duplicate_live_watchers_hidden_by_thread_merge(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        live_rows = [
-            {
-                "pane": "%10",
-                "thread": THREAD,
-                "state": "/state/acw_session.json",
-                "watch": "/state/watch10.log",
-                "msg_inline": "continue",
-                "pid": "1010",
-            },
-            {
-                "pane": "%6",
-                "thread": THREAD,
-                "state": "/state/acw_session.json",
-                "watch": "/state/watch6.log",
-                "msg_inline": "continue",
-                "pid": "606",
-            },
-        ]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={
-                "%6": "0:6:formal",
-                "%10": "0:10:aot2",
-            }):
-                with patch.object(
-                    acw,
-                    "_build_thread_pane_map",
-                    side_effect=AssertionError("summary status should not scan all panes"),
-                ):
-                    with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(acw, "_read_state_json", return_value={}):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
-                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                        out = io.StringIO()
-                                        with redirect_stdout(out):
-                                            acw.cmd_status([])
+        snapshot = _snapshot(
+            panes=(
+                _pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),
+                _pane_record("%10", THREAD, window_label="0:10:aot2", window_name="aot2"),
+            ),
+            watchers=(
+                _watcher_record("%10", THREAD, pid="1010", watch_log="/state/watch10.log"),
+                _watcher_record("%6", THREAD, pid="606", watch_log="/state/watch6.log"),
+            ),
+            sessions=(_session_record(THREAD, name="formal"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
         text = out.getvalue()
         self.assertIn("Sessions: 2", text)
         self.assertIn("0:6:formal/%6", text)
         self.assertIn("0:10:aot2/%10", text)
+        self.assertIn("Invariant error: thread 11111111…1111 is watched on panes %10, %6", text)
+
+    def test_status_summary_flags_duplicate_agent_name_on_multiple_threads(self):
+        snapshot = _snapshot(
+            panes=(
+                _pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),
+                _pane_record("%7", OTHER_THREAD, window_label="0:7:formal", window_name="formal"),
+            ),
+            watchers=(
+                _watcher_record("%6", THREAD, pid="606"),
+                _watcher_record("%7", OTHER_THREAD, pid="707"),
+            ),
+            sessions=(
+                _session_record(THREAD, name="formal"),
+                _session_record(OTHER_THREAD, name="formal", state_file="/state/acw_session.other.json"),
+            ),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Sessions: 2", text)
+        self.assertIn("Invariant error: agent name 'formal' maps to multiple threads", text)
 
     def test_status_summary_prints_doctor_recommendation_for_warn(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        live_rows = [{
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
-                with patch.object(
-                    acw,
-                    "_build_thread_pane_map",
-                    side_effect=AssertionError("summary status should not scan all panes"),
-                ):
-                    with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(
-                            acw,
-                            "_read_state_json",
-                            return_value={"health": "warn", "health_detail": "codex log missing"},
-                        ):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
-                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                        out = io.StringIO()
-                                        with redirect_stdout(out):
-                                            acw.cmd_status([])
+        snapshot = _snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="formal"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(
+                acw,
+                "_read_state_json",
+                return_value={"health": "warn", "health_detail": "codex log missing"},
+            ):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Recommendation: run acw doctor formal", text)
+        self.assertIn("Recommendation: run acw doctor %7", text)
 
     def test_status_summary_prints_cleanup_hint_for_dead_sessions(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={}):
-                with patch.object(
-                    acw,
-                    "_build_thread_pane_map",
-                    side_effect=AssertionError("summary status should not scan all panes"),
-                ):
-                    with patch.object(acw, "watcher_rows", return_value=[]):
-                        with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
-                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                        out = io.StringIO()
-                                        with redirect_stdout(out):
-                                            acw.cmd_status([])
+        snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
         self.assertIn("Hint: run acw cleanup to remove dead sessions.", out.getvalue())
 
     def test_status_summary_falls_back_without_rich(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        live_rows = [{
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }]
+        snapshot = _snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="formal"),),
+        )
         real_import = builtins.__import__
 
         def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -307,26 +332,19 @@ class WatchdUnitTests(unittest.TestCase):
                 raise ModuleNotFoundError("No module named 'rich'")
             return real_import(name, globals, locals, fromlist, level)
 
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={"%7": "0:7:formal"}):
-                with patch.object(
-                    acw,
-                    "_build_thread_pane_map",
-                    side_effect=AssertionError("summary status should not scan all panes"),
-                ):
-                    with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(
-                            acw,
-                            "_read_state_json",
-                            return_value={"health": "warn", "health_detail": "codex log missing"},
-                        ):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
-                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                        out = io.StringIO()
-                                        with patch("builtins.__import__", side_effect=fake_import):
-                                            with redirect_stdout(out):
-                                                acw.cmd_status([])
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(
+                acw,
+                "_read_state_json",
+                return_value={"health": "warn", "health_detail": "codex log missing"},
+            ):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with patch("builtins.__import__", side_effect=fake_import):
+                                with redirect_stdout(out):
+                                    acw.cmd_status([])
         text = out.getvalue()
         self.assertIn("WINDOW/PANE", text)
         self.assertIn("LAST_AGENT", text)
@@ -449,13 +467,15 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual("/tmp/current.sock", rows[0]["tmux_socket"])
 
     def test_doctor_checks_current_pane_and_thread(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+        ))
         with patch.dict(acw.os.environ, {"TMUX_PANE": "%7"}, clear=False):
             with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
                 with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
                     with patch.object(acw, "run_tmux", return_value="session\n"):
-                        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
-                            with patch.object(acw, "watcher_rows", return_value=[]):
-                                report = acw._doctor_report("")
+                        with patch.object(acw, "_build_runtime_model", return_value=model):
+                            report = acw._doctor_report("")
         self.assertEqual(0, report.exit_code)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("ok:tmux server reachable", rendered)
@@ -463,26 +483,22 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
 
     def test_doctor_report_recommends_restart_for_warn_watcher(self):
-        row = {
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:uvm", window_name="uvm"),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="uvm"),),
+        ))
         with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
             with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
                 with patch.object(acw, "run_tmux", return_value="session\n"):
                     with patch.object(acw, "_doctor_resolve_target", return_value=("%7", "")):
-                        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
-                            with patch.object(acw, "watcher_rows", return_value=[row]):
-                                with patch.object(
-                                    acw,
-                                    "_read_state_json",
-                                    return_value={"health": "warn", "health_detail": "rollout channel closed"},
-                                ):
-                                    report = acw._doctor_report("uvm")
+                        with patch.object(acw, "_build_runtime_model", return_value=model):
+                            with patch.object(
+                                acw,
+                                "_read_state_json",
+                                return_value={"health": "warn", "health_detail": "rollout channel closed"},
+                            ):
+                                report = acw._doctor_report("uvm")
         self.assertEqual("warn", report.result)
         self.assertEqual(0, report.exit_code)
         self.assertIn("acw restart uvm", report.recommendations)
@@ -494,26 +510,60 @@ class WatchdUnitTests(unittest.TestCase):
             with patch.object(acw, "resolve_pane_from_window_name", return_value=None):
                 self.assertEqual(("%9", ""), acw._doctor_resolve_target("formal"))
 
-    def test_doctor_report_uses_watcher_thread_when_pane_detection_fails(self):
-        row = {
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }
+    def test_doctor_report_errors_when_live_pane_thread_cannot_be_detected(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%7",
+                "",
+                window_label="0:7:formal",
+                window_name="formal",
+                detected_thread_detail="could not determine thread_id for pane=%7 from the live Codex process",
+                has_codex_process=True,
+            ),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="formal"),),
+        ))
         with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
             with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
                 with patch.object(acw, "run_tmux", return_value="session\n"):
                     with patch.object(acw, "_doctor_resolve_target", return_value=("%7", "")):
-                        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
-                            with patch.object(acw, "watcher_rows", return_value=[row]):
-                                with patch.object(acw, "_read_state_json", return_value={}):
-                                    report = acw._doctor_report("formal")
-        self.assertEqual("ok", report.result)
+                        with patch.object(acw, "_build_runtime_model", return_value=model):
+                            with patch.object(acw, "_read_state_json", return_value={}):
+                                report = acw._doctor_report("formal")
+        self.assertEqual("error", report.result)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
-        self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
+        self.assertIn("error:could not determine thread_id for pane=%7 from the live Codex process", rendered)
+        self.assertIn(
+            "error:watcher identity mismatch: could not determine thread_id for pane=%7 from the live Codex process",
+            rendered,
+        )
+
+    def test_status_summary_surfaces_unresolved_live_codex_pane_instead_of_guessing(self):
+        snapshot = _snapshot(
+            panes=(_pane_record(
+                "%7",
+                "",
+                window_label="0:7:formal",
+                window_name="formal",
+                detected_thread_detail="could not determine thread_id for pane=%7 from the live Codex process",
+                has_codex_process=True,
+            ),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Sessions: 1", text)
+        self.assertIn("0:7:formal/%7", text)
+        self.assertIn(
+            "Invariant error: live Codex pane %7 has a Codex process but no detectable thread id",
+            text,
+        )
 
     def test_doctor_plain_output_shows_recommended_command(self):
         report = acw.DoctorReport(
@@ -530,17 +580,21 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("RESULT: warn", text)
 
     def test_doctor_skips_pane_checks_without_target_or_current_pane(self):
+        empty_model = acw._build_runtime_model(_snapshot())
         with patch.dict(acw.os.environ, {}, clear=True):
             with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
                 with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
                     with patch.object(acw, "run_tmux", return_value="session\n"):
-                        report = acw._doctor_report("")
+                        with patch.object(acw, "_build_runtime_model", return_value=empty_model):
+                            report = acw._doctor_report("")
         self.assertEqual(0, report.exit_code)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("info:pane checks skipped", rendered)
 
     def test_doctor_rejects_explicit_dot_target(self):
-        report = acw._doctor_report(".")
+        empty_model = acw._build_runtime_model(_snapshot())
+        with patch.object(acw, "_build_runtime_model", return_value=empty_model):
+            report = acw._doctor_report(".")
         self.assertEqual(1, report.exit_code)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("error:could not resolve target '.'", rendered)
@@ -602,10 +656,8 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw, "_build_thread_pane_map") as thread_map:
-                    with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files()
-        thread_map.assert_not_called()
+                with patch.object(acw.Path, "unlink") as unlink:
+                    acw.cleanup_stale_files()
         self.assertEqual([], unlink.call_args_list)
 
     def test_cleanup_stale_files_removes_dead_session_state_without_live_pane(self):
@@ -624,7 +676,7 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw, "_build_thread_pane_map", return_value={}):
+                with patch.object(acw, "_build_runtime_model", return_value=acw._build_runtime_model(_snapshot())):
                     with patch.object(acw.Path, "unlink") as unlink:
                         acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_called_once_with(missing_ok=True)
@@ -645,7 +697,10 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw, "_build_thread_pane_map", return_value={THREAD: "%7"}):
+                live_model = acw._build_runtime_model(_snapshot(
+                    panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+                ))
+                with patch.object(acw, "_build_runtime_model", return_value=live_model):
                     with patch.object(acw.Path, "unlink") as unlink:
                         acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_not_called()
@@ -661,7 +716,7 @@ class WatchdUnitTests(unittest.TestCase):
                 mapping = acw._build_thread_pane_map()
         self.assertEqual("%7", mapping[THREAD])
 
-    def test_build_thread_pane_map_falls_back_to_pane_local_thread_discovery(self):
+    def test_build_thread_pane_map_does_not_guess_when_process_tree_has_no_thread(self):
         def fake_tmux(*args):
             if args[:4] == ("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"):
                 return "%7\t1234\n"
@@ -669,9 +724,9 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw, "run_tmux", side_effect=fake_tmux):
             with patch.object(acw, "_threads_from_pstree", return_value=[]):
-                with patch.object(acw, "_discover_thread_for_pane", return_value=THREAD):
+                with patch.object(acw, "_discover_thread_for_pane", side_effect=AssertionError("should not be called")):
                     mapping = acw._build_thread_pane_map()
-        self.assertEqual("%7", mapping[THREAD])
+        self.assertEqual({}, mapping)
 
     def test_run_tmux_avoids_cross_server_fallback_when_client_healthy(self):
         with patch.dict(acw.os.environ, {"TMUX": "/tmp/tmux-1/default,1,0"}, clear=False):
@@ -759,72 +814,45 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("use a pane id", err.getvalue())
 
     def test_status_uses_live_watcher_rows_when_tmux_metadata_is_unavailable(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        live_rows = [{
-            "pane": "%7",
-            "thread": THREAD,
-            "state": "/state/acw_session.json",
-            "watch": "/state/watch.log",
-            "msg_inline": "continue",
-            "pid": "1234",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={}):
-                with patch.object(acw, "_build_thread_pane_map", return_value={}):
-                    with patch.object(acw, "watcher_rows", return_value=live_rows):
-                        with patch.object(acw, "_read_state_json", return_value={}):
-                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
-                                with patch.object(acw, "_is_pid_stopped", return_value=False):
-                                    out = io.StringIO()
-                                    with redirect_stdout(out):
-                                        acw.cmd_status(["--details"])
+        snapshot = _snapshot(
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="formal"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                        out = io.StringIO()
+                        with redirect_stdout(out):
+                            acw.cmd_status(["--details"])
         text = out.getvalue()
         self.assertIn("PANE:            %7", text)
         self.assertIn("PID:             1234", text)
-        self.assertIn("STATE:           running", text)
+        self.assertIn("STATE:           error", text)
+        self.assertIn("ANOMALY:         tmux pane %7 is missing", text)
         self.assertIn("WINDOW:          formal", text)
 
     def test_status_target_matches_saved_session_name_without_live_pane(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={}):
-                with patch.object(acw, "watcher_rows", return_value=[]):
-                    out = io.StringIO()
-                    with redirect_stdout(out):
-                        acw.cmd_status(["formal"])
+        snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                acw.cmd_status(["formal"])
         text = out.getvalue()
         self.assertIn("Sessions: 1", text)
         self.assertIn("formal", text)
 
     def test_status_prints_tmux_recovery_hint_when_metadata_is_unavailable(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/state/acw_session.json",
-        }]
-        with patch.object(acw, "_load_sessions", return_value=sessions):
-            with patch.object(acw, "_build_pane_window_map", return_value={}):
-                with patch.object(acw, "_build_thread_pane_map", return_value={}):
-                    with patch.object(acw, "watcher_rows", return_value=[]):
-                        with patch.object(
-                            acw,
-                            "_tmux_socket_recovery_hint",
-                            return_value="hint: tmux socket is unreachable; recreate it with `kill -USR1 1996933`",
-                        ):
-                            err = io.StringIO()
-                            with redirect_stderr(err), redirect_stdout(io.StringIO()):
-                                acw.cmd_status([])
+        snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(
+                acw,
+                "_tmux_socket_recovery_hint",
+                return_value="hint: tmux socket is unreachable; recreate it with `kill -USR1 1996933`",
+            ):
+                err = io.StringIO()
+                with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                    acw.cmd_status([])
         text = err.getvalue()
         self.assertIn("tmux metadata is unavailable", text)
         self.assertIn("kill -USR1 1996933", text)
@@ -946,53 +974,34 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("use 'acw restart' with no target", err.getvalue())
 
     def test_restart_without_target_restarts_all_live_panes(self):
-        rows = [
-            {"pane": "%1", "pid": "101"},
-            {"pane": "%2", "pid": "202"},
-        ]
-
-        def fake_tmux(*args):
-            if args[:4] == ("display-message", "-p", "-t", "%1"):
-                return "%1\n"
-            if args[:4] == ("display-message", "-p", "-t", "%2"):
-                return "%2\n"
-            return None
-
-        with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "run_tmux", side_effect=fake_tmux):
-                with patch.object(acw, "_restart_panes") as restart_panes:
-                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        acw.cmd_restart([])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(
+                _pane_record("%1", THREAD, window_label="0:1:one", window_name="one"),
+                _pane_record("%2", OTHER_THREAD, window_label="0:2:two", window_name="two"),
+            ),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_restart_panes") as restart_panes:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    acw.cmd_restart([])
         restart_panes.assert_called_once_with(["%1", "%2"])
 
     def test_restart_without_target_includes_recoverable_dead_sessions(self):
-        rows = [{"pane": "%1", "pid": "101", "thread": THREAD}]
-        sessions = [
-            {"thread_id": THREAD, "name": "formal", "message": "continue", "state_file": "/tmp/one"},
-            {
-                "thread_id": "22222222-2222-2222-2222-222222222222",
-                "name": "aot",
-                "message": "continue",
-                "state_file": "/tmp/two",
-            },
-        ]
-
-        def fake_tmux(*args):
-            if args[:4] == ("display-message", "-p", "-t", "%1"):
-                return "%1\n"
-            if args[:4] == ("display-message", "-p", "-t", "%9"):
-                return "%9\n"
-            return None
-
-        with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "_load_sessions", return_value=sessions):
-                with patch.object(acw, "_build_thread_pane_map", return_value={
-                    "22222222-2222-2222-2222-222222222222": "%9",
-                }):
-                    with patch.object(acw, "run_tmux", side_effect=fake_tmux):
-                        with patch.object(acw, "_restart_panes") as restart_panes:
-                            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                                acw.cmd_restart([])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(
+                _pane_record("%1", THREAD, window_label="0:1:formal", window_name="formal"),
+                _pane_record("%9", OTHER_THREAD, window_label="0:9:aot", window_name="aot"),
+            ),
+            watchers=(_watcher_record("%1", THREAD, pid="101"),),
+            sessions=(
+                _session_record(THREAD, name="formal", state_file="/tmp/one"),
+                _session_record(OTHER_THREAD, name="aot", state_file="/tmp/two"),
+            ),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_restart_panes") as restart_panes:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    acw.cmd_restart([])
         restart_panes.assert_called_once_with(["%1", "%9"])
 
     def test_restart_panes_continues_after_one_pane_fails(self):
@@ -1030,18 +1039,14 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("restart: 1 pane(s) failed", out.getvalue())
 
     def test_restart_target_falls_back_to_dead_session_thread_mapping(self):
-        sessions = [{
-            "thread_id": THREAD,
-            "name": "formal",
-            "message": "continue",
-            "state_file": "/tmp/one",
-        }]
-        with patch.object(acw, "resolve_pane_target", side_effect=SystemExit(1)):
-            with patch.object(acw, "_load_sessions", return_value=sessions):
-                with patch.object(acw, "_build_thread_pane_map", return_value={THREAD: "%6"}):
-                    with patch.object(acw, "_restart_one") as restart_one:
-                        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                            acw.cmd_restart(["formal"])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),),
+            sessions=(_session_record(THREAD, name="formal", state_file="/tmp/one"),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_restart_one") as restart_one:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    acw.cmd_restart(["formal"])
         restart_one.assert_called_once_with("formal", "%6", [])
 
     def test_resolve_restart_target_prefers_saved_session_pane_over_window_name(self):
@@ -1050,35 +1055,49 @@ class WatchdUnitTests(unittest.TestCase):
                 self.assertEqual("%9", acw._resolve_restart_pane_target("formal"))
 
     def test_restart_target_with_restart_codex_relaunches_same_thread(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
-            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=THREAD):
-                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
-                    with patch.object(acw, "stop_pane_watchers") as stop_watchers:
-                        with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
-                            with patch.object(acw, "cmd_start") as cmd_start:
-                                acw._restart_one("bugs", "%7", ["--restart-codex"])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:bugs", window_name="bugs"),),
+            watchers=(_watcher_record("%7", THREAD),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue"),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "stop_pane_watchers") as stop_watchers:
+                with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
+                    with patch.object(acw, "cmd_start") as cmd_start:
+                        acw._restart_one("bugs", "%7", ["--restart-codex"])
         stop_watchers.assert_called_once_with("%7")
         restart_codex.assert_called_once_with("%7", THREAD)
         cmd_start.assert_called_once_with(["%7", THREAD, "--message", "continue"])
 
-    def test_restart_target_prefers_existing_watcher_thread_over_live_pane_detection(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=OTHER_THREAD):
-            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=THREAD):
-                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
-                    with patch.object(acw, "stop_pane_watchers"):
-                        with patch.object(acw, "cmd_start") as cmd_start:
+    def test_restart_target_fails_when_watcher_thread_and_live_pane_disagree(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%2", OTHER_THREAD, window_label="0:2:ddr3", window_name="ddr3"),),
+            watchers=(_watcher_record("%2", THREAD),),
+            sessions=(_session_record(THREAD, name="ddr3", message="continue"),),
+        ))
+        err = io.StringIO()
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "stop_pane_watchers") as stop_watchers:
+                with patch.object(acw, "cmd_start") as cmd_start:
+                    with redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as ctx:
                             acw._restart_one("ddr3", "%2", [])
-        cmd_start.assert_called_once_with(["%2", THREAD, "--message", "continue"])
+        self.assertEqual(1, ctx.exception.code)
+        stop_watchers.assert_not_called()
+        cmd_start.assert_not_called()
+        self.assertIn("does not match watcher thread", err.getvalue())
 
     def test_restart_target_prints_progress_steps(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=THREAD):
-            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
-                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
-                    with patch.object(acw, "stop_pane_watchers"):
-                        with patch.object(acw, "cmd_start"):
-                            out = io.StringIO()
-                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                                acw._restart_one("bugs", "%7", [])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue"),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "stop_pane_watchers"):
+                with patch.object(acw, "cmd_start"):
+                    out = io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                        acw._restart_one("bugs", "%7", [])
         text = out.getvalue()
         self.assertIn("restart: preparing pane=%7", text)
         self.assertIn("restart: resolving Codex thread for pane=%7", text)
@@ -1088,13 +1107,22 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("restart: starting watcher for pane=%7", text)
 
     def test_restart_target_with_restart_codex_fails_when_thread_unknown(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
-            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
-                with patch.object(acw, "stop_pane_watchers") as stop_watchers:
-                    err = io.StringIO()
-                    with redirect_stderr(err):
-                        with self.assertRaises(SystemExit) as ctx:
-                            acw._restart_one("bugs", "%7", ["--restart-codex"])
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%7",
+                "",
+                window_label="0:7:bugs",
+                window_name="bugs",
+                detected_thread_detail="could not determine thread_id for pane=%7 from the live Codex process",
+                has_codex_process=True,
+            ),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "stop_pane_watchers") as stop_watchers:
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as ctx:
+                        acw._restart_one("bugs", "%7", ["--restart-codex"])
         self.assertEqual(1, ctx.exception.code)
         stop_watchers.assert_not_called()
         self.assertIn("could not determine thread_id for pane=%7", err.getvalue())

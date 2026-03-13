@@ -85,35 +85,36 @@ class LogwatchUnitTests(unittest.TestCase):
                 logwatch.thread_times_from_state_db(THREAD, Path(tmpdir)),
             )
 
-    def test_thread_from_state_db_cwd_uses_nearest_thread_creation_time(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.chmod(tmpdir, 0o700)
-            db_path = Path(tmpdir) / "state_5.sqlite"
-            conn = sqlite3.connect(db_path)
-            try:
-                conn.execute(
-                    "create table threads ("
-                    "id text, "
-                    "created_at integer, "
-                    "updated_at integer, "
-                    "cwd text)"
-                )
-                conn.execute(
-                    "insert into threads(id, created_at, updated_at, cwd) values (?, ?, ?, ?)",
-                    ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 200, 210, "/repo"),
-                )
-                conn.execute(
-                    "insert into threads(id, created_at, updated_at, cwd) values (?, ?, ?, ?)",
-                    (THREAD, 390, 420, "/repo"),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+    def test_discover_thread_for_pane_returns_none_without_direct_pid_mapping(self):
+        with patch.object(
+            logwatch,
+            "run_tmux",
+            return_value=subprocess.CompletedProcess(["tmux"], 0, "7777\n", ""),
+        ):
+            with patch.object(
+                logwatch.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["pstree"], 0, "bash(7777)---codex(222)\n", ""),
+            ):
+                with patch.object(logwatch, "thread_from_codex_pid", return_value=None):
+                    self.assertIsNone(logwatch.discover_thread_for_pane("%11"))
 
-            self.assertEqual(
-                THREAD,
-                logwatch._thread_from_state_db_cwd("/repo", 392.0, Path(tmpdir)),
-            )
+    def test_thread_id_from_cmdline_fields_reads_resume_target(self):
+        self.assertEqual(
+            THREAD,
+            logwatch._thread_id_from_cmdline_fields(["codex", "--full-auto", "resume", THREAD]),
+        )
+
+    def test_thread_id_from_text_candidates_reads_unique_rollout_path(self):
+        self.assertEqual(
+            THREAD,
+            logwatch._thread_id_from_text_candidates(
+                [
+                    f"/home/user/.codex/sessions/2026/03/13/rollout-2026-03-13T23-09-49-{THREAD}.jsonl",
+                    "/home/user/.codex/log/codex-tui.log",
+                ]
+            ),
+        )
 
     def test_thread_from_state_db_pid_uses_process_uuid_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:

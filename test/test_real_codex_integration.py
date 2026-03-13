@@ -112,6 +112,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.harness.new_window("resume")
         self.harness.resume_codex(first_turn.thread_id)
         self.harness.wait_for_recent_codex_log_contains(first_turn.thread_id, timeout=45.0)
+        self.harness.tmux("kill-window", "-t", f"{self.harness.session_name}:0")
 
         start = self.harness.run_manager("start", "resume", "--message", "test continue")
         self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
@@ -210,7 +211,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertNotEqual(0, doctor.returncode, self.harness.diagnostics())
         self.assertIn("pane resolved:", doctor.stdout, self.harness.diagnostics())
-        self.assertIn("could not detect a Codex thread", doctor.stdout, self.harness.diagnostics())
+        self.assertIn("no live Codex agent detected in pane", doctor.stdout, self.harness.diagnostics())
         self.assertIn("RESULT: error", doctor.stdout, self.harness.diagnostics())
 
     def test_manager_start_fails_on_plain_shell_pane_without_thread(self):

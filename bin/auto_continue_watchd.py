@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import glob
 import io
 import json
@@ -72,6 +73,7 @@ DEFAULT_MESSAGE_TEXT = (
     "please continue with the workstream.\n\n"
     "Keep momentum, validate changes, and move to the next highest-value task.\n"
 )
+PSTREE_PROCESS_PID_RE = re.compile(r"(?<!\{)[A-Za-z0-9_.+-]+\((\d+)\)")
 
 os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -864,7 +866,7 @@ def is_running_pid_file(pid_file: str) -> bool:
 
 def thread_from_running_watcher_for_pane(pane: str) -> str | None:
     rows = watcher_rows(pane)
-    if not rows:
+    if len(rows) != 1:
         return None
     tid = rows[0]["thread"]
     if is_thread_id(tid):
@@ -924,23 +926,47 @@ def _message_args(value: str) -> list[str]:
     return ["--message", value]
 
 
-def _validate_existing_pane_watcher(pane: str, requested_thread: str = "") -> tuple[str, str] | None:
-    row = _watcher_row_for_pane(pane)
-    if not row:
+def _validate_existing_pane_watcher(
+    pane: str,
+    requested_thread: str = "",
+    model: RuntimeModel | None = None,
+) -> tuple[str, str] | None:
+    if model is None:
+        model = _build_runtime_model()
+
+    watchers = list(_runtime_watchers_for_pane(model, pane))
+    if not watchers:
         return None
-    thread_id = row.get("thread", "")
+
+    if len(watchers) != 1:
+        joined = " ".join(sorted(w.pid or "?" for w in watchers))
+        return (
+            f"error: multiple watchers already running for pane={pane}: {joined}",
+            f"hint: run 'acw stop {pane}' to stop all pane watchers, then start once",
+        )
+
+    row = watchers[0]
+    thread_id = row.thread_id
     if requested_thread and is_thread_id(thread_id) and thread_id.lower() != requested_thread.lower():
         return (
             f"error: existing watcher for pane={pane} is using thread {thread_id[:8]}…, "
             f"not requested thread {requested_thread[:8]}…",
             f"hint: stop it first with 'acw stop {pane}' if you want to start a different session there",
         )
+
+    anomalies = _watcher_anomalies(model, row)
     other = _other_watcher_for_thread(pane, thread_id)
     if other:
         return (
             f"error: existing watcher for pane={pane} is duplicated; pane={other['pane']} "
             f"pid={other['pid']} is already watching thread {thread_id[:8]}…",
             f"hint: stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
+        )
+    if anomalies:
+        detail = "; ".join(anomalies)
+        return (
+            f"error: existing watcher for pane={pane} is inconsistent: {detail}",
+            f"hint: stop it first with 'acw stop {pane}', then start once after the pane/session identity is clean",
         )
     return None
 
@@ -983,11 +1009,12 @@ def cmd_start(argv: list[str]) -> None:
     key = key_from_pane(pane)
     pf = pid_file_for_key(key)
     rl = run_log_for_key(key)
+    model = _build_runtime_model()
 
     existing_pids = watcher_pids_for_pane(pane)
     if existing_pids:
         if len(existing_pids) == 1:
-            validation = _validate_existing_pane_watcher(pane, thread_arg)
+            validation = _validate_existing_pane_watcher(pane, thread_arg, model=model)
             if validation:
                 print(validation[0], file=sys.stderr)
                 print(validation[1], file=sys.stderr)
@@ -1027,6 +1054,19 @@ def cmd_start(argv: list[str]) -> None:
         )
         print(
             f"hint: stop it first with 'acw stop {other['pane']}' to avoid duplicates",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    other_panes = [row for row in _runtime_panes_for_thread(model, thread_id) if row.pane_id != pane]
+    if other_panes:
+        panes = ", ".join(sorted({row.pane_id for row in other_panes if row.pane_id}))
+        print(
+            f"error: another live Codex pane is already using thread {thread_id[:8]}… on {panes}",
+            file=sys.stderr,
+        )
+        print(
+            f"hint: clean up the duplicate panes first, then start exactly one watcher for {thread_id[:8]}…",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1365,6 +1405,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     _print_progress(f"restart: preparing pane={pane}")
 
     thread_arg, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
+    model = _build_runtime_model()
 
     resolved_thread = ""
     if thread_arg and thread_arg != "auto":
@@ -1373,9 +1414,29 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
             sys.exit(1)
         if is_thread_id(thread_arg):
             resolved_thread = thread_arg.lower()
+        pane_record = model.panes_by_id.get(pane)
+        live_thread = pane_record.detected_thread.lower() if pane_record and is_thread_id(pane_record.detected_thread) else ""
+        if live_thread and resolved_thread and live_thread != resolved_thread and not restart_codex:
+            print(
+                f"error: pane {pane} is running thread {_short_thread_id(live_thread)}, "
+                f"not requested thread {_short_thread_id(resolved_thread)}",
+                file=sys.stderr,
+            )
+            print(
+                "hint: use --restart-codex to relaunch Codex into that thread, or restart against the live pane thread",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         _print_progress(f"restart: resolving Codex thread for pane={pane}")
-        resolved_thread = thread_from_running_watcher_for_pane(pane) or detect_thread_id_for_pane(pane) or ""
+        resolved_thread, thread_error = _strict_thread_for_pane(model, pane)
+        if thread_error:
+            print(f"error: {thread_error}", file=sys.stderr)
+            print(
+                f"hint: clean up pane {pane} so exactly one live pane, one watcher, and one session agree on the thread",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if resolved_thread:
         _print_progress(f"restart: thread_id={resolved_thread}")
     else:
@@ -1384,10 +1445,16 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if not msg_explicit:
         _print_progress(f"restart: loading saved continue message for pane={pane}")
         if resolved_thread and is_thread_id(resolved_thread):
-            ss = _read_session_state(resolved_thread)
-            msg = ss.get("message", "")
-            if msg:
-                msg_value = msg
+            session, session_error = _strict_session_for_thread(model, resolved_thread)
+            if session_error:
+                print(f"error: {session_error}", file=sys.stderr)
+                print(
+                    f"hint: repair the saved session for thread {_short_thread_id(resolved_thread)} before restarting without --message",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if session and session.message:
+                msg_value = session.message
 
     if not thread_arg:
         thread_arg = resolved_thread
@@ -1430,20 +1497,9 @@ def cmd_restart(argv: list[str]) -> None:
         if rest:
             print("error: restart does not accept additional arguments", file=sys.stderr)
             sys.exit(2)
-        panes = {r["pane"] for r in watcher_rows() if r.get("pane")}
-        live_threads = {
-            r["thread"].lower()
-            for r in watcher_rows()
-            if is_thread_id(r.get("thread", ""))
-        }
-        thread_pane = _build_thread_pane_map()
-        for session in _load_sessions():
-            thread_id = session["thread_id"].lower()
-            if thread_id in live_threads:
-                continue
-            pane = thread_pane.get(thread_id, "")
-            if is_pane_id(pane):
-                panes.add(pane)
+        model = _build_runtime_model()
+        panes = {pane.pane_id for pane in model.snapshot.panes if pane.pane_id and is_thread_id(pane.detected_thread)}
+        panes.update({watcher.pane for watcher in model.snapshot.watchers if watcher.pane})
         panes = sorted(panes)
         if not panes:
             print("no live panes to restart")
@@ -1451,7 +1507,8 @@ def cmd_restart(argv: list[str]) -> None:
         _restart_panes(panes)
         return
 
-    pane = _resolve_restart_pane_target(target)
+    model = _build_runtime_model()
+    pane = _resolve_restart_pane_target(target, model=model)
     _restart_one(target, pane, rest)
 
 
@@ -1469,21 +1526,26 @@ def cmd_edit(argv: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
-    rows = watcher_rows(pane)
-    tid = ""
-    value = ""
-    if rows:
-        row = rows[0]
-        row_tid = row.get("thread", "")
-        if is_thread_id(row_tid):
-            tid = row_tid.lower()
-        _, value = _resolve_message(row)
+    model = _build_runtime_model()
+    tid, thread_error = _strict_thread_for_pane(model, pane)
+    if thread_error:
+        print(f"error: {thread_error}", file=sys.stderr)
+        print(
+            f"hint: clean up pane {pane} so exactly one live pane, one watcher, and one saved session agree before editing",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    if not tid:
-        tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
-    if not value and tid and is_thread_id(tid):
-        ss = _read_session_state(tid)
-        value = ss.get("message", "")
+    session, session_error = _strict_session_for_thread(model, tid)
+    if session_error:
+        print(f"error: {session_error}", file=sys.stderr)
+        print(
+            f"hint: repair the saved session for thread {_short_thread_id(tid)} before editing its message",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    value = session.message if session else ""
 
     new_value = _edit_message_interactive(value)
     if new_value is None:
@@ -1496,7 +1558,7 @@ def cmd_edit(argv: list[str]) -> None:
     if tid and is_thread_id(tid):
         _write_session_state(tid, {"message": new_value})
     print(f"edit: message updated for pane {pane}")
-    if watcher_rows(pane):
+    if _runtime_watchers_for_pane(model, pane):
         cmd_restart([pane, "--message", new_value])
 
 
@@ -1526,14 +1588,53 @@ def _threads_from_pstree(shell_pid: str) -> list[str]:
         if result.returncode != 0:
             return []
     except FileNotFoundError:
-        return []
+            return []
     threads: list[str] = []
-    for pid in re.findall(r"\((\d+)\)", result.stdout):
+    for pid in PSTREE_PROCESS_PID_RE.findall(result.stdout):
         tid = _thread_from_codex_pid(pid)
         if tid:
             threads.append(tid)
             break  # one codex per tree is enough
     return threads
+
+
+def _codex_pids_from_pstree(shell_pid: str) -> list[str]:
+    """Return Codex process ids found in a pane's process tree."""
+    try:
+        result = subprocess.run(
+            ["pstree", "-p", shell_pid],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return []
+    except FileNotFoundError:
+        return []
+
+    codex_pids: list[str] = []
+    for pid in PSTREE_PROCESS_PID_RE.findall(result.stdout):
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
+        except OSError:
+            continue
+        if exe.removesuffix(" (deleted)") == "codex":
+            codex_pids.append(pid)
+    return codex_pids
+
+
+def _pane_thread_probe(pane_id: str, shell_pid: str) -> tuple[str, str, str, bool]:
+    """Return ``(thread_id, source, detail, has_codex_process)`` for a pane."""
+    if not shell_pid.isdigit():
+        return "", "", "", False
+
+    # Prefer direct pid->thread mapping; this is strong evidence.
+    tids = _threads_from_pstree(shell_pid)
+    if tids:
+        return tids[0].lower(), "pid", "", True
+
+    codex_pids = _codex_pids_from_pstree(shell_pid)
+    if not codex_pids:
+        return "", "", "", False
+    return "", "", f"could not determine thread_id for pane={pane_id} from the live Codex process", True
 
 
 def _build_thread_pane_map() -> dict[str, str]:
@@ -1549,10 +1650,6 @@ def _build_thread_pane_map() -> dict[str, str]:
             if not pane_id or not shell_pid.isdigit():
                 continue
             tids = _threads_from_pstree(shell_pid)
-            if not tids:
-                fallback_tid = _discover_thread_for_pane(pane_id)
-                if fallback_tid:
-                    tids = [fallback_tid]
             for tid in tids:
                 mapping[tid] = pane_id
     return mapping
@@ -1692,6 +1789,442 @@ def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
     return _thread_title(thread_id)
 
 
+@dataclass(frozen=True)
+class SavedSessionRecord:
+    thread_id: str
+    name: str
+    message: str
+    state_file: str
+    health: str
+    health_detail: str
+    health_ts: str
+    last_continue_at: str
+
+
+@dataclass(frozen=True)
+class LiveWatcherRecord:
+    pid: str
+    pane: str
+    thread_id: str
+    state_file: str
+    watch_log: str
+    cwd: str
+    message_inline: str
+    tmux_socket: str
+
+
+@dataclass(frozen=True)
+class LivePaneRecord:
+    pane_id: str
+    window_label: str
+    window_name: str
+    shell_pid: str
+    detected_thread: str
+    detected_thread_source: str
+    detected_thread_detail: str
+    has_codex_process: bool
+
+
+@dataclass(frozen=True)
+class RuntimeSnapshot:
+    panes: tuple[LivePaneRecord, ...]
+    watchers: tuple[LiveWatcherRecord, ...]
+    sessions: tuple[SavedSessionRecord, ...]
+
+
+@dataclass(frozen=True)
+class RuntimeModel:
+    snapshot: RuntimeSnapshot
+    panes_by_id: dict[str, LivePaneRecord]
+    panes_by_thread: dict[str, tuple[LivePaneRecord, ...]]
+    watchers_by_pane: dict[str, tuple[LiveWatcherRecord, ...]]
+    watchers_by_thread: dict[str, tuple[LiveWatcherRecord, ...]]
+    sessions_by_thread: dict[str, SavedSessionRecord]
+    sessions_by_name: dict[str, tuple[SavedSessionRecord, ...]]
+
+
+def _load_session_records() -> list[SavedSessionRecord]:
+    records: list[SavedSessionRecord] = []
+    for session in _load_sessions():
+        records.append(
+            SavedSessionRecord(
+                thread_id=session["thread_id"].lower(),
+                name=session.get("name", ""),
+                message=session.get("message", ""),
+                state_file=session.get("state_file", ""),
+                health=session.get("health", ""),
+                health_detail=session.get("health_detail", ""),
+                health_ts=session.get("health_ts", ""),
+                last_continue_at=session.get("last_continue_at", ""),
+            )
+        )
+    return records
+
+
+def _load_live_watcher_records() -> list[LiveWatcherRecord]:
+    records: list[LiveWatcherRecord] = []
+    for row in watcher_rows():
+        thread_id = row.get("thread", "")
+        records.append(
+            LiveWatcherRecord(
+                pid=row.get("pid", ""),
+                pane=row.get("pane", ""),
+                thread_id=thread_id.lower() if is_thread_id(thread_id) else thread_id,
+                state_file=row.get("state", ""),
+                watch_log=row.get("watch", ""),
+                cwd=row.get("cwd", ""),
+                message_inline=row.get("msg_inline", ""),
+                tmux_socket=row.get("tmux_socket", ""),
+            )
+        )
+    return records
+
+
+def _list_live_pane_records() -> list[LivePaneRecord]:
+    listing = run_tmux("list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}")
+    records: list[LivePaneRecord] = []
+    if not listing:
+        return records
+
+    for line in listing.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        session_name, window_index, window_name, pane_id, shell_pid = parts[:5]
+        if not is_pane_id(pane_id):
+            continue
+
+        detected_thread, detected_thread_source, detected_thread_detail, has_codex_process = _pane_thread_probe(
+            pane_id,
+            shell_pid,
+        )
+        if not is_thread_id(detected_thread):
+            detected_thread = ""
+            if not detected_thread_source:
+                detected_thread_detail = ""
+
+        records.append(
+            LivePaneRecord(
+                pane_id=pane_id,
+                window_label=f"{session_name}:{window_index}:{window_name}",
+                window_name=window_name,
+                shell_pid=shell_pid,
+                detected_thread=detected_thread,
+                detected_thread_source=detected_thread_source,
+                detected_thread_detail=detected_thread_detail,
+                has_codex_process=has_codex_process,
+            )
+        )
+
+    return records
+
+
+def _build_runtime_snapshot() -> RuntimeSnapshot:
+    return RuntimeSnapshot(
+        panes=tuple(_list_live_pane_records()),
+        watchers=tuple(_load_live_watcher_records()),
+        sessions=tuple(_load_session_records()),
+    )
+
+
+def _freeze_multimap(mapping: dict[str, list[object]]) -> dict[str, tuple[object, ...]]:
+    return {key: tuple(values) for key, values in mapping.items()}
+
+
+def _build_runtime_model(snapshot: RuntimeSnapshot | None = None) -> RuntimeModel:
+    if snapshot is None:
+        snapshot = _build_runtime_snapshot()
+
+    panes_by_id: dict[str, LivePaneRecord] = {}
+    panes_by_thread: dict[str, list[LivePaneRecord]] = defaultdict(list)
+    watchers_by_pane: dict[str, list[LiveWatcherRecord]] = defaultdict(list)
+    watchers_by_thread: dict[str, list[LiveWatcherRecord]] = defaultdict(list)
+    sessions_by_thread: dict[str, SavedSessionRecord] = {}
+    sessions_by_name: dict[str, list[SavedSessionRecord]] = defaultdict(list)
+
+    for pane in snapshot.panes:
+        if pane.pane_id:
+            panes_by_id[pane.pane_id] = pane
+        if is_thread_id(pane.detected_thread):
+            panes_by_thread[pane.detected_thread].append(pane)
+
+    for watcher in snapshot.watchers:
+        if watcher.pane:
+            watchers_by_pane[watcher.pane].append(watcher)
+        if is_thread_id(watcher.thread_id):
+            watchers_by_thread[watcher.thread_id].append(watcher)
+
+    for session in snapshot.sessions:
+        if is_thread_id(session.thread_id):
+            sessions_by_thread[session.thread_id] = session
+        if session.name:
+            sessions_by_name[session.name].append(session)
+
+    return RuntimeModel(
+        snapshot=snapshot,
+        panes_by_id=panes_by_id,
+        panes_by_thread=_freeze_multimap(panes_by_thread),  # type: ignore[arg-type]
+        watchers_by_pane=_freeze_multimap(watchers_by_pane),  # type: ignore[arg-type]
+        watchers_by_thread=_freeze_multimap(watchers_by_thread),  # type: ignore[arg-type]
+        sessions_by_thread=sessions_by_thread,
+        sessions_by_name=_freeze_multimap(sessions_by_name),  # type: ignore[arg-type]
+    )
+
+
+def _runtime_watchers_for_pane(model: RuntimeModel, pane: str) -> tuple[LiveWatcherRecord, ...]:
+    return model.watchers_by_pane.get(pane, ())
+
+
+def _runtime_watchers_for_thread(model: RuntimeModel, thread_id: str) -> tuple[LiveWatcherRecord, ...]:
+    return model.watchers_by_thread.get(thread_id.lower(), ())
+
+
+def _runtime_panes_for_thread(model: RuntimeModel, thread_id: str) -> tuple[LivePaneRecord, ...]:
+    return model.panes_by_thread.get(thread_id.lower(), ())
+
+
+def _runtime_session_for_thread(model: RuntimeModel, thread_id: str) -> SavedSessionRecord | None:
+    return model.sessions_by_thread.get(thread_id.lower())
+
+
+def _runtime_session_name_conflict(model: RuntimeModel, session: SavedSessionRecord | None) -> str:
+    if not session or not session.name:
+        return ""
+    named = model.sessions_by_name.get(session.name, ())
+    if len(named) <= 1:
+        return ""
+    threads = ", ".join(_short_thread_id(item.thread_id) for item in named)
+    return f"agent name '{session.name}' is shared by threads {threads}"
+
+
+def _strict_thread_for_pane(model: RuntimeModel, pane: str) -> tuple[str, str]:
+    watchers = list(_runtime_watchers_for_pane(model, pane))
+    pane_record = model.panes_by_id.get(pane)
+
+    if len(watchers) > 1:
+        pids = ", ".join(sorted(w.pid or "?" for w in watchers))
+        return "", f"pane {pane} has {len(watchers)} watcher processes ({pids})"
+
+    if not pane_record:
+        return "", f"tmux pane {pane} is missing"
+
+    if not is_thread_id(pane_record.detected_thread):
+        if pane_record.has_codex_process:
+            return "", pane_record.detected_thread_detail or f"could not determine thread_id for pane={pane} from the live Codex process"
+        return "", f"no live Codex agent detected in pane {pane}"
+
+    live_thread = pane_record.detected_thread.lower()
+
+    watcher_thread = ""
+    if watchers:
+        if not is_thread_id(watchers[0].thread_id):
+            pid = watchers[0].pid or "?"
+            return "", f"pane {pane} watcher pid={pid} has an invalid thread id"
+        watcher_thread = watchers[0].thread_id.lower()
+
+    if watcher_thread and watcher_thread != live_thread:
+        return (
+            "",
+            f"pane {pane} live Codex thread {_short_thread_id(live_thread)} "
+            f"does not match watcher thread {_short_thread_id(watcher_thread)}",
+        )
+
+    other_watchers = [row for row in _runtime_watchers_for_thread(model, live_thread) if row.pane != pane]
+    if other_watchers:
+        panes = ", ".join(sorted({row.pane for row in other_watchers if row.pane}))
+        return "", f"thread {_short_thread_id(live_thread)} is already watched on panes {panes}"
+
+    other_panes = [row for row in _runtime_panes_for_thread(model, live_thread) if row.pane_id != pane]
+    if other_panes:
+        panes = ", ".join(sorted({row.pane_id for row in other_panes if row.pane_id}))
+        return "", f"thread {_short_thread_id(live_thread)} is active in panes {panes}"
+
+    return live_thread, ""
+
+
+def _strict_session_for_thread(model: RuntimeModel, thread_id: str) -> tuple[SavedSessionRecord | None, str]:
+    session = _runtime_session_for_thread(model, thread_id)
+    if not session:
+        return None, f"no saved session for thread {_short_thread_id(thread_id)}"
+    conflict = _runtime_session_name_conflict(model, session)
+    if conflict:
+        return None, conflict
+    return session, ""
+
+
+def _watcher_anomalies(model: RuntimeModel, watcher: LiveWatcherRecord) -> list[str]:
+    pane = model.panes_by_id.get(watcher.pane)
+    session = _runtime_session_for_thread(model, watcher.thread_id)
+    anomalies: list[str] = []
+
+    if watcher.pane and len(_runtime_watchers_for_pane(model, watcher.pane)) != 1:
+        watcher_count = len(_runtime_watchers_for_pane(model, watcher.pane))
+        anomalies.append(f"{watcher_count} watchers on pane {watcher.pane}")
+    if not is_thread_id(watcher.thread_id):
+        anomalies.append("invalid watcher thread id")
+    elif len(_runtime_watchers_for_thread(model, watcher.thread_id)) != 1:
+        panes = sorted({row.pane for row in _runtime_watchers_for_thread(model, watcher.thread_id) if row.pane})
+        anomalies.append(f"thread also watched on {', '.join(panes)}")
+    if not pane:
+        anomalies.append(f"tmux pane {watcher.pane or '?'} is missing")
+    elif not pane.detected_thread:
+        if pane.has_codex_process:
+            anomalies.append(
+                pane.detected_thread_detail
+                or f"could not determine thread_id for pane={watcher.pane or '?'} from the live Codex process"
+            )
+        else:
+            anomalies.append("no live Codex agent detected in pane")
+    elif pane.detected_thread != watcher.thread_id:
+        anomalies.append(f"pane agent thread is {_short_thread_id(pane.detected_thread)}")
+    if not session:
+        anomalies.append("no saved session")
+    else:
+        conflict = _runtime_session_name_conflict(model, session)
+        if conflict:
+            anomalies.append(conflict)
+        if pane and session.name and pane.window_name and session.name != pane.window_name:
+            anomalies.append(f"session name '{session.name}' != window '{pane.window_name}'")
+
+    return anomalies
+
+
+def _unwatched_pane_anomalies(model: RuntimeModel, pane: LivePaneRecord) -> list[str]:
+    anomalies = ["no watcher for live Codex pane"]
+    if len(_runtime_panes_for_thread(model, pane.detected_thread)) != 1:
+        panes = sorted({row.pane_id for row in _runtime_panes_for_thread(model, pane.detected_thread) if row.pane_id})
+        anomalies.append(f"thread also active in panes {', '.join(panes)}")
+    session = _runtime_session_for_thread(model, pane.detected_thread)
+    if not session:
+        anomalies.append("no saved session")
+    else:
+        conflict = _runtime_session_name_conflict(model, session)
+        if conflict:
+            anomalies.append(conflict)
+    return anomalies
+
+
+def _unresolved_live_pane_anomalies(pane: LivePaneRecord) -> list[str]:
+    detail = pane.detected_thread_detail or f"could not determine thread_id for pane={pane.pane_id} from the live Codex process"
+    return [detail]
+
+
+def _status_row_detail(row: dict[str, str], sj: dict[str, str]) -> str:
+    detail = row.get("anomaly_detail", "").strip()
+    if detail:
+        return detail
+    return sj.get("health_detail", "").strip()
+
+
+def _build_status_entries_from_snapshot(
+    snapshot: RuntimeSnapshot,
+) -> list[tuple[dict[str, str], str, str]]:
+    model = _build_runtime_model(snapshot)
+
+    entries: list[tuple[dict[str, str], str, str]] = []
+    live_pane_threads = set(model.panes_by_thread)
+    claimed_session_threads: set[str] = set()
+
+    for watcher in snapshot.watchers:
+        pane = model.panes_by_id.get(watcher.pane)
+        session = _runtime_session_for_thread(model, watcher.thread_id)
+        if session:
+            claimed_session_threads.add(session.thread_id)
+        anomalies = _watcher_anomalies(model, watcher)
+
+        window_label = pane.window_label if pane else (session.name or "-")
+        entries.append((
+            {
+                "entity_kind": "watcher",
+                "pid": watcher.pid,
+                "pane": watcher.pane,
+                "thread": watcher.thread_id,
+                "name": session.name if session else "",
+                "session_name": session.name if session else "",
+                "state": session.state_file if session else watcher.state_file,
+                "watch": watcher.watch_log,
+                "msg_inline": session.message if session and session.message else watcher.message_inline,
+                "anomalies": tuple(anomalies),
+                "anomaly_detail": "; ".join(anomalies),
+            },
+            watcher.pane,
+            window_label,
+        ))
+
+    watched_panes = {watcher.pane for watcher in snapshot.watchers if watcher.pane}
+    for pane in snapshot.panes:
+        if pane.pane_id in watched_panes:
+            continue
+        if not is_thread_id(pane.detected_thread):
+            if not pane.has_codex_process:
+                continue
+            anomalies = _unresolved_live_pane_anomalies(pane)
+            entries.append((
+                {
+                    "entity_kind": "unresolved_pane",
+                    "pid": "",
+                    "pane": pane.pane_id,
+                    "thread": "",
+                    "name": "",
+                    "session_name": "",
+                    "state": "",
+                    "watch": "",
+                    "msg_inline": "",
+                    "anomalies": tuple(anomalies),
+                    "anomaly_detail": "; ".join(anomalies),
+                },
+                pane.pane_id,
+                pane.window_label,
+            ))
+            continue
+        session = _runtime_session_for_thread(model, pane.detected_thread)
+        if session:
+            claimed_session_threads.add(session.thread_id)
+        anomalies = _unwatched_pane_anomalies(model, pane)
+        entries.append((
+            {
+                "entity_kind": "unwatched_pane",
+                "pid": "",
+                "pane": pane.pane_id,
+                "thread": pane.detected_thread,
+                "name": session.name if session else "",
+                "session_name": session.name if session else "",
+                "state": session.state_file if session else "",
+                "watch": "",
+                "msg_inline": session.message if session and session.message else "",
+                "anomalies": tuple(anomalies),
+                "anomaly_detail": "; ".join(anomalies),
+            },
+            pane.pane_id,
+            pane.window_label,
+        ))
+
+    for session in snapshot.sessions:
+        if session.thread_id in claimed_session_threads:
+            continue
+        if session.thread_id in live_pane_threads:
+            continue
+        entries.append((
+            {
+                "entity_kind": "dead_session",
+                "pid": "",
+                "pane": "",
+                "thread": session.thread_id,
+                "name": session.name,
+                "session_name": session.name,
+                "state": session.state_file,
+                "watch": "",
+                "msg_inline": session.message,
+                "anomalies": tuple(),
+                "anomaly_detail": "",
+            },
+            "",
+            session.name or "-",
+        ))
+
+    return entries
+
+
 def _read_state_json(state_path: str) -> dict[str, str]:
     """Read health fields from state JSON file."""
     result: dict[str, str] = {}
@@ -1733,6 +2266,10 @@ def _short_thread_id(thread_id: str) -> str:
 
 def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
     """Derive display state from process status and health JSON."""
+    if r.get("entity_kind") == "dead_session":
+        return "dead"
+    if r.get("anomalies"):
+        return "error"
     pid = r.get("pid", "")
     if pid and pid.isdigit() and _is_pid_stopped(int(pid)):
         return "paused"
@@ -1842,9 +2379,14 @@ def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) ->
 
 
 def _status_target_for_row(row: dict[str, str], current_pane: str, window_label: str) -> str:
+    if row.get("entity_kind") != "dead_session" and current_pane:
+        return current_pane
     name = row.get("name", "").strip()
     if name and name != "-":
         return name
+    session_name = row.get("session_name", "").strip()
+    if session_name and session_name != "-":
+        return session_name
     if window_label and ":" in window_label:
         tail = window_label.rsplit(":", 1)[-1].strip()
         if tail and tail != "-":
@@ -1858,7 +2400,7 @@ def _sort_session_key(session_name: str) -> tuple[int, object]:
     return 1, session_name
 
 
-def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, object], int, int, str]:
+def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, object], int, int, int, str]:
     row, current_pane, window_label = item
     match = re.match(r"([^:]+):(\d+):", window_label)
     if match:
@@ -1875,15 +2417,23 @@ def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, 
             pane_number = int(pane[1:])
         except ValueError:
             pass
-    return (_sort_session_key(session_name), window_index, pane_number, window_label)
+    pid_number = 10**9
+    pid = row.get("pid", "")
+    if pid.isdigit():
+        pid_number = int(pid)
+    return (_sort_session_key(session_name), window_index, pane_number, pid_number, window_label)
 
 
 def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
     commands: list[str] = []
     seen: set[str] = set()
     for row, current_pane, window_label in resolved:
+        if row.get("anomalies"):
+            continue
+        if row.get("entity_kind") == "dead_session":
+            continue
         state = _compute_state(row, _read_state_json(row["state"]))
-        if state not in {"warn", "error", "dead"}:
+        if state not in {"warn", "error"}:
             continue
         target = _status_target_for_row(row, current_pane, window_label)
         if not target:
@@ -1896,12 +2446,147 @@ def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> 
     return commands
 
 
+def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
+    messages: list[str] = []
+    seen: set[str] = set()
+
+    watcher_rows: list[tuple[dict[str, str], str]] = []
+    unwatched_rows: list[tuple[dict[str, str], str]] = []
+    unresolved_rows: list[tuple[dict[str, str], str]] = []
+    dead_rows: list[tuple[dict[str, str], str, str]] = []
+    rows_by_session_name: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row, current_pane, window_label in resolved:
+        kind = row.get("entity_kind", "watcher")
+        session_name = row.get("session_name", "").strip()
+        if session_name:
+            rows_by_session_name[session_name].append(row)
+        if kind == "watcher":
+            watcher_rows.append((row, current_pane))
+        elif kind == "unwatched_pane":
+            unwatched_rows.append((row, current_pane))
+        elif kind == "unresolved_pane":
+            unresolved_rows.append((row, current_pane))
+        elif kind == "dead_session":
+            dead_rows.append((row, current_pane, window_label))
+
+    watchers_by_pane: dict[str, list[dict[str, str]]] = defaultdict(list)
+    watchers_by_thread: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row, current_pane in watcher_rows:
+        pane = current_pane or row.get("pane", "")
+        if pane:
+            watchers_by_pane[pane].append(row)
+        thread_id = row.get("thread", "")
+        if is_thread_id(thread_id):
+            watchers_by_thread[thread_id.lower()].append(row)
+
+    for pane, rows in sorted(watchers_by_pane.items()):
+        if len(rows) <= 1:
+            continue
+        pids = ", ".join(sorted(row.get("pid", "?") for row in rows))
+        msg = f"Invariant error: pane {pane} has {len(rows)} watcher processes ({pids}). Clean up: acw stop {pane}"
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    for thread_id, rows in sorted(watchers_by_thread.items()):
+        panes = sorted({row.get("pane", "") for row in rows if row.get("pane", "")})
+        if len(panes) <= 1:
+            continue
+        cleanup = "; ".join(f"acw stop {pane}" for pane in panes)
+        msg = (
+            f"Invariant error: thread {_short_thread_id(thread_id)} is watched on panes {', '.join(panes)}. "
+            f"Clean up: {cleanup}; then start exactly one watcher."
+        )
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    for session_name, rows in sorted(rows_by_session_name.items()):
+        threads = sorted({row.get("thread", "").lower() for row in rows if is_thread_id(row.get("thread", ""))})
+        if len(threads) <= 1:
+            continue
+        thread_list = ", ".join(_short_thread_id(thread_id) for thread_id in threads)
+        msg = (
+            f"Invariant error: agent name '{session_name}' maps to multiple threads ({thread_list}). "
+            "Clean up the duplicate session/pane state before targeting it by name."
+        )
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    for row, current_pane in unwatched_rows:
+        pane = current_pane or row.get("pane", "")
+        msg = (
+            f"Invariant error: live Codex pane {pane} has thread {_short_thread_id(row.get('thread', ''))} "
+            f"but no watcher. Clean up: acw start {pane}"
+        )
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    for row, current_pane in unresolved_rows:
+        pane = current_pane or row.get("pane", "")
+        detail = row.get("anomaly_detail", "").strip() or "could not determine thread_id from the live Codex process"
+        msg = (
+            f"Invariant error: live Codex pane {pane} has a Codex process but no detectable thread id ({detail}). "
+            f"Clean up: restart Codex there, then run acw start {pane}."
+        )
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    for row, current_pane in watcher_rows:
+        anomalies = set(row.get("anomalies", ()))
+        pane = current_pane or row.get("pane", "")
+        pid = row.get("pid", "?")
+        if "no saved session" in anomalies:
+            msg = (
+                f"Invariant error: pane {pane} watcher pid={pid} has no saved session. "
+                f"Clean up: acw stop {pane}; then start it again."
+            )
+            if msg not in seen:
+                seen.add(msg)
+                messages.append(msg)
+        if "no live Codex agent detected in pane" in anomalies:
+            msg = (
+                f"Invariant error: pane {pane} watcher pid={pid} has no live Codex agent in the pane. "
+                f"Clean up: acw stop {pane}; restart Codex there, then start once."
+            )
+            if msg not in seen:
+                seen.add(msg)
+                messages.append(msg)
+        if any(detail.startswith("could not determine thread_id") for detail in anomalies):
+            msg = (
+                f"Invariant error: pane {pane} watcher pid={pid} has a live Codex process but its thread id "
+                f"could not be detected. Clean up: acw stop {pane}; restart Codex there, then start once."
+            )
+            if msg not in seen:
+                seen.add(msg)
+                messages.append(msg)
+        if any(detail.startswith("pane agent thread is ") for detail in anomalies):
+            msg = (
+                f"Invariant error: pane {pane} watcher pid={pid} is bound to the wrong thread. "
+                f"Clean up: acw stop {pane}; then start it again against the live pane thread."
+            )
+            if msg not in seen:
+                seen.add(msg)
+                messages.append(msg)
+
+    if dead_rows:
+        msg = "Hint: run acw cleanup to remove dead sessions."
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
+    return messages
+
+
 def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     commands = _status_recommendations(resolved)
     for cmd in commands:
         print(f"Recommendation: run {cmd}")
-    if any(_compute_state(row, _read_state_json(row["state"])) == "dead" for row, _, _ in resolved):
-        print("Hint: run acw cleanup to remove dead sessions.")
+    for message in _status_invariant_messages(resolved):
+        print(message)
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
@@ -1913,6 +2598,7 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     for r, current_pane, window_label in resolved:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
+        state_detail = _status_row_detail(r, sj)
         started, _last_activity = _thread_times(r["thread"])
         last_acw = sj.get("last_continue_at", "")
         if last_acw:
@@ -1928,10 +2614,13 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         line1 = f"{window_label}/{current_pane}" if current_pane else window_label
         tid = r["thread"] if is_thread_id(r["thread"]) else ""
         short_tid = _short_thread_id(tid) if tid else ""
-        window_pane = f"{line1}\n[dim]{short_tid}[/dim]" if short_tid else line1
+        pid = r.get("pid", "")
+        meta_bits = [bit for bit in (short_tid, f"pid={pid}" if pid else "") if bit]
+        meta = " ".join(meta_bits)
+        window_pane = f"{line1}\n[dim]{meta}[/dim]" if meta else line1
         rows_data.append((
             window_pane,
-            _state_summary(state_value, sj),
+            _state_summary(state_value, {"health_detail": state_detail}),
             started,
             last_acw,
             last_agent,
@@ -1987,6 +2676,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
 
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
+        state_detail = _status_row_detail(r, sj)
 
         last_event = "-"
         if r["watch"]:
@@ -2011,7 +2701,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
 
         last_acw = sj.get("last_continue_at", "-")
 
-        print(f"=== Watcher {idx}/{total} ===")
+        print(f"=== Entry {idx}/{total} ===")
         print(f"  {'WINDOW:':<16} {window_label}")
         print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
         print(f"  {'PID:':<16} {r['pid']}")
@@ -2021,9 +2711,9 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         print(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
         print(f"  {'LAST_ACW:':<16} {last_acw}")
         print(f"  {'LAST_AGENT:':<16} {last_agent}")
-        hd = sj.get("health_detail", "")
-        if hd:
-            print(f"  {'HEALTH_DETAIL:':<16} {hd}")
+        if state_detail:
+            label = "ANOMALY" if r.get("anomalies") else "HEALTH_DETAIL"
+            print(f"  {f'{label}:':<16} {state_detail}")
         hts = sj.get("health_ts", "")
         if hts:
             print(f"  {'HEALTH_SINCE:':<16} {hts}")
@@ -2061,28 +2751,32 @@ def _load_sessions() -> list[dict[str, str]]:
     return candidates
 
 
-def _saved_session_panes_for_target(target: str) -> list[str]:
-    sessions = _load_sessions()
-    thread_pane = _build_thread_pane_map()
-
+def _saved_session_panes_for_target(target: str, model: RuntimeModel | None = None) -> list[str]:
+    if model is None:
+        model = _build_runtime_model()
     panes: list[str] = []
     seen: set[str] = set()
+    if is_thread_id(target):
+        sessions: tuple[SavedSessionRecord, ...] = tuple(
+            [session] if (session := _runtime_session_for_thread(model, target)) else []
+        )
+    else:
+        sessions = model.sessions_by_name.get(target, ())
+
     for session in sessions:
-        thread_id = session["thread_id"].lower()
+        thread_id = session.thread_id
         if is_thread_id(target):
             if thread_id != target.lower():
                 continue
-        elif session.get("name", "") != target:
-            continue
-        pane = thread_pane.get(thread_id, "")
-        if not is_pane_id(pane) or pane in seen:
-            continue
-        seen.add(pane)
-        panes.append(pane)
+        for pane in _runtime_panes_for_thread(model, thread_id):
+            if not is_pane_id(pane.pane_id) or pane.pane_id in seen:
+                continue
+            seen.add(pane.pane_id)
+            panes.append(pane.pane_id)
     return panes
 
 
-def _resolve_restart_pane_target(target: str) -> str:
+def _resolve_restart_pane_target(target: str, model: RuntimeModel | None = None) -> str:
     if is_pane_id(target):
         return target
 
@@ -2093,7 +2787,7 @@ def _resolve_restart_pane_target(target: str) -> str:
         print(f"error: could not resolve window target '{target}'", file=sys.stderr)
         sys.exit(1)
 
-    saved_panes = _saved_session_panes_for_target(target)
+    saved_panes = _saved_session_panes_for_target(target, model=model)
     if len(saved_panes) == 1:
         return saved_panes[0]
     if len(saved_panes) > 1:
@@ -2129,81 +2823,18 @@ def cmd_status(argv: list[str]) -> None:
         else:
             pane_arg = arg
 
-    # 1. Load all sessions from state files.
-    sessions = _load_sessions()
-
-    # 2. Build maps from tmux. The default summary path avoids the expensive
-    # thread->pane scan and instead trusts live watcher rows for pane identity.
-    pane_window = _build_pane_window_map()
-    thread_pane = _build_thread_pane_map() if details else {}
-
-    # 3. Build set of running watcher PIDs per pane.
-    live_watcher_rows = watcher_rows()
-    watcher_row_for_thread: dict[str, dict[str, str]] = {}
-    watcher_pid_for_pane: dict[str, str] = {}
-    for r in live_watcher_rows:
-        tid = r.get("thread", "").lower()
-        if tid and tid not in watcher_row_for_thread:
-            watcher_row_for_thread[tid] = r
-        watcher_pid_for_pane[r["pane"]] = r["pid"]
-
+    snapshot = _build_runtime_snapshot()
     recovery = ""
-    if not pane_window and not thread_pane:
+    if not snapshot.panes and not snapshot.watchers:
         recovery = _tmux_socket_recovery_hint()
         if recovery:
             print(
-                "warning: tmux metadata is unavailable; status is falling back to live watcher rows",
+                "warning: tmux metadata is unavailable; status is falling back to saved session state",
                 file=sys.stderr,
             )
             print(recovery, file=sys.stderr)
 
-    # 4. Merge: for each session, look up live pane and watcher status.
-    resolved: list[tuple[dict[str, str], str, str]] = []
-    for s in sessions:
-        tid = s["thread_id"].lower()
-        watcher_row = watcher_row_for_thread.get(tid, {})
-        ref = thread_pane.get(tid, "") if thread_pane else ""
-        if not ref:
-            ref = watcher_row.get("pane", "")
-        live_pane = ref if is_pane_id(ref) else ""
-        # Prefer live tmux window name, fall back to state file.
-        window_label = pane_window.get(live_pane, "") if live_pane else ""
-        if not window_label:
-            window_label = s["name"] or "-"
-
-        # Build a row dict compatible with _status_table / _status_details.
-        # Find watcher PID: if live_pane is known, look up by pane.
-        watcher_pid = watcher_pid_for_pane.get(live_pane, "") if live_pane else ""
-        if not watcher_pid:
-            watcher_pid = watcher_row.get("pid", "")
-        row: dict[str, str] = {
-            "pid": watcher_pid,
-            "pane": live_pane,
-            "thread": s["thread_id"],
-            "session_name": s["name"],
-            "state": s["state_file"],
-            "watch": (
-                watch_log_for_key(key_from_pane(live_pane))
-                if live_pane else watcher_row.get("watch", "")
-            ),
-            "msg_inline": watcher_row.get("msg_inline", "") or s.get("message", ""),
-        }
-        resolved.append((row, live_pane, window_label))
-
-    represented_live_watchers = {
-        (r.get("pane", ""), r.get("pid", ""))
-        for r, _, _ in resolved
-        if r.get("pane") and r.get("pid")
-    }
-    for watcher_row in live_watcher_rows:
-        watcher_key = (watcher_row.get("pane", ""), watcher_row.get("pid", ""))
-        if watcher_key in represented_live_watchers:
-            continue
-        live_pane = watcher_row.get("pane", "") if is_pane_id(watcher_row.get("pane", "")) else ""
-        window_label = pane_window.get(live_pane, "") if live_pane else ""
-        if not window_label:
-            window_label = _read_session_state(watcher_row.get("thread", "")).get("name", "").strip() or "-"
-        resolved.append((dict(watcher_row), live_pane, window_label))
+    resolved = _build_status_entries_from_snapshot(snapshot)
 
     # Optional pane filter.
     if pane_arg:
@@ -2258,7 +2889,9 @@ def _codex_auth_state_available() -> tuple[bool, str]:
     return False, str(auth)
 
 
-def _doctor_resolve_target(target: str) -> tuple[str, str]:
+def _doctor_resolve_target(target: str, model: RuntimeModel | None = None) -> tuple[str, str]:
+    if model is None:
+        model = _build_runtime_model()
     if not target:
         pane = current_tmux_pane()
         if pane:
@@ -2274,7 +2907,7 @@ def _doctor_resolve_target(target: str) -> tuple[str, str]:
             return pane, ""
         return "", f"could not resolve window target '{target}'"
 
-    saved_panes = _saved_session_panes_for_target(target)
+    saved_panes = _saved_session_panes_for_target(target, model=model)
     if len(saved_panes) == 1:
         return saved_panes[0], ""
     if len(saved_panes) > 1:
@@ -2313,6 +2946,7 @@ def _doctor_report(target: str = "") -> DoctorReport:
     recommendations: list[str] = []
     errors = 0
     warnings = 0
+    model = _build_runtime_model()
 
     ok, detail = _state_dir_is_writable()
     checks.append(("ok" if ok else "error", f"state dir writable: {detail}"))
@@ -2329,7 +2963,7 @@ def _doctor_report(target: str = "") -> DoctorReport:
     if recovery:
         checks.append(("info", recovery))
 
-    pane, pane_error = _doctor_resolve_target(target)
+    pane, pane_error = _doctor_resolve_target(target, model=model)
     if pane_error:
         checks.append(("error", pane_error))
         errors += 1
@@ -2341,47 +2975,72 @@ def _doctor_report(target: str = "") -> DoctorReport:
         return DoctorReport(checks=checks, result=result, exit_code=1 if errors else 0, recommendations=recommendations)
 
     checks.append(("ok", f"pane resolved: {pane}"))
-    rows = watcher_rows(pane)
-    tid = ""
-    if rows:
-        row_tid = rows[0].get("thread", "")
-        if is_thread_id(row_tid):
-            tid = row_tid.lower()
-    if not tid:
-        tid = detect_thread_id_for_pane(pane) or ""
+    tid, thread_error = _strict_thread_for_pane(model, pane)
     if tid and is_thread_id(tid):
         checks.append(("ok", f"Codex thread detected: {tid}"))
     else:
-        checks.append(("error", f"could not detect a Codex thread for pane {pane}"))
+        checks.append(("error", thread_error or f"could not detect a Codex thread for pane {pane}"))
         errors += 1
 
-    command_target = _doctor_recommendation_target(target, pane, rows)
-    if rows:
-        pid = rows[0].get("pid", "")
-        checks.append(("ok", f"watcher running: pane={pane} pid={pid}"))
-        sj = _read_state_json(rows[0].get("state", ""))
-        watcher_state = _compute_state(rows[0], sj)
-        health_detail = sj.get("health_detail", "").strip()
-        if watcher_state == "running":
-            checks.append(("ok", "watcher health: running"))
-        elif watcher_state == "paused":
-            msg = "watcher paused"
-            if health_detail:
-                msg += f" - {health_detail}"
-            checks.append(("warn", msg))
-            warnings += 1
-            recommendations.append(f"acw resume {shlex.quote(command_target)}")
+    rows = [watcher for watcher in _runtime_watchers_for_pane(model, pane)]
+    ps_rows = [
+        {
+            "pid": watcher.pid,
+            "pane": watcher.pane,
+            "thread": watcher.thread_id,
+            "state": watcher.state_file,
+            "watch": watcher.watch_log,
+            "msg_inline": watcher.message_inline,
+        }
+        for watcher in rows
+    ]
+    command_target = _doctor_recommendation_target(target, pane, ps_rows)
+    if len(rows) > 1:
+        pids = ", ".join(sorted(watcher.pid or "?" for watcher in rows))
+        checks.append(("error", f"multiple watchers running on pane {pane}: {pids}"))
+        errors += 1
+        recommendations.append(f"acw stop {shlex.quote(pane)}")
+    elif rows:
+        watcher = rows[0]
+        checks.append(("ok", f"watcher running: pane={pane} pid={watcher.pid}"))
+        anomalies = _watcher_anomalies(model, watcher)
+        if anomalies:
+            detail = "; ".join(anomalies)
+            checks.append(("error", f"watcher identity mismatch: {detail}"))
+            errors += 1
+            recommendations.append(f"acw stop {shlex.quote(pane)}")
         else:
-            msg = f"watcher health: {watcher_state}"
-            if health_detail:
-                msg += f" - {health_detail}"
-            level = "warn" if watcher_state == "warn" else "error"
-            checks.append((level, msg))
-            if level == "warn":
+            row = {
+                "pid": watcher.pid,
+                "pane": watcher.pane,
+                "thread": watcher.thread_id,
+                "state": watcher.state_file,
+                "watch": watcher.watch_log,
+                "msg_inline": watcher.message_inline,
+            }
+            sj = _read_state_json(watcher.state_file)
+            watcher_state = _compute_state(row, sj)
+            health_detail = sj.get("health_detail", "").strip()
+            if watcher_state == "running":
+                checks.append(("ok", "watcher health: running"))
+            elif watcher_state == "paused":
+                msg = "watcher paused"
+                if health_detail:
+                    msg += f" - {health_detail}"
+                checks.append(("warn", msg))
                 warnings += 1
+                recommendations.append(f"acw resume {shlex.quote(command_target)}")
             else:
-                errors += 1
-            recommendations.append(f"acw restart {shlex.quote(command_target)}")
+                msg = f"watcher health: {watcher_state}"
+                if health_detail:
+                    msg += f" - {health_detail}"
+                level = "warn" if watcher_state == "warn" else "error"
+                checks.append((level, msg))
+                if level == "warn":
+                    warnings += 1
+                else:
+                    errors += 1
+                recommendations.append(f"acw restart {shlex.quote(command_target)}")
     else:
         checks.append(("info", f"no watcher running for pane {pane}"))
         if tid and is_thread_id(tid):
@@ -2513,7 +3172,8 @@ def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
     if not remove_dead_sessions:
         return
 
-    live_thread_panes = {tid.lower() for tid in _build_thread_pane_map()}
+    model = _build_runtime_model()
+    live_thread_panes = {tid.lower() for tid in model.panes_by_thread}
 
     # Session files for threads without a running watcher or live Codex pane.
     for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
