@@ -1278,17 +1278,26 @@ def cmd_resume(argv: list[str]) -> None:
 
 def _restart_panes(panes: list[str]) -> None:
     restarted = 0
+    failed = 0
     for pane in panes:
         if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
             stop_pane_watchers(pane)
             continue
 
         _print_progress(f"--- restarting {pane} ---")
-        _restart_one(pane, pane, [])
+        try:
+            _restart_one(pane, pane, [])
+        except SystemExit as exc:
+            failed += 1
+            code = exc.code if isinstance(exc.code, int) else 1
+            print(f"error: restart failed for pane={pane} (exit {code})", file=sys.stderr)
+            continue
         restarted += 1
 
     if restarted == 0:
         print("no live panes to restart")
+    elif failed:
+        print(f"restart: {failed} pane(s) failed")
 
 
 def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 15.0) -> bool:
