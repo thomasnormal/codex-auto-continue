@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: made `acw` surface and explain inconsistent live watcher state more directly. `start` now rejects an already-running pane watcher if that watcher is duplicated on another pane or bound to a different explicit thread than the operator requested, and `status` now shows extra live watcher rows that would otherwise be hidden by thread-based session merging. When any row is `dead`, the status footer also prints a cleanup hint.
 - Change: hardened session identity handling across `start`, `restart`, `status`, and `doctor`. `acw` now rejects starting a second watcher on an already-watched thread, prefers saved session->pane recovery over bare window-name matches for watcher commands, lets `status <target>` match saved session names even without a live pane, and lets `doctor` fall back to the running watcher's recorded thread when pane scraping is stale.
 - Change: `acw restart` and `acw resume` now prefer the existing watcher's recorded thread id over fresh pane-based thread discovery. This avoids paused watchers being rebound to whatever Codex thread happens to be visible in the pane at restart time, which could otherwise produce duplicate-thread warnings against unrelated live agents.
 - Change: removed the `msg:` prefix from the status-table MESSAGE column. The table now shows the saved continue prompt text directly, which is easier to scan and matches what `acw edit` opens.

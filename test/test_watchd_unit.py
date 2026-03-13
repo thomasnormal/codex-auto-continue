@@ -176,6 +176,54 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 1", text)
         self.assertIn("Ran tests", text)
 
+    def test_status_summary_includes_duplicate_live_watchers_hidden_by_thread_merge(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        live_rows = [
+            {
+                "pane": "%10",
+                "thread": THREAD,
+                "state": "/state/acw_session.json",
+                "watch": "/state/watch10.log",
+                "msg_inline": "continue",
+                "pid": "1010",
+            },
+            {
+                "pane": "%6",
+                "thread": THREAD,
+                "state": "/state/acw_session.json",
+                "watch": "/state/watch6.log",
+                "msg_inline": "continue",
+                "pid": "606",
+            },
+        ]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={
+                "%6": "0:6:formal",
+                "%10": "0:10:aot2",
+            }):
+                with patch.object(
+                    acw,
+                    "_build_thread_pane_map",
+                    side_effect=AssertionError("summary status should not scan all panes"),
+                ):
+                    with patch.object(acw, "watcher_rows", return_value=live_rows):
+                        with patch.object(acw, "_read_state_json", return_value={}):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                        out = io.StringIO()
+                                        with redirect_stdout(out):
+                                            acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Sessions: 2", text)
+        self.assertIn("0:6:formal/%6", text)
+        self.assertIn("0:10:aot2/%10", text)
+
     def test_status_summary_prints_doctor_recommendation_for_warn(self):
         sessions = [{
             "thread_id": THREAD,
@@ -212,6 +260,30 @@ class WatchdUnitTests(unittest.TestCase):
                                             acw.cmd_status([])
         text = out.getvalue()
         self.assertIn("Recommendation: run acw doctor formal", text)
+
+    def test_status_summary_prints_cleanup_hint_for_dead_sessions(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={}):
+                with patch.object(
+                    acw,
+                    "_build_thread_pane_map",
+                    side_effect=AssertionError("summary status should not scan all panes"),
+                ):
+                    with patch.object(acw, "watcher_rows", return_value=[]):
+                        with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
+                            with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                                with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                        out = io.StringIO()
+                                        with redirect_stdout(out):
+                                            acw.cmd_status([])
+        self.assertIn("Hint: run acw cleanup to remove dead sessions.", out.getvalue())
 
     def test_status_summary_falls_back_without_rich(self):
         sessions = [{
@@ -307,6 +379,49 @@ class WatchdUnitTests(unittest.TestCase):
                                     acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("another watcher (pid=1234 pane=%6) is already watching thread", err.getvalue())
+
+    def test_start_rejects_existing_pane_watcher_when_thread_is_duplicated_elsewhere(self):
+        err = io.StringIO()
+
+        def fake_rows(pane_filter: str = ""):
+            rows = [
+                {"pane": "%8", "thread": THREAD, "pid": "1111"},
+                {"pane": "%6", "thread": THREAD, "pid": "2222"},
+            ]
+            if pane_filter:
+                return [row for row in rows if row["pane"] == pane_filter]
+            return rows
+
+        with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
+            with patch.object(acw, "ensure_tmux_window_rename_hook"):
+                with patch.object(acw, "is_running_pid_file", return_value=False):
+                    with patch.object(acw, "watcher_rows", side_effect=fake_rows):
+                        with redirect_stderr(err):
+                            with self.assertRaises(SystemExit) as ctx:
+                                acw.cmd_start(["uvm", "--message", "continue"])
+        self.assertEqual(1, ctx.exception.code)
+        text = err.getvalue()
+        self.assertIn("existing watcher for pane=%8 is duplicated", text)
+        self.assertIn("acw stop %8", text)
+
+    def test_start_rejects_existing_pane_watcher_with_wrong_explicit_thread(self):
+        err = io.StringIO()
+
+        def fake_rows(pane_filter: str = ""):
+            rows = [{"pane": "%8", "thread": THREAD, "pid": "1111"}]
+            if pane_filter:
+                return [row for row in rows if row["pane"] == pane_filter]
+            return rows
+
+        with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
+            with patch.object(acw, "ensure_tmux_window_rename_hook"):
+                with patch.object(acw, "is_running_pid_file", return_value=False):
+                    with patch.object(acw, "watcher_rows", side_effect=fake_rows):
+                        with redirect_stderr(err):
+                            with self.assertRaises(SystemExit) as ctx:
+                                acw.cmd_start(["uvm", OTHER_THREAD, "--message", "continue"])
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn("existing watcher for pane=%8 is using thread", err.getvalue())
 
     def test_resolve_start_pane_target_rejects_thread_id(self):
         err = io.StringIO()

@@ -803,6 +803,13 @@ def watcher_pids_for_pane(pane: str) -> list[str]:
     return [r["pid"] for r in watcher_rows(pane)]
 
 
+def _watcher_row_for_pane(pane: str) -> dict[str, str] | None:
+    rows = watcher_rows(pane)
+    if len(rows) == 1:
+        return rows[0]
+    return None
+
+
 def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | None:
     if not is_thread_id(thread_id):
         return None
@@ -902,6 +909,27 @@ def _message_args(value: str) -> list[str]:
     return ["--message", value]
 
 
+def _validate_existing_pane_watcher(pane: str, requested_thread: str = "") -> tuple[str, str] | None:
+    row = _watcher_row_for_pane(pane)
+    if not row:
+        return None
+    thread_id = row.get("thread", "")
+    if requested_thread and is_thread_id(thread_id) and thread_id.lower() != requested_thread.lower():
+        return (
+            f"error: existing watcher for pane={pane} is using thread {thread_id[:8]}…, "
+            f"not requested thread {requested_thread[:8]}…",
+            f"hint: stop it first with 'acw stop {pane}' if you want to start a different session there",
+        )
+    other = _other_watcher_for_thread(pane, thread_id)
+    if other:
+        return (
+            f"error: existing watcher for pane={pane} is duplicated; pane={other['pane']} "
+            f"pid={other['pid']} is already watching thread {thread_id[:8]}…",
+            f"hint: stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -941,13 +969,14 @@ def cmd_start(argv: list[str]) -> None:
     pf = pid_file_for_key(key)
     rl = run_log_for_key(key)
 
-    if is_running_pid_file(pf):
-        print(f"already running: pane={pane} pid={_read_pid_file(pf)}")
-        return
-
     existing_pids = watcher_pids_for_pane(pane)
     if existing_pids:
         if len(existing_pids) == 1:
+            validation = _validate_existing_pane_watcher(pane, thread_arg)
+            if validation:
+                print(validation[0], file=sys.stderr)
+                print(validation[1], file=sys.stderr)
+                sys.exit(1)
             with open(pf, "w") as f:
                 f.write(existing_pids[0])
             print(f"already running: pane={pane} pid={existing_pids[0]}")
@@ -962,6 +991,10 @@ def cmd_start(argv: list[str]) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if is_running_pid_file(pf):
+        print(f"already running: pane={pane} pid={_read_pid_file(pf)}")
+        return
 
     if thread_arg and thread_arg != "auto":
         _print_progress(f"start: using explicit thread_id for pane={pane}")
@@ -1826,6 +1859,8 @@ def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]
     commands = _status_recommendations(resolved)
     for cmd in commands:
         print(f"Recommendation: run {cmd}")
+    if any(_compute_state(row, _read_state_json(row["state"])) == "dead" for row, _, _ in resolved):
+        print("Hint: run acw cleanup to remove dead sessions.")
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
@@ -2062,9 +2097,10 @@ def cmd_status(argv: list[str]) -> None:
     thread_pane = _build_thread_pane_map() if details else {}
 
     # 3. Build set of running watcher PIDs per pane.
+    live_watcher_rows = watcher_rows()
     watcher_row_for_thread: dict[str, dict[str, str]] = {}
     watcher_pid_for_pane: dict[str, str] = {}
-    for r in watcher_rows():
+    for r in live_watcher_rows:
         tid = r.get("thread", "").lower()
         if tid and tid not in watcher_row_for_thread:
             watcher_row_for_thread[tid] = r
@@ -2112,6 +2148,21 @@ def cmd_status(argv: list[str]) -> None:
             "msg_inline": watcher_row.get("msg_inline", "") or s.get("message", ""),
         }
         resolved.append((row, live_pane, window_label))
+
+    represented_live_watchers = {
+        (r.get("pane", ""), r.get("pid", ""))
+        for r, _, _ in resolved
+        if r.get("pane") and r.get("pid")
+    }
+    for watcher_row in live_watcher_rows:
+        watcher_key = (watcher_row.get("pane", ""), watcher_row.get("pid", ""))
+        if watcher_key in represented_live_watchers:
+            continue
+        live_pane = watcher_row.get("pane", "") if is_pane_id(watcher_row.get("pane", "")) else ""
+        window_label = pane_window.get(live_pane, "") if live_pane else ""
+        if not window_label:
+            window_label = _read_session_state(watcher_row.get("thread", "")).get("name", "").strip() or "-"
+        resolved.append((dict(watcher_row), live_pane, window_label))
 
     # Optional pane filter.
     if pane_arg:
