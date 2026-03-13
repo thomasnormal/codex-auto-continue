@@ -287,6 +287,27 @@ class WatchdUnitTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     acw.resolve_thread_id("%1", "auto")
 
+    def test_start_rejects_duplicate_thread_watcher(self):
+        err = io.StringIO()
+        with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
+            with patch.object(acw, "ensure_tmux_window_rename_hook"):
+                with patch.object(acw, "is_running_pid_file", return_value=False):
+                    with patch.object(acw, "watcher_pids_for_pane", return_value=[]):
+                        with patch.object(
+                            acw,
+                            "watcher_rows",
+                            return_value=[{
+                                "pane": "%6",
+                                "thread": THREAD,
+                                "pid": "1234",
+                            }],
+                        ):
+                            with redirect_stderr(err):
+                                with self.assertRaises(SystemExit) as ctx:
+                                    acw.cmd_start(["aot2", THREAD, "--message", "continue"])
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn("another watcher (pid=1234 pane=%6) is already watching thread", err.getvalue())
+
     def test_resolve_start_pane_target_rejects_thread_id(self):
         err = io.StringIO()
         with redirect_stderr(err):
@@ -352,6 +373,32 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("acw restart uvm", report.recommendations)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("warn:watcher health: warn - rollout channel closed", rendered)
+
+    def test_doctor_resolve_target_uses_saved_session_pane(self):
+        with patch.object(acw, "_saved_session_panes_for_target", return_value=["%9"]):
+            with patch.object(acw, "resolve_pane_from_window_name", return_value=None):
+                self.assertEqual(("%9", ""), acw._doctor_resolve_target("formal"))
+
+    def test_doctor_report_uses_watcher_thread_when_pane_detection_fails(self):
+        row = {
+            "pane": "%7",
+            "thread": THREAD,
+            "state": "/state/acw_session.json",
+            "watch": "/state/watch.log",
+            "msg_inline": "continue",
+            "pid": "1234",
+        }
+        with patch.object(acw, "_state_dir_is_writable", return_value=(True, acw.STATE_DIR)):
+            with patch.object(acw, "_codex_auth_state_available", return_value=(True, "/tmp/auth.json")):
+                with patch.object(acw, "run_tmux", return_value="session\n"):
+                    with patch.object(acw, "_doctor_resolve_target", return_value=("%7", "")):
+                        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
+                            with patch.object(acw, "watcher_rows", return_value=[row]):
+                                with patch.object(acw, "_read_state_json", return_value={}):
+                                    report = acw._doctor_report("formal")
+        self.assertEqual("ok", report.result)
+        rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
+        self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
 
     def test_doctor_plain_output_shows_recommended_command(self):
         report = acw.DoctorReport(
@@ -627,6 +674,23 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("STATE:           running", text)
         self.assertIn("WINDOW:          formal", text)
 
+    def test_status_target_matches_saved_session_name_without_live_pane(self):
+        sessions = [{
+            "thread_id": THREAD,
+            "name": "formal",
+            "message": "continue",
+            "state_file": "/state/acw_session.json",
+        }]
+        with patch.object(acw, "_load_sessions", return_value=sessions):
+            with patch.object(acw, "_build_pane_window_map", return_value={}):
+                with patch.object(acw, "watcher_rows", return_value=[]):
+                    out = io.StringIO()
+                    with redirect_stdout(out):
+                        acw.cmd_status(["formal"])
+        text = out.getvalue()
+        self.assertIn("Sessions: 1", text)
+        self.assertIn("formal", text)
+
     def test_status_prints_tmux_recovery_hint_when_metadata_is_unavailable(self):
         sessions = [{
             "thread_id": THREAD,
@@ -830,6 +894,11 @@ class WatchdUnitTests(unittest.TestCase):
                         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                             acw.cmd_restart(["formal"])
         restart_one.assert_called_once_with("formal", "%6", [])
+
+    def test_resolve_restart_target_prefers_saved_session_pane_over_window_name(self):
+        with patch.object(acw, "_saved_session_panes_for_target", return_value=["%9"]):
+            with patch.object(acw, "resolve_pane_from_window_name", return_value="%6"):
+                self.assertEqual("%9", acw._resolve_restart_pane_target("formal"))
 
     def test_restart_target_with_restart_codex_relaunches_same_thread(self):
         with patch.object(acw, "detect_thread_id_for_pane", return_value=""):

@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: hardened session identity handling across `start`, `restart`, `status`, and `doctor`. `acw` now rejects starting a second watcher on an already-watched thread, prefers saved session->pane recovery over bare window-name matches for watcher commands, lets `status <target>` match saved session names even without a live pane, and lets `doctor` fall back to the running watcher's recorded thread when pane scraping is stale.
 - Change: `acw restart` and `acw resume` now prefer the existing watcher's recorded thread id over fresh pane-based thread discovery. This avoids paused watchers being rebound to whatever Codex thread happens to be visible in the pane at restart time, which could otherwise produce duplicate-thread warnings against unrelated live agents.
 - Change: removed the `msg:` prefix from the status-table MESSAGE column. The table now shows the saved continue prompt text directly, which is easier to scan and matches what `acw edit` opens.
 - Change: removed `--message-file` support from the CLI and watcher process. `acw` now treats continue prompts as plain message text only: either passed with `--message` or edited interactively, then persisted in the session state for restart/edit/status paths.

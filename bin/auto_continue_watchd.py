@@ -500,6 +500,17 @@ def resolve_pane_target(target: str) -> str:
     sys.exit(1)
 
 
+def _resolve_live_pane_target(target: str) -> str:
+    """Best-effort live tmux target resolution without exiting on failure."""
+    if is_pane_id(target):
+        return target
+    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
+        pane = resolve_pane_from_window_target(target)
+        return pane if pane and is_pane_id(pane) else ""
+    pane = resolve_pane_from_window_name(target, quiet=True)
+    return pane if pane and is_pane_id(pane) else ""
+
+
 def resolve_start_pane_target(target: str) -> str:
     """Resolve only the canonical tmux targets accepted by `start`.
 
@@ -792,6 +803,18 @@ def watcher_pids_for_pane(pane: str) -> list[str]:
     return [r["pid"] for r in watcher_rows(pane)]
 
 
+def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | None:
+    if not is_thread_id(thread_id):
+        return None
+    for row in watcher_rows():
+        if row.get("pane", "") == pane:
+            continue
+        row_tid = row.get("thread", "")
+        if row_tid and row_tid.lower() == thread_id.lower():
+            return row
+    return None
+
+
 def _is_pid_stopped(pid: int) -> bool:
     """Check if a process is in stopped (T) state via ``ps``."""
     try:
@@ -947,22 +970,18 @@ def cmd_start(argv: list[str]) -> None:
     thread_id = resolve_thread_id(pane, thread_arg)
     _print_progress(f"start: thread_id={thread_id}")
 
-    # Warn if another watcher is already running for the same thread_id.
-    if is_thread_id(thread_id):
-        for r in watcher_rows():
-            if r["pane"] == pane:
-                continue
-            if r["thread"].lower() == thread_id.lower():
-                print(
-                    f"warning: another watcher (pid={r['pid']} pane={r['pane']}) "
-                    f"is already watching thread {thread_id[:8]}…",
-                    file=sys.stderr,
-                )
-                print(
-                    f"hint: stop it first with 'acw stop {r['pane']}' to avoid duplicates",
-                    file=sys.stderr,
-                )
-                break
+    other = _other_watcher_for_thread(pane, thread_id)
+    if other:
+        print(
+            f"error: another watcher (pid={other['pid']} pane={other['pane']}) "
+            f"is already watching thread {thread_id[:8]}…",
+            file=sys.stderr,
+        )
+        print(
+            f"hint: stop it first with 'acw stop {other['pane']}' to avoid duplicates",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     message_text = _message_text(msg_value)
     wn = run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or ""
@@ -1998,10 +2017,6 @@ def _resolve_restart_pane_target(target: str) -> str:
         print(f"error: could not resolve window target '{target}'", file=sys.stderr)
         sys.exit(1)
 
-    pane = resolve_pane_from_window_name(target, quiet=True)
-    if pane and is_pane_id(pane):
-        return pane
-
     saved_panes = _saved_session_panes_for_target(target)
     if len(saved_panes) == 1:
         return saved_panes[0]
@@ -2012,6 +2027,10 @@ def _resolve_restart_pane_target(target: str) -> str:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    pane = resolve_pane_from_window_name(target, quiet=True)
+    if pane and is_pane_id(pane):
+        return pane
 
     if _tmux_socket_recovery_hint():
         _print_tmux_unavailable_hint(target)
@@ -2084,6 +2103,7 @@ def cmd_status(argv: list[str]) -> None:
             "pid": watcher_pid,
             "pane": live_pane,
             "thread": s["thread_id"],
+            "session_name": s["name"],
             "state": s["state_file"],
             "watch": (
                 watch_log_for_key(key_from_pane(live_pane))
@@ -2096,10 +2116,17 @@ def cmd_status(argv: list[str]) -> None:
     # Optional pane filter.
     if pane_arg:
         target = pane_arg
-        pane = resolve_pane_target(target)
-        if pane != target:
+        pane = _resolve_live_pane_target(target)
+        if pane and pane != target:
             print(f"resolved: target={target} pane={pane}")
-        resolved = [(r, lp, wl) for r, lp, wl in resolved if lp == pane]
+        target_thread = target.lower() if is_thread_id(target) else ""
+        resolved = [
+            (r, lp, wl)
+            for r, lp, wl in resolved
+            if (pane and lp == pane)
+            or (target_thread and r.get("thread", "").lower() == target_thread)
+            or r.get("session_name", "") == target
+        ]
 
     detail_tag = " (details)" if details else ""
     print(f"Sessions{detail_tag}: {len(resolved)}")
@@ -2154,6 +2181,13 @@ def _doctor_resolve_target(target: str) -> tuple[str, str]:
         if pane and is_pane_id(pane):
             return pane, ""
         return "", f"could not resolve window target '{target}'"
+
+    saved_panes = _saved_session_panes_for_target(target)
+    if len(saved_panes) == 1:
+        return saved_panes[0], ""
+    if len(saved_panes) > 1:
+        joined = ", ".join(saved_panes)
+        return "", f"saved session target '{target}' is ambiguous across live panes: {joined}"
 
     pane = resolve_pane_from_window_name(target)
     if pane and is_pane_id(pane):
@@ -2215,14 +2249,20 @@ def _doctor_report(target: str = "") -> DoctorReport:
         return DoctorReport(checks=checks, result=result, exit_code=1 if errors else 0, recommendations=recommendations)
 
     checks.append(("ok", f"pane resolved: {pane}"))
-    tid = detect_thread_id_for_pane(pane)
+    rows = watcher_rows(pane)
+    tid = ""
+    if rows:
+        row_tid = rows[0].get("thread", "")
+        if is_thread_id(row_tid):
+            tid = row_tid.lower()
+    if not tid:
+        tid = detect_thread_id_for_pane(pane) or ""
     if tid and is_thread_id(tid):
         checks.append(("ok", f"Codex thread detected: {tid}"))
     else:
         checks.append(("error", f"could not detect a Codex thread for pane {pane}"))
         errors += 1
 
-    rows = watcher_rows(pane)
     command_target = _doctor_recommendation_target(target, pane, rows)
     if rows:
         pid = rows[0].get("pid", "")
