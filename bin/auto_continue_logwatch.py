@@ -631,7 +631,6 @@ def main() -> int:
     p.add_argument("--pane", default=os.environ.get("TMUX_PANE", ""))
     p.add_argument("--thread-id", default="auto")
     p.add_argument("--tmux-socket", default=os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", ""))
-    p.add_argument("--message-file", default="")
     p.add_argument("--message", default="please continue")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--log-path", default=str(Path.home() / ".codex" / "log" / "codex-tui.log"))
@@ -658,8 +657,6 @@ def main() -> int:
     codex_log = Path(args.log_path)
 
     msg = args.message
-    if args.message_file:
-        msg = Path(args.message_file).read_text(encoding="utf-8")
     # Strip comment lines (starting with #).
     msg = "\n".join(
         line for line in msg.splitlines() if not line.lstrip().startswith("#")

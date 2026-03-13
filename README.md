@@ -139,28 +139,18 @@ requiring a fresh `acw start`.
 
 ## Continue Message
 
-If you do not pass `--message` or `--message-file`, `acw start` opens `$EDITOR`
-so you can write a multi-line continue prompt. An empty message cancels the
-start.
+If you do not pass `--message`, `acw start` opens `$EDITOR` so you can write a
+multi-line continue prompt. An empty message cancels the start.
 
 Examples:
 
 ```bash
 acw start %0 --message "continue and focus on tests"
-acw start tests --message-file /path/to/message.txt
+acw start tests
 acw resume formal aot
 acw restart bugs --restart-codex
 acw edit tests
 ```
-
-Default message file:
-
-```text
-~/.codex/auto_continue.message.txt
-```
-
-`acw` creates that file from the bundled template on first run if it does not
-exist yet.
 
 ## Status And Health
 

@@ -74,25 +74,10 @@ DEFAULT_MESSAGE_TEXT = (
 
 os.makedirs(STATE_DIR, exist_ok=True)
 
-
-def ensure_default_message_file(state_dir: str = STATE_DIR) -> str:
-    path = os.path.join(state_dir, "auto_continue.message.txt")
-    if os.path.isfile(path):
-        return path
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        Path(path).write_text(DEFAULT_MESSAGE_TEXT, encoding="utf-8")
-    except OSError:
-        return path
-    return path
-
-
-DEFAULT_MSG_FILE = ensure_default_message_file()
-
 def build_help_text(prog: str) -> str:
     return f"""Usage:
   {prog} status [target] [--details]
-  {prog} start <target> [thread-id] [--message TEXT | --message-file FILE]
+  {prog} start <target> [thread-id] [--message TEXT]
   {prog} stop [target]
   {prog} pause [target]
   {prog} resume [target ...]
@@ -126,9 +111,6 @@ Examples:
   {prog} edit %6
   {prog} restart
   {prog} doctor
-
-Default message file:
-  {DEFAULT_MSG_FILE}
 """
 
 # ---------------------------------------------------------------------------
@@ -600,25 +582,24 @@ def resolve_thread_id(pane: str, requested: str = "") -> str:
 
 def parse_thread_and_message_args(
     args: list[str],
-) -> tuple[str, str, str, bool]:
-    thread_arg, message_mode, message_value, message_explicit, _ = _parse_restartable_args(args)
-    return thread_arg, message_mode, message_value, message_explicit
+) -> tuple[str, str, bool]:
+    thread_arg, message_value, message_explicit, _ = _parse_restartable_args(args)
+    return thread_arg, message_value, message_explicit
 
 
 def parse_restart_args(
     args: list[str],
-) -> tuple[str, str, str, bool, bool]:
+) -> tuple[str, str, bool, bool]:
     return _parse_restartable_args(args, allow_restart_codex=True)
 
 
 def _parse_restartable_args(
     args: list[str],
     allow_restart_codex: bool = False,
-) -> tuple[str, str, str, bool, bool]:
-    """Return (thread_arg, message_mode, message_value, message_explicit)."""
+) -> tuple[str, str, bool, bool]:
+    """Return (thread_arg, message_value, message_explicit, restart_codex)."""
     thread_arg = ""
-    message_mode = "file"
-    message_value = DEFAULT_MSG_FILE
+    message_value = ""
     message_explicit = False
     restart_codex = False
 
@@ -632,14 +613,6 @@ def _parse_restartable_args(
             if not rest:
                 print("error: --message requires a value", file=sys.stderr)
                 sys.exit(1)
-            message_mode = "inline"
-            message_value = rest.pop(0)
-            message_explicit = True
-        elif tok == "--message-file":
-            if not rest:
-                print("error: --message-file requires a path", file=sys.stderr)
-                sys.exit(1)
-            message_mode = "file"
             message_value = rest.pop(0)
             message_explicit = True
         elif allow_restart_codex and tok == "--restart-codex":
@@ -648,11 +621,7 @@ def _parse_restartable_args(
             print(f"error: unknown option '{tok}'", file=sys.stderr)
             sys.exit(1)
 
-    if message_mode == "file" and not os.path.isfile(message_value):
-        print(f"error: message file not found: {message_value}", file=sys.stderr)
-        sys.exit(1)
-
-    return thread_arg, message_mode, message_value, message_explicit, restart_codex
+    return thread_arg, message_value, message_explicit, restart_codex
 
 
 # ---------------------------------------------------------------------------
@@ -667,15 +636,9 @@ def _normalize_message_text(text: str) -> str:
     ).strip()
 
 
-def _message_text(mode: str, value: str) -> str:
+def _message_text(value: str) -> str:
     """Resolve the concrete continue message text."""
-    if mode == "inline":
-        return _normalize_message_text(value)
-    try:
-        text = Path(value).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    return _normalize_message_text(text)
+    return _normalize_message_text(value)
 
 
 def _set_thread_name(thread_id: str, name: str) -> None:
@@ -727,7 +690,7 @@ def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
     """Parse logwatch.py command-line tokens into an info dict."""
     info: dict[str, str] = {
         "pane": "", "thread": "", "state": "",
-        "watch": "", "cwd": "", "msg_file": "", "msg_inline": "", "tmux_socket": "",
+        "watch": "", "cwd": "", "msg_inline": "", "tmux_socket": "",
     }
     i = 0
     while i < len(tokens):
@@ -747,9 +710,6 @@ def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
             i += 2
         elif tok == "--cwd":
             info["cwd"] = nxt
-            i += 2
-        elif tok == "--message-file":
-            info["msg_file"] = nxt
             i += 2
         elif tok == "--message":
             info["msg_inline"] = nxt
@@ -915,10 +875,8 @@ def _logwatch_cmd(pane: str, thread_id: str, message_args: list[str], key: str) 
     ]
 
 
-def _message_args(mode: str, value: str) -> list[str]:
-    if mode == "inline":
-        return ["--message", value]
-    return ["--message-file", value]
+def _message_args(value: str) -> list[str]:
+    return ["--message", value]
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +894,7 @@ def cmd_start(argv: list[str]) -> None:
         print(
             "error: pane target is required\n"
             "usage: auto_continue_watchd.py start <pane-id|window-index|session:window> "
-            "[thread-id] [--message TEXT | --message-file FILE]",
+            "[thread-id] [--message TEXT]",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -946,15 +904,14 @@ def cmd_start(argv: list[str]) -> None:
         _print_progress(f"resolved: target={target} pane={pane}")
     ensure_tmux_window_rename_hook()
 
-    thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
+    thread_arg, msg_value, msg_explicit = parse_thread_and_message_args(rest)
 
-    # No --message/--message-file given: open editor for interactive input.
+    # No --message given: open editor for interactive input.
     if not msg_explicit:
         value = _edit_message_interactive()
         if value is None or not value.strip():
             print("start: no message provided, aborting", file=sys.stderr)
             sys.exit(1)
-        msg_mode = "inline"
         msg_value = value
 
     key = key_from_pane(pane)
@@ -1007,7 +964,7 @@ def cmd_start(argv: list[str]) -> None:
                 )
                 break
 
-    message_text = _message_text(msg_mode, msg_value)
+    message_text = _message_text(msg_value)
     wn = run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or ""
     _write_session_state(thread_id, {
         "thread_id": thread_id,
@@ -1024,7 +981,7 @@ def cmd_start(argv: list[str]) -> None:
     # change to "python3" (the logwatch process) when codex exits.
     run_tmux("set-option", "-w", "-t", pane, "automatic-rename", "off")
 
-    cmd = _logwatch_cmd(pane, thread_id, _message_args(msg_mode, msg_value), key)
+    cmd = _logwatch_cmd(pane, thread_id, _message_args(msg_value), key)
     log_fh = open(rl, "a")
     proc = subprocess.Popen(
         cmd,
@@ -1314,7 +1271,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         _print_progress(f"resolved: target={target} pane={pane}")
     _print_progress(f"restart: preparing pane={pane}")
 
-    thread_arg, msg_mode, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
+    thread_arg, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
 
     resolved_thread = ""
     if thread_arg and thread_arg != "auto":
@@ -1337,10 +1294,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
             ss = _read_session_state(resolved_thread)
             msg = ss.get("message", "")
             if msg:
-                msg_mode, msg_value = "inline", msg
-
-    if msg_mode == "file" and not os.path.isfile(msg_value):
-        msg_value = DEFAULT_MSG_FILE
+                msg_value = msg
 
     if not thread_arg:
         thread_arg = resolved_thread
@@ -1365,10 +1319,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     start_args: list[str] = [pane]
     if thread_arg:
         start_args.append(thread_arg)
-    if msg_mode == "inline":
-        start_args += ["--message", msg_value]
-    else:
-        start_args += ["--message-file", msg_value]
+    start_args += ["--message", msg_value]
 
     cmd_start(start_args)
 
@@ -1425,16 +1376,21 @@ def cmd_edit(argv: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
-    tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
-
+    rows = watcher_rows(pane)
+    tid = ""
     value = ""
-    if tid and is_thread_id(tid):
+    if rows:
+        row = rows[0]
+        row_tid = row.get("thread", "")
+        if is_thread_id(row_tid):
+            tid = row_tid.lower()
+        _, value = _resolve_message(row)
+
+    if not tid:
+        tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
+    if not value and tid and is_thread_id(tid):
         ss = _read_session_state(tid)
         value = ss.get("message", "")
-    if not value:
-        rows = watcher_rows(pane)
-        if rows:
-            value = rows[0]["msg_inline"]
 
     new_value = _edit_message_interactive(value)
     if new_value is None:
@@ -1670,8 +1626,6 @@ def _resolve_message(r: dict[str, str]) -> tuple[str, str]:
         msg = ss.get("message", "")
         if msg:
             return "inline", msg
-    if r.get("msg_file"):
-        return "file", r["msg_file"]
     if r.get("msg_inline"):
         return "inline", r["msg_inline"]
     return "", ""
@@ -1702,8 +1656,6 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
 
 def _message_summary_for_row(r: dict[str, str]) -> str:
     mode, value = _resolve_message(r)
-    if mode == "file" and value:
-        return f"file:{os.path.basename(value)}"
     if mode == "inline" and value:
         return f"msg:{value}"
     return "-"
@@ -1954,9 +1906,7 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
                 last_event = "-"
 
         mode, value = _resolve_message(r)
-        if mode == "file" and value:
-            msg_full = f"file: {value}"
-        elif mode == "inline" and value:
+        if mode == "inline" and value:
             msg_full = value
         else:
             msg_full = "-"
@@ -2139,7 +2089,6 @@ def cmd_status(argv: list[str]) -> None:
                 watch_log_for_key(key_from_pane(live_pane))
                 if live_pane else watcher_row.get("watch", "")
             ),
-            "msg_file": "",
             "msg_inline": watcher_row.get("msg_inline", "") or s.get("message", ""),
         }
         resolved.append((row, live_pane, window_label))

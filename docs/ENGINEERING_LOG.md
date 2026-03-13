@@ -2,6 +2,8 @@
 
 ## 2026-03-13
 
+- Change: removed `--message-file` support from the CLI and watcher process. `acw` now treats continue prompts as plain message text only: either passed with `--message` or edited interactively, then persisted in the session state for restart/edit/status paths.
+- Change: `acw edit` now seeds the editor from the canonical persisted session message for that watcher, instead of trusting the inline `--message` text still visible in the running `auto_continue_logwatch.py` process. This fixes paused/recovered watchers like `ddr3` showing the default workstream placeholder in `edit` even though `status` already showed the correct saved plan message.
 - Change: split stale-file cleanup into a fast default path and an explicit deep cleanup path. Mutating commands such as `acw edit` and `acw restart` no longer do the expensive global pane->thread recovery scan just to prune dead session files; only explicit `acw cleanup` pays that cost. This drops common command latency from roughly 12s to well under 1s in the current tmux/Codex environment.
 - Change: `acw start` and `acw restart` now print step-by-step progress messages while they resolve the pane thread, load the saved continue message, stop the old watcher, optionally relaunch Codex, and start the new watcher. This makes slow restarts easier to interpret without inventing a fake percentage bar.
 - Change: removed `'*'` as a supported selector for `acw pause`, `acw resume`, and `acw restart`. The no-target forms are now the only all-watchers syntax, which avoids shell-expansion confusion and keeps the CLI surface smaller.

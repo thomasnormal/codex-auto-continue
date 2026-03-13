@@ -46,13 +46,13 @@ class WatchdUnitTests(unittest.TestCase):
                     acw.main()
         self.assertIn("Usage:\n  acw status", out.getvalue())
 
-    def test_ensure_default_message_file_creates_bundled_template(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.chmod(tmpdir, 0o700)
-            path = acw.ensure_default_message_file(tmpdir)
-            self.assertEqual(f"{tmpdir}/auto_continue.message.txt", path)
-            self.assertTrue(Path(path).is_file())
-            self.assertEqual(acw.DEFAULT_MESSAGE_TEXT, Path(path).read_text(encoding="utf-8"))
+    def test_parse_thread_and_message_args_rejects_message_file(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                acw.parse_thread_and_message_args(["--message-file", "/tmp/msg.txt"])
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn("unknown option '--message-file'", err.getvalue())
 
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
@@ -76,10 +76,31 @@ class WatchdUnitTests(unittest.TestCase):
         row = {
             "thread": THREAD,
             "msg_inline": "continue",
-            "msg_file": "",
         }
         with patch.object(acw, "_read_session_state", return_value={"message": "continue by aot_plan_7.md"}):
             self.assertEqual(("inline", "continue by aot_plan_7.md"), acw._resolve_message(row))
+
+    def test_edit_prefers_persisted_session_message_over_stale_inline_message(self):
+        rows = [{
+            "pane": "%2",
+            "thread": THREAD,
+            "msg_inline": acw.DEFAULT_MESSAGE_TEXT,
+            "pid": "1234",
+        }]
+
+        with patch.object(acw, "resolve_pane_target", return_value="%2"):
+            with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
+                with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
+                    with patch.object(acw, "watcher_rows", return_value=rows):
+                        with patch.object(
+                            acw,
+                            "_read_session_state",
+                            return_value={"message": "continue by docs/DDR3_PLAN.md"},
+                        ):
+                            with patch.object(acw, "_edit_message_interactive", return_value=None) as edit_message:
+                                acw.cmd_edit(["ddr3"])
+
+        edit_message.assert_called_once_with("continue by docs/DDR3_PLAN.md")
 
     def test_status_sort_key_orders_by_numeric_window_index(self):
         rows = [
@@ -124,7 +145,6 @@ class WatchdUnitTests(unittest.TestCase):
             "thread": THREAD,
             "state": "/state/acw_session.json",
             "watch": "/state/watch.log",
-            "msg_file": "",
             "msg_inline": "continue",
             "pid": "1234",
         }]
@@ -159,7 +179,6 @@ class WatchdUnitTests(unittest.TestCase):
             "thread": THREAD,
             "state": "/state/acw_session.json",
             "watch": "/state/watch.log",
-            "msg_file": "",
             "msg_inline": "continue",
             "pid": "1234",
         }]
@@ -197,7 +216,6 @@ class WatchdUnitTests(unittest.TestCase):
             "thread": THREAD,
             "state": "/state/acw_session.json",
             "watch": "/state/watch.log",
-            "msg_file": "",
             "msg_inline": "continue",
             "pid": "1234",
         }]
@@ -305,7 +323,6 @@ class WatchdUnitTests(unittest.TestCase):
             "thread": THREAD,
             "state": "/state/acw_session.json",
             "watch": "/state/watch.log",
-            "msg_file": "",
             "msg_inline": "continue",
             "pid": "1234",
         }
@@ -582,7 +599,6 @@ class WatchdUnitTests(unittest.TestCase):
             "thread": THREAD,
             "state": "/state/acw_session.json",
             "watch": "/state/watch.log",
-            "msg_file": "",
             "msg_inline": "continue",
             "pid": "1234",
         }]
