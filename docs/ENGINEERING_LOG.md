@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: improved batch restart failure reporting. When `acw restart` with no target hits a per-pane failure, it now preserves the pane's detailed stderr reason, prints a pane-specific failure line with that reason, and includes failure-detail lines in the end-of-run summary instead of only reporting an exit code.
 - Change: made `acw restart` with no target best-effort across panes. A duplicate-thread or other per-pane restart failure now logs an error for that pane, continues restarting the remaining panes, and prints a short failure count at the end instead of aborting the whole batch on the first `SystemExit`.
 - Change: made `acw` surface and explain inconsistent live watcher state more directly. `start` now rejects an already-running pane watcher if that watcher is duplicated on another pane or bound to a different explicit thread than the operator requested, and `status` now shows extra live watcher rows that would otherwise be hidden by thread-based session merging. When any row is `dead`, the status footer also prints a cleanup hint.
 - Change: hardened session identity handling across `start`, `restart`, `status`, and `doctor`. `acw` now rejects starting a second watcher on an already-watched thread, prefers saved session->pane recovery over bare window-name matches for watcher commands, lets `status <target>` match saved session names even without a live pane, and lets `doctor` fall back to the running watcher's recorded thread when pane scraping is stale.

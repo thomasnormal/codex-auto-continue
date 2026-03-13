@@ -1007,6 +1007,8 @@ class WatchdUnitTests(unittest.TestCase):
 
         def fake_restart_one(target: str, pane: str, rest: list[str]) -> None:
             if pane == "%2":
+                print("error: duplicate thread detected", file=sys.stderr)
+                print("hint: stop it first with 'acw stop %2'", file=sys.stderr)
                 raise SystemExit(1)
 
         out = io.StringIO()
@@ -1023,7 +1025,8 @@ class WatchdUnitTests(unittest.TestCase):
             ],
             restart_one.call_args_list,
         )
-        self.assertIn("error: restart failed for pane=%2", err.getvalue())
+        self.assertIn("error: duplicate thread detected", err.getvalue())
+        self.assertIn("error: restart failed for pane=%2: duplicate thread detected", err.getvalue())
         self.assertIn("restart: 1 pane(s) failed", out.getvalue())
 
     def test_restart_target_falls_back_to_dead_session_thread_mapping(self):

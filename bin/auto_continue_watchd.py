@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import glob
+import io
 import json
 import os
 import re
@@ -810,6 +811,20 @@ def _watcher_row_for_pane(pane: str) -> dict[str, str] | None:
     return None
 
 
+def _system_exit_detail(exc: SystemExit, stderr_text: str = "") -> str:
+    lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("error:"):
+            return line.removeprefix("error:").strip()
+    for line in reversed(lines):
+        if not line.startswith("hint:"):
+            return line
+    if isinstance(exc.code, str) and exc.code.strip():
+        return exc.code.strip()
+    code = exc.code if isinstance(exc.code, int) else 1
+    return f"exit {code}"
+
+
 def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | None:
     if not is_thread_id(thread_id):
         return None
@@ -1279,25 +1294,42 @@ def cmd_resume(argv: list[str]) -> None:
 def _restart_panes(panes: list[str]) -> None:
     restarted = 0
     failed = 0
+    failed_details: list[str] = []
     for pane in panes:
         if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
             stop_pane_watchers(pane)
             continue
 
         _print_progress(f"--- restarting {pane} ---")
+        captured_err = io.StringIO()
+        printed_err = False
         try:
+            old_stderr = sys.stderr
+            sys.stderr = captured_err
             _restart_one(pane, pane, [])
         except SystemExit as exc:
             failed += 1
-            code = exc.code if isinstance(exc.code, int) else 1
-            print(f"error: restart failed for pane={pane} (exit {code})", file=sys.stderr)
+            detail_text = captured_err.getvalue()
+            if detail_text:
+                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
+                printed_err = True
+            detail = _system_exit_detail(exc, detail_text)
+            failed_details.append(f"{pane}: {detail}")
+            print(f"error: restart failed for pane={pane}: {detail}", file=old_stderr)
             continue
+        finally:
+            sys.stderr = old_stderr
+            detail_text = captured_err.getvalue()
+            if detail_text and not printed_err:
+                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
         restarted += 1
 
     if restarted == 0:
         print("no live panes to restart")
     elif failed:
         print(f"restart: {failed} pane(s) failed")
+        for detail in failed_details:
+            print(f"restart: failure detail: {detail}")
 
 
 def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 15.0) -> bool:
