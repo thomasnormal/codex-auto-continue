@@ -659,6 +659,44 @@ class WatchdUnitTests(unittest.TestCase):
                         acw.cmd_restart([])
         restart_panes.assert_called_once_with(["%1", "%2"])
 
+    def test_restart_target_with_restart_codex_relaunches_same_thread(self):
+        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
+            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=THREAD):
+                with patch.object(acw, "_read_session_state", return_value={"message": "continue"}):
+                    with patch.object(acw, "stop_pane_watchers") as stop_watchers:
+                        with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
+                            with patch.object(acw, "cmd_start") as cmd_start:
+                                acw._restart_one("bugs", "%7", ["--restart-codex"])
+        stop_watchers.assert_called_once_with("%7")
+        restart_codex.assert_called_once_with("%7", THREAD)
+        cmd_start.assert_called_once_with(["%7", THREAD, "--message", "continue"])
+
+    def test_restart_target_with_restart_codex_fails_when_thread_unknown(self):
+        with patch.object(acw, "detect_thread_id_for_pane", return_value=""):
+            with patch.object(acw, "thread_from_running_watcher_for_pane", return_value=None):
+                with patch.object(acw, "stop_pane_watchers") as stop_watchers:
+                    err = io.StringIO()
+                    with redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as ctx:
+                            acw._restart_one("bugs", "%7", ["--restart-codex"])
+        self.assertEqual(1, ctx.exception.code)
+        stop_watchers.assert_not_called()
+        self.assertIn("could not determine thread_id for pane=%7", err.getvalue())
+
+    def test_restart_codex_in_pane_sends_resume_command(self):
+        with patch.object(acw, "run_tmux", return_value="") as run_tmux:
+            with patch.object(acw.time, "sleep") as sleep:
+                acw._restart_codex_in_pane("%7", THREAD)
+        self.assertEqual(
+            [
+                (("send-keys", "-t", "%7", "C-c"),),
+                (("send-keys", "-t", "%7", "-l", f"codex resume {THREAD}"),),
+                (("send-keys", "-t", "%7", "C-m"),),
+            ],
+            run_tmux.call_args_list,
+        )
+        sleep.assert_called_once_with(0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

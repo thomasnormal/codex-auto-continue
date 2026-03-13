@@ -1,5 +1,9 @@
 # Engineering Log
 
+## 2026-03-13
+
+- Change: added `acw restart <target> --restart-codex` for same-session pane recovery. The manager now resolves the current thread id first, sends `codex resume <thread-id>` into the target tmux pane, and then restarts the watcher with the persisted continue message. If the thread id cannot be proven, the command fails before tearing down the existing watcher.
+
 ## 2026-03-11
 
 - Change: added pane-error detection for Codex `Error running remote compact task` failures. These transient remote-compact errors now auto-pause the watcher like auth/quota failures instead of letting `acw` keep injecting `continue` into a failing pane.

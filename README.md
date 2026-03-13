@@ -125,6 +125,11 @@ shell before `acw` sees it.
 thawing the old stopped process. That avoids replaying buffered Codex log
 history after a long pause.
 
+For a single target, `acw restart <target> --restart-codex` also relaunches
+Codex in that pane with `codex resume <thread-id>` before restarting the
+watcher. This is the same-session restart path when the pane needs a fresh
+Codex process, not just a fresh watcher.
+
 ## Continue Message
 
 If you do not pass `--message` or `--message-file`, `acw start` opens `$EDITOR`
@@ -136,6 +141,7 @@ Examples:
 ```bash
 acw start %0 --message "continue and focus on tests"
 acw start tests --message-file /path/to/message.txt
+acw restart bugs --restart-codex
 acw edit tests
 ```
 

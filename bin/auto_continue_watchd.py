@@ -107,7 +107,7 @@ Commands:
   stop      Stop one watcher, one pane's watchers, or all watchers.
   pause     Send SIGSTOP to one watcher or all watchers.
   resume    Restart one paused watcher or all paused watchers from current state.
-  restart   Restart one watcher or all running watchers.
+  restart   Restart one watcher or all running watchers. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running watcher, then restart it.
   cleanup   Remove stale watcher files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
@@ -121,6 +121,7 @@ Examples:
   {prog} status --details
   {prog} start %6 --message "continue"
   {prog} start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
+  {prog} restart bugs --restart-codex
   {prog} edit %6
   {prog} restart
   {prog} doctor
@@ -596,11 +597,26 @@ def resolve_thread_id(pane: str, requested: str = "") -> str:
 def parse_thread_and_message_args(
     args: list[str],
 ) -> tuple[str, str, str, bool]:
+    thread_arg, message_mode, message_value, message_explicit, _ = _parse_restartable_args(args)
+    return thread_arg, message_mode, message_value, message_explicit
+
+
+def parse_restart_args(
+    args: list[str],
+) -> tuple[str, str, str, bool, bool]:
+    return _parse_restartable_args(args, allow_restart_codex=True)
+
+
+def _parse_restartable_args(
+    args: list[str],
+    allow_restart_codex: bool = False,
+) -> tuple[str, str, str, bool, bool]:
     """Return (thread_arg, message_mode, message_value, message_explicit)."""
     thread_arg = ""
     message_mode = "file"
     message_value = DEFAULT_MSG_FILE
     message_explicit = False
+    restart_codex = False
 
     rest = list(args)
     if rest and not rest[0].startswith("--"):
@@ -622,6 +638,8 @@ def parse_thread_and_message_args(
             message_mode = "file"
             message_value = rest.pop(0)
             message_explicit = True
+        elif allow_restart_codex and tok == "--restart-codex":
+            restart_codex = True
         else:
             print(f"error: unknown option '{tok}'", file=sys.stderr)
             sys.exit(1)
@@ -630,7 +648,7 @@ def parse_thread_and_message_args(
         print(f"error: message file not found: {message_value}", file=sys.stderr)
         sys.exit(1)
 
-    return thread_arg, message_mode, message_value, message_explicit
+    return thread_arg, message_mode, message_value, message_explicit, restart_codex
 
 
 # ---------------------------------------------------------------------------
@@ -1245,16 +1263,38 @@ def _restart_panes(panes: list[str]) -> None:
         print("no live panes to restart")
 
 
+def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
+    if run_tmux("send-keys", "-t", pane, "C-c") is None:
+        print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(0.2)
+    if run_tmux("send-keys", "-t", pane, "-l", f"codex resume {thread_id}") is None:
+        print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
+        sys.exit(1)
+    if run_tmux("send-keys", "-t", pane, "C-m") is None:
+        print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if pane != target:
         print(f"resolved: target={target} pane={pane}")
 
-    thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
+    thread_arg, msg_mode, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
+
+    resolved_thread = ""
+    if thread_arg and thread_arg != "auto":
+        if restart_codex and not is_thread_id(thread_arg):
+            print(f"error: invalid thread_id '{thread_arg}'", file=sys.stderr)
+            sys.exit(1)
+        if is_thread_id(thread_arg):
+            resolved_thread = thread_arg.lower()
+    else:
+        resolved_thread = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
 
     if not msg_explicit:
-        tid = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
-        if tid and is_thread_id(tid):
-            ss = _read_session_state(tid)
+        if resolved_thread and is_thread_id(resolved_thread):
+            ss = _read_session_state(resolved_thread)
             msg = ss.get("message", "")
             if msg:
                 msg_mode, msg_value = "inline", msg
@@ -1263,11 +1303,22 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         msg_value = DEFAULT_MSG_FILE
 
     if not thread_arg:
-        thread_arg = detect_thread_id_for_pane(pane) or ""
-        if not thread_arg:
-            thread_arg = thread_from_running_watcher_for_pane(pane) or ""
+        thread_arg = resolved_thread
+
+    if restart_codex:
+        if not resolved_thread or not is_thread_id(resolved_thread):
+            print(
+                f"error: could not determine thread_id for pane={pane}; "
+                "--restart-codex requires a concrete thread id",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     stop_pane_watchers(pane)
+
+    if restart_codex:
+        print(f"restarting codex: pane={pane} thread_id={resolved_thread}")
+        _restart_codex_in_pane(pane, resolved_thread)
 
     start_args: list[str] = [pane]
     if thread_arg:
