@@ -943,7 +943,7 @@ def cmd_start(argv: list[str]) -> None:
 
     pane = resolve_start_pane_target(target)
     if pane != target:
-        print(f"resolved: target={target} pane={pane}")
+        _print_progress(f"resolved: target={target} pane={pane}")
     ensure_tmux_window_rename_hook()
 
     thread_arg, msg_mode, msg_value, msg_explicit = parse_thread_and_message_args(rest)
@@ -984,11 +984,11 @@ def cmd_start(argv: list[str]) -> None:
         sys.exit(1)
 
     if thread_arg and thread_arg != "auto":
-        print(f"start: using explicit thread_id for pane={pane}")
+        _print_progress(f"start: using explicit thread_id for pane={pane}")
     else:
-        print(f"start: resolving Codex thread for pane={pane}")
+        _print_progress(f"start: resolving Codex thread for pane={pane}")
     thread_id = resolve_thread_id(pane, thread_arg)
-    print(f"start: thread_id={thread_id}")
+    _print_progress(f"start: thread_id={thread_id}")
 
     # Warn if another watcher is already running for the same thread_id.
     if is_thread_id(thread_id):
@@ -1016,7 +1016,7 @@ def cmd_start(argv: list[str]) -> None:
     })
 
     if (not thread_arg or thread_arg == "auto") and thread_id != "auto":
-        print(f"resolved: pane={pane} thread_id={thread_id}")
+        _print_progress(f"resolved: pane={pane} thread_id={thread_id}")
 
     Path(pf).unlink(missing_ok=True)
 
@@ -1038,7 +1038,7 @@ def cmd_start(argv: list[str]) -> None:
     if proc.poll() is None:
         with open(pf, "w") as f:
             f.write(str(proc.pid))
-        print(f"started: pid={proc.pid} pane={pane} thread_id={thread_id}")
+        _print_progress(f"started: pid={proc.pid} pane={pane} thread_id={thread_id}")
         return
 
     Path(pf).unlink(missing_ok=True)
@@ -1274,7 +1274,7 @@ def _restart_panes(panes: list[str]) -> None:
             stop_pane_watchers(pane)
             continue
 
-        print(f"--- restarting {pane} ---")
+        _print_progress(f"--- restarting {pane} ---")
         _restart_one(pane, pane, [])
         restarted += 1
 
@@ -1311,8 +1311,8 @@ def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
 
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if pane != target:
-        print(f"resolved: target={target} pane={pane}")
-    print(f"restart: preparing pane={pane}")
+        _print_progress(f"resolved: target={target} pane={pane}")
+    _print_progress(f"restart: preparing pane={pane}")
 
     thread_arg, msg_mode, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
 
@@ -1324,15 +1324,15 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         if is_thread_id(thread_arg):
             resolved_thread = thread_arg.lower()
     else:
-        print(f"restart: resolving Codex thread for pane={pane}")
+        _print_progress(f"restart: resolving Codex thread for pane={pane}")
         resolved_thread = detect_thread_id_for_pane(pane) or thread_from_running_watcher_for_pane(pane) or ""
     if resolved_thread:
-        print(f"restart: thread_id={resolved_thread}")
+        _print_progress(f"restart: thread_id={resolved_thread}")
     else:
-        print(f"restart: thread_id unresolved for pane={pane}")
+        _print_progress(f"restart: thread_id unresolved for pane={pane}")
 
     if not msg_explicit:
-        print(f"restart: loading saved continue message for pane={pane}")
+        _print_progress(f"restart: loading saved continue message for pane={pane}")
         if resolved_thread and is_thread_id(resolved_thread):
             ss = _read_session_state(resolved_thread)
             msg = ss.get("message", "")
@@ -1354,14 +1354,14 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
             )
             sys.exit(1)
 
-    print(f"restart: stopping watcher for pane={pane}")
+    _print_progress(f"restart: stopping watcher for pane={pane}")
     stop_pane_watchers(pane)
 
     if restart_codex:
-        print(f"restarting codex: pane={pane} thread_id={resolved_thread}")
+        _print_progress(f"restarting codex: pane={pane} thread_id={resolved_thread}")
         _restart_codex_in_pane(pane, resolved_thread)
 
-    print(f"restart: starting watcher for pane={pane}")
+    _print_progress(f"restart: starting watcher for pane={pane}")
     start_args: list[str] = [pane]
     if thread_arg:
         start_args.append(thread_arg)
@@ -2449,6 +2449,10 @@ def print_help(file=None) -> None:
         file = sys.stdout
     prog = os.path.basename(sys.argv[0]) or "acw"
     print(build_help_text(prog), file=file)
+
+
+def _print_progress(message: str) -> None:
+    print(message, flush=True)
 
 
 def main() -> None:
