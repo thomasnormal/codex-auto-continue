@@ -101,7 +101,7 @@ acw start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
 acw                  Show status
 acw status --details Show full watcher details
 acw start <target>   Start a watcher
-acw stop [target]    Stop one watcher or all watchers
+acw stop [target]    Stop one watcher or all watchers, and forget saved session state
 acw pause [target]   Pause one watcher or all watchers
 acw resume [target]  Resume one or more paused watchers, or all paused watchers
 acw restart [target] Restart one watcher or all watchers
@@ -121,6 +121,13 @@ acw restart
 `resume` restarts paused watchers from the current pane/thread state instead of
 thawing the old stopped process. That avoids replaying buffered Codex log
 history after a long pause.
+
+`stop` is the destructive "stop managing this session" operation. It removes
+the saved `acw_session.<thread>.json` state so the row disappears from `acw`
+status immediately. Use `pause` if you plan to resume the same watcher later.
+
+`acw status` only shows managed sessions now. A random live Codex pane with no
+saved `acw` session is ignored instead of being reported as an invariant error.
 
 `resume` also accepts multiple explicit targets:
 

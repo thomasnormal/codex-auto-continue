@@ -105,7 +105,7 @@ def build_help_text(prog: str) -> str:
 Commands:
   status    Show watcher state. Default command when no subcommand is given.
   start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
-  stop      Stop one watcher, one pane's watchers, or all watchers.
+  stop      Stop one watcher, one pane's watchers, or all watchers, and forget their saved sessions.
   pause     Send SIGSTOP to one watcher, or all watchers when no target is given.
   resume    Restart one or more paused watchers, or all paused watchers, from current state.
   restart   Restart one watcher or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
@@ -209,6 +209,19 @@ def _write_session_state(thread_id: str, data: dict) -> None:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def _remove_session_state(thread_id: str) -> bool:
+    if not is_thread_id(thread_id):
+        return False
+    path = Path(state_file_for_thread(thread_id.lower()))
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1142,12 +1155,28 @@ def stop_pid_file(pid_file: str) -> None:
 
 
 def stop_pane_watchers(pane: str) -> None:
+    model = _build_runtime_model()
     key = key_from_pane(pane)
     pf = pid_file_for_key(key)
     pane_pids = watcher_pids_for_pane(pane)
+    session_threads: set[str] = set()
+    for watcher in _runtime_watchers_for_pane(model, pane):
+        if is_thread_id(watcher.thread_id) and _runtime_session_for_thread(model, watcher.thread_id):
+            session_threads.add(watcher.thread_id.lower())
+    pane_record = model.panes_by_id.get(pane)
+    if pane_record and is_thread_id(pane_record.detected_thread):
+        session = _runtime_session_for_thread(model, pane_record.detected_thread)
+        if session:
+            session_threads.add(session.thread_id.lower())
     if not pane_pids:
         Path(pf).unlink(missing_ok=True)
-        print(f"not running: pane={pane}")
+        removed_any = False
+        for thread_id in sorted(session_threads):
+            if _remove_session_state(thread_id):
+                removed_any = True
+                print(f"forgot session: pane={pane} thread_id={thread_id}")
+        if not removed_any:
+            print(f"not running: pane={pane}")
         return
 
     for pid_str in pane_pids:
@@ -1161,6 +1190,9 @@ def stop_pane_watchers(pane: str) -> None:
             pass
         print(f"stopped: pane={pane} pid={pid_str}")
     Path(pf).unlink(missing_ok=True)
+    for thread_id in sorted(session_threads):
+        if _remove_session_state(thread_id):
+            print(f"forgot session: pane={pane} thread_id={thread_id}")
 
 
 def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
@@ -1178,6 +1210,7 @@ def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
 
 def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
     """Stop watcher processes given rows from watcher_rows()."""
+    forgotten_threads: set[str] = set()
     for r in rows:
         pid_str = r["pid"]
         if not pid_str.isdigit():
@@ -1192,6 +1225,12 @@ def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
         key = key_from_pane(r["pane"])
         Path(pid_file_for_key(key)).unlink(missing_ok=True)
         print(f"stopped: pane={r['pane']} pid={pid_str}")
+        thread_id = r.get("thread", "").lower()
+        if thread_id in forgotten_threads:
+            continue
+        forgotten_threads.add(thread_id)
+        if _remove_session_state(thread_id):
+            print(f"forgot session: pane={r['pane']} thread_id={thread_id}")
 
 
 def cmd_stop(argv: list[str]) -> None:
@@ -1244,6 +1283,13 @@ def cmd_stop(argv: list[str]) -> None:
 
     if not had_any:
         print("not running")
+    forgotten = 0
+    for session in _load_session_records():
+        if _remove_session_state(session.thread_id):
+            forgotten += 1
+            print(f"forgot session: thread_id={session.thread_id}")
+    if not had_any and forgotten == 0:
+        return
 
 
 def cmd_pause(argv: list[str]) -> None:
@@ -2341,30 +2387,11 @@ def _build_status_entries_from_snapshot(
         if pane.pane_id in watched_panes:
             continue
         if not is_thread_id(pane.detected_thread):
-            if not pane.has_codex_process:
-                continue
-            anomalies = _unresolved_live_pane_anomalies(pane)
-            entries.append((
-                {
-                    "entity_kind": "unresolved_pane",
-                    "pid": "",
-                    "pane": pane.pane_id,
-                    "thread": "",
-                    "name": "",
-                    "session_name": "",
-                    "state": "",
-                    "watch": "",
-                    "msg_inline": "",
-                    "anomalies": tuple(anomalies),
-                    "anomaly_detail": "; ".join(anomalies),
-                },
-                pane.pane_id,
-                pane.window_label,
-            ))
             continue
         session = _runtime_session_for_thread(model, pane.detected_thread)
-        if session:
-            claimed_session_threads.add(session.thread_id)
+        if not session:
+            continue
+        claimed_session_threads.add(session.thread_id)
         anomalies = _unwatched_pane_anomalies(model, pane)
         entries.append((
             {

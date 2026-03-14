@@ -468,6 +468,26 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("existing watcher for pane=%8 is using thread", err.getvalue())
 
+    def test_cmd_stop_by_name_forgets_saved_session_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "name": "acw", "message": "continue"})
+                with patch.object(
+                    acw,
+                    "watcher_rows",
+                    return_value=[{"pane": "%9", "thread": THREAD, "pid": "1234"}],
+                ):
+                    with patch.object(acw, "_is_pid_stopped", return_value=False):
+                        with patch.object(acw.os, "kill") as kill:
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_stop(["acw"])
+                self.assertFalse(Path(acw.state_file_for_thread(THREAD)).exists())
+        self.assertEqual([((1234, acw.signal.SIGTERM),)], kill.call_args_list)
+        text = out.getvalue()
+        self.assertIn("stopped: pane=%9 pid=1234", text)
+        self.assertIn("forgot session: pane=%9", text)
+
     def test_resolve_start_pane_target_rejects_thread_id(self):
         err = io.StringIO()
         with redirect_stderr(err):
@@ -565,7 +585,7 @@ class WatchdUnitTests(unittest.TestCase):
             rendered,
         )
 
-    def test_status_summary_surfaces_unresolved_live_codex_pane_instead_of_guessing(self):
+    def test_status_summary_skips_unmanaged_unresolved_live_codex_pane(self):
         snapshot = _snapshot(
             panes=(_pane_record(
                 "%7",
@@ -585,12 +605,8 @@ class WatchdUnitTests(unittest.TestCase):
                             with redirect_stdout(out):
                                 acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Sessions: 1", text)
-        self.assertIn("0:7:formal/%7", text)
-        self.assertIn(
-            "Invariant error: live Codex pane %7 has a Codex process but no detectable thread id",
-            text,
-        )
+        self.assertIn("Sessions: 0", text)
+        self.assertIn("(none)", text)
 
     def test_doctor_plain_output_shows_recommended_command(self):
         report = acw.DoctorReport(
@@ -893,6 +909,33 @@ class WatchdUnitTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("Sessions: 1", text)
         self.assertIn("formal", text)
+
+    def test_status_skips_unmanaged_live_codex_pane_without_saved_session(self):
+        snapshot = _snapshot(
+            panes=(_pane_record("%9", THREAD, window_label="0:9:acw", window_name="acw"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Sessions: 0", text)
+        self.assertIn("(none)", text)
+        self.assertNotIn("acw/%9", text)
+
+    def test_status_shows_unwatched_live_codex_pane_when_saved_session_exists(self):
+        snapshot = _snapshot(
+            panes=(_pane_record("%9", THREAD, window_label="0:9:acw", window_name="acw"),),
+            sessions=(_session_record(THREAD, name="acw", message="continue"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                acw.cmd_status(["--details"])
+        text = out.getvalue()
+        self.assertIn("Sessions (details): 1", text)
+        self.assertIn("WINDOW:          0:9:acw", text)
+        self.assertIn("ANOMALY:         no watcher for live Codex pane", text)
 
     def test_status_prints_tmux_recovery_hint_when_metadata_is_unavailable(self):
         snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
