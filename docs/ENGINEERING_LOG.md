@@ -2,6 +2,8 @@
 
 ## 2026-03-14
 
+- Change: sandboxed `test/test_watchd_unit.py` onto a per-test temporary `STATE_DIR`. The daemon-RPC command stubs in that suite write synthetic thread ids like `11111111...`, so the whole suite now isolates SQLite state instead of risking writes to the real `~/.codex/acw_state.sqlite` during local test runs.
+- Realization: the dead `11111111…1111` session row that kept reappearing in live `acw status` was not a daemon/runtime bug at all. It was test contamination: unit-test helper stubs were writing the synthetic `THREAD` constant into the operator’s real state DB whenever a command test exercised the patched daemon path without overriding `STATE_DIR`.
 - Change: added a first-class daemon control socket at `~/.codex/acw_daemon.<scope>.sock`. Mutating commands now send one local JSON RPC to the shared daemon instead of writing SQLite state directly and polling for convergence from the CLI.
 - Change: the daemon now owns the convergence wait and progress stream for `start`/`stop`/`pause`/`resume`/`restart`/`edit`/`migrate`. That makes restart-codex progress and daemon-side failures visible immediately while keeping SQLite as the durable source of truth.
 - Realization: once the daemon became the only runtime, the remaining CLI-side "write state, then spin on the DB" path was just accidental complexity. The Unix-socket RPC path is simpler because the daemon already owns the in-memory runtime map and can reconcile immediately after each mutation.

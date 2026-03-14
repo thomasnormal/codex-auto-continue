@@ -133,6 +133,9 @@ def _legacy_record(
 class WatchdUnitTests(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        self._state_dir_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_dir_tmp.cleanup)
+
         def _daemon_upsert_stub(
             thread_id,
             *,
@@ -192,6 +195,7 @@ class WatchdUnitTests(unittest.TestCase):
             return None
 
         self._patchers = [
+            patch.object(acw, "STATE_DIR", self._state_dir_tmp.name),
             patch.object(acw, "_read_runtime_rows", return_value=[]),
             patch.object(acw, "_daemon_rpc_upsert_session", side_effect=_daemon_upsert_stub),
             patch.object(acw, "_daemon_rpc_patch_session", side_effect=_daemon_patch_stub),
