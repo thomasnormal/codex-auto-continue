@@ -320,7 +320,7 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_status_window_pane_cell_splits_thread_and_runtime_lines(self):
         self.assertEqual(
-            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]runtime=1843260[/dim]",
+            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]id=1843260[/dim]",
             acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "1843260"),
         )
 
@@ -611,7 +611,7 @@ class WatchdUnitTests(unittest.TestCase):
                             with redirect_stdout(out):
                                 acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Invariant error: pane %7 watcher runtime=707 is bound to the wrong thread.", text)
+        self.assertIn("Invariant error: pane %7 watcher id=707 is bound to the wrong thread.", text)
         self.assertIn("Fix: acw repair %7", text)
 
     def test_status_summary_falls_back_without_rich(self):
@@ -717,7 +717,7 @@ class WatchdUnitTests(unittest.TestCase):
                             with self.assertRaises(SystemExit) as ctx:
                                 acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
-        self.assertIn("another watcher (runtime=1234 pane=%6) is already watching thread", err.getvalue())
+        self.assertIn("another watcher (id=1234 pane=%6) is already watching thread", err.getvalue())
 
     def test_start_uses_daemon_rpc_upsert_session(self):
         out = io.StringIO()
@@ -1388,7 +1388,7 @@ class WatchdUnitTests(unittest.TestCase):
                             acw.cmd_status(["--details"])
         text = out.getvalue()
         self.assertIn("PANE:            %7", text)
-        self.assertIn("RUNTIME_ID:      1234", text)
+        self.assertIn("ID:              1234", text)
         self.assertIn("STATE:           error", text)
         self.assertIn("ANOMALY:         tmux pane %7 is missing", text)
         self.assertIn("WINDOW:          formal", text)

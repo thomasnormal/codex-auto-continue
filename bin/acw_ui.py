@@ -25,7 +25,7 @@ def status_window_pane_cell(window_label: str, current_pane: str, thread_id: str
     if _is_thread_id(thread_id):
         lines.append(f"[dim]{_short_thread_id(thread_id)}[/dim]")
     if runtime_id:
-        lines.append(f"[dim]runtime={runtime_id}[/dim]")
+        lines.append(f"[dim]id={runtime_id}[/dim]")
     return "\n".join(lines)
 
 

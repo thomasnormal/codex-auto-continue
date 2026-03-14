@@ -1769,7 +1769,7 @@ def _validate_existing_pane_watcher(
     if other:
         return (
             f"error: existing watcher for pane={pane} is duplicated; pane={other['pane']} "
-            f"runtime={other.get('runtime_id') or other.get('pid', '?')} is already watching thread {thread_id[:8]}…",
+            f"id={other.get('runtime_id') or other.get('pid', '?')} is already watching thread {thread_id[:8]}…",
             f"hint: inspect 'acw repair {pane} --dry-run' or stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
         )
     if anomalies:
@@ -1840,7 +1840,7 @@ def cmd_start(argv: list[str]) -> None:
     other = _other_watcher_for_thread(pane, thread_id)
     if other:
         print(
-            f"error: another watcher (runtime={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
+            f"error: another watcher (id={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
             f"is already watching thread {thread_id[:8]}…",
             file=sys.stderr,
         )
@@ -2540,7 +2540,7 @@ def cmd_migrate(argv: list[str]) -> None:
         runtime_id = row.get("runtime_id") or row.get("pid", "")
         daemon_pid = row.get("daemon_pid", "")
         print(
-            f"migrated: pane={record.pane} thread_id={record.thread_id} runtime={runtime_id} daemon_pid={daemon_pid}"
+            f"migrated: pane={record.pane} thread_id={record.thread_id} id={runtime_id} daemon_pid={daemon_pid}"
         )
         migrated += 1
 
@@ -3071,7 +3071,7 @@ def _strict_thread_for_pane(model: RuntimeModel, pane: str) -> tuple[str, str]:
     if watchers:
         if not is_thread_id(watchers[0].thread_id):
             runtime_id = watchers[0].pid or "?"
-            return "", f"pane {pane} watcher runtime={runtime_id} has an invalid thread id"
+            return "", f"pane {pane} watcher id={runtime_id} has an invalid thread id"
         watcher_thread = watchers[0].thread_id.lower()
 
     if watcher_thread and watcher_thread != live_thread:
@@ -3578,7 +3578,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         runtime_id = row.get("runtime_id") or row.get("pid", "?")
         if "no saved session" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher runtime={runtime_id} has no saved session. "
+                f"Invariant error: pane {pane} watcher id={runtime_id} has no saved session. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3586,7 +3586,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if "no live Codex agent detected in pane" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher runtime={runtime_id} has no live Codex agent in the pane. "
+                f"Invariant error: pane {pane} watcher id={runtime_id} has no live Codex agent in the pane. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3594,7 +3594,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("could not determine thread_id") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher runtime={runtime_id} has a live Codex process but its thread id "
+                f"Invariant error: pane {pane} watcher id={runtime_id} has a live Codex process but its thread id "
                 f"could not be detected. Fix: acw repair {pane} --dry-run"
             )
             if msg not in seen:
@@ -3602,7 +3602,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("pane agent thread is ") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher runtime={runtime_id} is bound to the wrong thread. "
+                f"Invariant error: pane {pane} watcher id={runtime_id} is bound to the wrong thread. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3720,7 +3720,7 @@ def _status_details(
         print(f"  {'WINDOW:':<16} {window_label}")
         print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
         runtime_id = r.get("runtime_id") or r.get("pid", "")
-        print(f"  {'RUNTIME_ID:':<16} {runtime_id or '-'}")
+        print(f"  {'ID:':<16} {runtime_id or '-'}")
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
         pane_record = model.panes_by_id.get(current_pane) if current_pane else None
         provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
@@ -4326,7 +4326,7 @@ def _doctor_report(target: str = "") -> DoctorReport:
         recommendations.append(f"acw stop {shlex.quote(pane)}")
     elif rows:
         watcher = rows[0]
-        checks.append(("ok", f"watcher running: pane={pane} runtime={watcher.pid}"))
+        checks.append(("ok", f"watcher running: pane={pane} id={watcher.pid}"))
         anomalies = _watcher_anomalies(model, watcher)
         if anomalies:
             detail = "; ".join(anomalies)

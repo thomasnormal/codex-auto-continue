@@ -111,7 +111,7 @@ Observed managed-worker state lives in:
 The `runtimes` table is written by the daemon and describes the currently
 attached live session runtime for one managed session:
 
-- daemon-assigned runtime id (`runtime=` in the UI; it identifies one live
+- daemon-assigned runtime id (`id=` in the UI; it identifies one live
   managed session runtime and is not an OS pid)
 - daemon pid
 - pane
