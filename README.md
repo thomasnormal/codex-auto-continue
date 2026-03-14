@@ -113,13 +113,12 @@ acw pause [target]   Pause one managed session or all managed sessions
 acw resume [target]  Resume one or more paused managed sessions, or all paused managed sessions
 acw restart [target] Restart one managed session or all managed sessions
 acw edit <target>    Edit the stored continue prompt, then restart
-acw migrate          Import running legacy per-pane watchers into the daemon-backed model
 acw repair [target]  Inspect or apply safe live-state repairs
-acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
+acw doctor [target]  Diagnose tmux, auth, pane, and runtime state
 acw cleanup          Remove dead saved sessions and stale daemon/runtime rows
 ```
 
-For all-watcher operations, use the no-target forms:
+For the all-managed-session operations, use the no-target forms:
 
 ```bash
 acw pause
@@ -133,7 +132,7 @@ Codex log history after a long pause.
 
 `stop` is the destructive "stop managing this session" operation. It removes
 the saved session row from `~/.codex/acw_state.sqlite` so the row disappears from `acw`
-status immediately. Use `pause` if you plan to resume the same watcher later.
+status immediately. Use `pause` if you plan to resume the same managed session later.
 
 `acw status` only shows managed sessions now. A random live Codex pane with no
 saved `acw` session is ignored instead of being reported as an invariant error.
@@ -146,18 +145,12 @@ acw resume formal aot
 
 For a single target, `acw restart <target> --restart-codex` also relaunches
 Codex in that pane with `codex resume <thread-id>` before restarting the
-watcher. This is the same-session restart path when the pane needs a fresh
-Codex process, not just a fresh watcher.
+runtime. This is the same-session restart path when the pane needs a fresh
+Codex process, not just a fresh runtime.
 
-`acw restart` with no target now also recovers dead watchers whose Codex panes
+`acw restart` with no target now also recovers dead managed sessions whose Codex panes
 are still live. It restarts from the saved thread/message state instead of
 requiring a fresh `acw start`.
-
-`migrate` is the one-shot upgrade path from the old per-pane watcher model. It
-scans the current tmux scope for running `auto_continue_logwatch.py`
-processes, stops them, imports their saved session state into
-`~/.codex/acw_state.sqlite`, starts the shared daemon, and waits for the new
-runtime rows to come up on the same panes/threads/messages.
 
 `repair` is the live-state recovery workflow. With no target, `acw repair`
 defaults to a dry run and shows safe automatic repairs plus manual blockers
@@ -334,10 +327,14 @@ Canonical watcher/session state is stored under:
 ~/.codex/acw_state.sqlite
 ```
 
-The `sessions` table holds desired manager state, and the `runtimes` table
-holds the daemon-owned observed runtime rows for the current tmux scope. The
-daemon also writes `acw_daemon.<scope>.pid`, `acw_daemon.<scope>.sock`,
+The `agents` table holds desired manager state, the `agent_runtimes` table
+holds the daemon-owned observed runtime rows for the current tmux scope, and
+the `daemon_scopes` table records the shared daemon heartbeat for that tmux
+scope. The daemon writes `acw_daemon.<scope>.pid`,
 `acw_daemon.<scope>.log`, and per-pane watch logs under `~/.codex/`.
+The control socket lives in a short per-user runtime dir such as
+`$XDG_RUNTIME_DIR/acw-<uid>/` or `/tmp/acw-<uid>/` so private tmux-socket
+tests do not hit the Unix-socket path-length limit.
 
 ## Development And Tests
 

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import subprocess
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
 import acw_rpc  # noqa: E402
+import acw_state  # noqa: E402
 import auto_continue_watchd as acw  # noqa: E402
 
 
@@ -106,27 +108,6 @@ def _snapshot(
         panes=tuple(panes),
         watchers=tuple(watchers),
         sessions=tuple(sessions),
-    )
-
-
-def _legacy_record(
-    *,
-    pid: str = "4242",
-    pane: str = "%7",
-    thread_id: str = THREAD,
-    tmux_socket: str = "/tmp/tmux-1000/default",
-    state_file: str = "/state/acw_session.1111.json",
-    watch_log: str = "/state/auto_continue_logwatch._7.log",
-    paused: bool = False,
-) -> acw.LegacyWatcherRecord:
-    return acw.LegacyWatcherRecord(
-        pid=pid,
-        pane=pane,
-        thread_id=thread_id.lower(),
-        tmux_socket=tmux_socket,
-        state_file=state_file,
-        watch_log=watch_log,
-        paused=paused,
     )
 
 
@@ -233,6 +214,32 @@ class WatchdUnitTests(unittest.TestCase):
                     acw.main()
         self.assertIn("Usage:\n  acw status", out.getvalue())
 
+    def test_help_text_no_longer_mentions_migrate(self):
+        text = acw.build_help_text("acw")
+        self.assertNotIn("migrate", text)
+
+    def test_help_text_uses_managed_session_terms(self):
+        text = acw.build_help_text("acw")
+        self.assertIn("Show managed session state", text)
+        self.assertIn("Start managing a live tmux target", text)
+        self.assertNotIn("Show watcher state", text)
+        self.assertNotIn("Start a watcher", text)
+
+    def test_daemon_socket_file_for_long_tmux_scope_stays_within_unix_limit(self):
+        long_scope = (
+            "/home/thomas-ahle/.codex/auto-continue-e2e-tmp/"
+            "real-codex-s2u7nxzm/tmux/tmux.sock"
+        )
+        long_state_dir = (
+            "/home/thomas-ahle/.codex/auto-continue-e2e-tmp/"
+            "real-codex-s2u7nxzm/home/.codex"
+        )
+        with patch.object(acw, "STATE_DIR", long_state_dir):
+            socket_path = acw.daemon_socket_file_for_scope(long_scope)
+
+        self.assertTrue(socket_path.endswith(".sock"))
+        self.assertLess(len(socket_path), 100)
+
     def test_parse_thread_and_message_args_rejects_message_file(self):
         err = io.StringIO()
         with redirect_stderr(err):
@@ -274,6 +281,19 @@ class WatchdUnitTests(unittest.TestCase):
 
         self.assertEqual({"ok": True}, payload)
         self.assertIn("progress:ping", out.getvalue())
+
+    def test_daemon_rpc_call_backfills_daemon_scope_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                with patch.object(acw, "_ensure_daemon_running", return_value="4321"):
+                    with patch.object(acw.acw_rpc, "call", return_value={"ok": True}):
+                        payload = acw._daemon_rpc_call("ping", {}, timeout_secs=0.5)
+                scope_state = acw._read_daemon_scope_state()
+
+        self.assertEqual("4321", payload["daemon_pid"])
+        self.assertEqual("4321", scope_state["daemon_pid"])
+        self.assertTrue(scope_state["socket_path"].endswith("acw_daemon.default.sock"))
+        self.assertNotEqual("", scope_state["heartbeat_ts"])
 
     def test_daemon_handle_upsert_session_request_reconciles_runtime(self):
         with tempfile.TemporaryDirectory() as td:
@@ -318,6 +338,196 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual("running", payload["row"]["runtime_status"])
         self.assertEqual("%7", state["pane"])
         self.assertEqual("formal", state["name"])
+
+    def test_sqlite_store_migrates_legacy_tables_into_agent_schema(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = acw_state.state_db_path(td)
+            alive_pid = str(os.getpid())
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE sessions (
+                        thread_id TEXT PRIMARY KEY,
+                        pane TEXT NOT NULL DEFAULT '',
+                        name TEXT NOT NULL DEFAULT '',
+                        message TEXT NOT NULL DEFAULT '',
+                        tmux_socket TEXT NOT NULL DEFAULT '',
+                        paused INTEGER NOT NULL DEFAULT 0,
+                        generation INTEGER NOT NULL DEFAULT 0,
+                        health TEXT NOT NULL DEFAULT '',
+                        health_detail TEXT NOT NULL DEFAULT '',
+                        health_ts TEXT NOT NULL DEFAULT '',
+                        last_continue_at TEXT NOT NULL DEFAULT '',
+                        last_handled_turn TEXT NOT NULL DEFAULT '',
+                        last_handled_thread TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE runtimes (
+                        thread_id TEXT PRIMARY KEY,
+                        runtime_id TEXT NOT NULL DEFAULT '',
+                        daemon_pid TEXT NOT NULL DEFAULT '',
+                        pane TEXT NOT NULL DEFAULT '',
+                        state_ref TEXT NOT NULL DEFAULT '',
+                        watch_log TEXT NOT NULL DEFAULT '',
+                        cwd TEXT NOT NULL DEFAULT '',
+                        message_inline TEXT NOT NULL DEFAULT '',
+                        tmux_socket TEXT NOT NULL DEFAULT '',
+                        paused INTEGER NOT NULL DEFAULT 0,
+                        runtime_status TEXT NOT NULL DEFAULT '',
+                        runtime_detail TEXT NOT NULL DEFAULT '',
+                        generation INTEGER NOT NULL DEFAULT 0,
+                        worker_label TEXT NOT NULL DEFAULT '',
+                        heartbeat_ts TEXT NOT NULL DEFAULT ''
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sessions(
+                        thread_id, pane, name, message, tmux_socket, paused, generation,
+                        health, health_detail, health_ts, last_continue_at,
+                        last_handled_turn, last_handled_thread
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        THREAD,
+                        "%7",
+                        "formal",
+                        "continue by docs/FORMAL_PLAN.md",
+                        "",
+                        0,
+                        3,
+                        "ok",
+                        "",
+                        "",
+                        "2026-03-14 12:00:00",
+                        "turn-7",
+                        THREAD,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO runtimes(
+                        thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
+                        message_inline, tmux_socket, paused, runtime_status, runtime_detail,
+                        generation, worker_label, heartbeat_ts
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        THREAD,
+                        "runtime-7",
+                        alive_pid,
+                        "%7",
+                        "sqlite:session:11111111-1111-1111-1111-111111111111",
+                        "/state/watch.log",
+                        "/repo",
+                        "continue by docs/FORMAL_PLAN.md",
+                        "",
+                        0,
+                        "running",
+                        "",
+                        3,
+                        "runtime-7",
+                        "2026-03-14 12:01:00",
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            sessions = acw_state.load_sessions(state_dir=td, scope="")
+            runtimes = acw_state.read_runtime_rows(state_dir=td, scope="")
+
+            conn = sqlite3.connect(db_path)
+            try:
+                agent_row = conn.execute(
+                    "SELECT agent_id, thread_id, pane, name, message FROM agents"
+                ).fetchone()
+                runtime_row = conn.execute(
+                    "SELECT agent_id, runtime_id, generation FROM agent_runtimes"
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(1, len(sessions))
+        self.assertEqual(1, len(runtimes))
+        self.assertIsNotNone(agent_row)
+        self.assertEqual(THREAD, agent_row[1])
+        self.assertEqual("%7", agent_row[2])
+        self.assertEqual("formal", agent_row[3])
+        self.assertEqual("continue by docs/FORMAL_PLAN.md", agent_row[4])
+        self.assertIsNotNone(runtime_row)
+        self.assertEqual("runtime-7", runtime_row[1])
+        self.assertEqual(3, runtime_row[2])
+
+    def test_sqlite_store_enforces_unique_scope_pane_and_thread_per_agent(self):
+        acw._write_session_state(
+            THREAD,
+            {
+                "thread_id": THREAD,
+                "pane": "%7",
+                "name": "formal",
+                "message": "continue",
+                "tmux_socket": "",
+            },
+        )
+        db_path = acw_state.state_db_path(acw.STATE_DIR)
+        conn = sqlite3.connect(db_path)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    """
+                    INSERT INTO agents(
+                        agent_id, thread_id, pane, name, message, tmux_socket,
+                        paused, generation, health, health_detail, health_ts,
+                        last_continue_at, last_handled_turn, last_handled_thread
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "agent-other-pane",
+                        OTHER_THREAD,
+                        "%7",
+                        "aot",
+                        "continue",
+                        "",
+                        0,
+                        0,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    """
+                    INSERT INTO agents(
+                        agent_id, thread_id, pane, name, message, tmux_socket,
+                        paused, generation, health, health_detail, health_ts,
+                        last_continue_at, last_handled_turn, last_handled_thread
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "agent-other-thread",
+                        THREAD,
+                        "%8",
+                        "aot",
+                        "continue",
+                        "",
+                        0,
+                        0,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ),
+                )
+        finally:
+            conn.close()
 
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
@@ -368,88 +578,70 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "_read_session_state", return_value={"message": "continue by docs/DDR3_PLAN.md"}):
             self.assertEqual("continue by docs/DDR3_PLAN.md", acw._message_summary_for_row(row))
 
-    def test_parse_legacy_watcher_argv_extracts_required_fields(self):
-        argv = [
-            "python3",
-            "/repo/bin/auto_continue_logwatch.py",
-            "--pane",
-            "%6",
-            "--thread-id",
-            THREAD,
-            "--tmux-socket",
-            "/tmp/tmux-1000/default",
-            "--state-file",
-            "/tmp/acw_session.json",
-            "--watch-log",
-            "/tmp/auto_continue_logwatch._6.log",
-        ]
-
-        record = acw._parse_legacy_watcher_argv(argv, pid="4242", process_state="T")
-
-        self.assertEqual(
-            _legacy_record(
-                pid="4242",
-                pane="%6",
-                thread_id=THREAD,
-                tmux_socket="/tmp/tmux-1000/default",
-                state_file="/tmp/acw_session.json",
-                watch_log="/tmp/auto_continue_logwatch._6.log",
-                paused=True,
+    def test_status_summary_reports_shared_daemon_failure_once(self):
+        snapshot = _snapshot(
+            panes=(
+                _pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),
+                _pane_record("%7", OTHER_THREAD, window_label="0:7:aot", window_name="aot"),
             ),
-            record,
+            sessions=(
+                _session_record(THREAD, name="formal"),
+                _session_record(OTHER_THREAD, name="aot", state_file="/state/acw_session.other.json"),
+            ),
         )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            with patch.object(
+                                acw,
+                                "_read_daemon_scope_state",
+                                create=True,
+                                return_value={
+                                    "daemon_pid": "9999",
+                                    "socket_path": "/tmp/acw.sock",
+                                    "heartbeat_ts": "2026-03-14 12:00:00",
+                                    "alive": False,
+                                    "detail": "pid file exists but process is dead",
+                                },
+                            ):
+                                out = io.StringIO()
+                                with redirect_stdout(out):
+                                    acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Shared daemon error:", text)
+        self.assertNotIn("live Codex pane %6 has thread", text)
+        self.assertNotIn("live Codex pane %7 has thread", text)
 
-    def test_cmd_migrate_imports_legacy_watcher_into_sqlite_state(self):
+    def test_status_summary_reports_shared_daemon_failure_without_scope_row(self):
+        snapshot = _snapshot(
+            panes=(
+                _pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),
+                _pane_record("%7", OTHER_THREAD, window_label="0:7:aot", window_name="aot"),
+            ),
+            sessions=(
+                _session_record(THREAD, name="formal"),
+                _session_record(OTHER_THREAD, name="aot", state_file="/state/acw_session.other.json"),
+            ),
+        )
         with tempfile.TemporaryDirectory() as td:
-            state_file = Path(td) / "acw_session.legacy.json"
-            state_file.write_text(
-                json.dumps(
-                    {
-                        "thread_id": THREAD,
-                        "pane": "%7",
-                        "name": "formal",
-                        "message": "continue by plan",
-                        "generation": 2,
-                        "last_handled_turn": "turn-7",
-                        "last_handled_thread": THREAD,
-                        "last_continue_at": "2026-03-14 12:00:00",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            record = _legacy_record(
-                pid="4242",
-                pane="%7",
-                thread_id=THREAD,
-                state_file=str(state_file),
-                tmux_socket="/tmp/tmux-1000/default",
-            )
-            out = io.StringIO()
-            err = io.StringIO()
+            Path(td, "acw_daemon.default.pid").write_text("999999\n", encoding="utf-8")
             with patch.object(acw, "STATE_DIR", td):
-                with patch.object(acw, "_list_legacy_watchers", return_value=[record]):
-                    with patch.object(acw, "_terminate_legacy_watcher", return_value=(True, "")) as terminate:
-                        with patch.object(acw, "run_tmux", return_value="formal\n"):
-                            with patch.object(acw, "cleanup_stale_files") as cleanup:
-                                with redirect_stdout(out), redirect_stderr(err):
-                                    acw.cmd_migrate([])
-                state = acw._read_session_state(THREAD)
-                self.assertEqual("%7", state["pane"])
-                self.assertEqual("formal", state["name"])
-                self.assertEqual("continue by plan", state["message"])
-                self.assertEqual("turn-7", state["last_handled_turn"])
-                self.assertFalse(state_file.exists())
-                terminate.assert_called_once_with("4242")
-                cleanup.assert_called_once_with(remove_dead_sessions=True)
-            self.assertIn("migrated: pane=%7", out.getvalue())
-            self.assertEqual("", err.getvalue())
-
-    def test_print_status_recommendations_shows_migrate_hint_for_legacy_watchers(self):
-        out = io.StringIO()
-        with patch.object(acw, "_list_legacy_watchers", return_value=[_legacy_record()]):
-            with redirect_stdout(out):
-                acw._print_status_recommendations([])
-        self.assertIn("Hint: run acw migrate to import 1 legacy per-pane watcher.", out.getvalue())
+                with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+                    with patch.object(acw, "_read_state_json", return_value={}):
+                        with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                            with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                                with patch.object(acw, "_is_pid_stopped", return_value=False):
+                                    with patch.object(acw, "_read_daemon_scope_state", return_value={}):
+                                        out = io.StringIO()
+                                        with redirect_stdout(out):
+                                            acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Shared daemon error:", text)
+        self.assertIn("pid file points to dead daemon pid 999999", text)
+        self.assertNotIn("live Codex pane %6 has thread", text)
+        self.assertNotIn("live Codex pane %7 has thread", text)
 
     def test_edit_prefers_persisted_session_message_over_stale_inline_message(self):
         model = acw._build_runtime_model(_snapshot(
@@ -537,7 +729,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 2", text)
         self.assertIn("0:6:formal/%6", text)
         self.assertIn("0:10:aot2/%10", text)
-        self.assertIn("Invariant error: thread 11111111…1111 is watched on panes %10, %6", text)
+        self.assertIn("Invariant error: thread 11111111…1111 has managed runtimes on panes %10, %6", text)
         self.assertIn("Hint: run acw repair --dry-run for live invariant fixes.", text)
 
     def test_status_summary_flags_duplicate_agent_name_on_multiple_threads(self):
@@ -615,7 +807,7 @@ class WatchdUnitTests(unittest.TestCase):
                             with redirect_stdout(out):
                                 acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Invariant error: pane %7 watcher id=707 is bound to the wrong thread.", text)
+        self.assertIn("Invariant error: pane %7 runtime id=707 is bound to the wrong thread.", text)
         self.assertIn("Fix: acw repair %7", text)
 
     def test_status_summary_falls_back_without_rich(self):
@@ -721,7 +913,7 @@ class WatchdUnitTests(unittest.TestCase):
                             with self.assertRaises(SystemExit) as ctx:
                                 acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
-        self.assertIn("another watcher (id=1234 pane=%6) is already watching thread", err.getvalue())
+        self.assertIn("another runtime (id=1234 pane=%6) is already watching thread", err.getvalue())
 
     def test_start_uses_daemon_rpc_upsert_session(self):
         out = io.StringIO()
@@ -777,7 +969,7 @@ class WatchdUnitTests(unittest.TestCase):
                             acw.cmd_start(["uvm", "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         text = err.getvalue()
-        self.assertIn("existing watcher for pane=%8 is duplicated", text)
+        self.assertIn("existing runtime for pane=%8 is duplicated", text)
         self.assertIn("acw stop %8", text)
 
     def test_start_rejects_existing_pane_watcher_with_wrong_explicit_thread(self):
@@ -796,7 +988,7 @@ class WatchdUnitTests(unittest.TestCase):
                         with self.assertRaises(SystemExit) as ctx:
                             acw.cmd_start(["uvm", OTHER_THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
-        self.assertIn("existing watcher for pane=%8 is using thread", err.getvalue())
+        self.assertIn("existing runtime for pane=%8 is using thread", err.getvalue())
 
     def test_cmd_stop_by_name_forgets_saved_session_state(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1036,7 +1228,7 @@ class WatchdUnitTests(unittest.TestCase):
             acw.RepairStep(
                 kind="restart_watcher",
                 target="%7",
-                summary="restart watcher on pane %7",
+                summary="restart runtime on pane %7",
                 auto_apply=True,
                 thread_id=THREAD,
             ),
@@ -1051,7 +1243,7 @@ class WatchdUnitTests(unittest.TestCase):
         with redirect_stdout(out):
             acw._print_repair_plan(steps, dry_run=True)
         text = out.getvalue()
-        self.assertIn("AUTO: restart watcher on pane %7", text)
+        self.assertIn("AUTO: restart runtime on pane %7", text)
         self.assertIn("run: acw repair %7", text)
         self.assertIn("run: acw cleanup", text)
 
@@ -1082,7 +1274,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual(0, report.exit_code)
         self.assertIn("acw restart uvm", report.recommendations)
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
-        self.assertIn("warn:watcher health: warn - rollout channel closed", rendered)
+        self.assertIn("warn:runtime health: warn - rollout channel closed", rendered)
 
     def test_doctor_resolve_target_uses_saved_session_pane(self):
         with patch.object(acw, "_saved_session_panes_for_target", return_value=["%9"]):
@@ -1113,7 +1305,7 @@ class WatchdUnitTests(unittest.TestCase):
         rendered = "\n".join(f"{level}:{msg}" for level, msg in report.checks)
         self.assertIn("error:could not determine thread_id for pane=%7 from the live Codex process", rendered)
         self.assertIn(
-            "error:watcher identity mismatch: could not determine thread_id for pane=%7 from the live Codex process",
+            "error:runtime identity mismatch: could not determine thread_id for pane=%7 from the live Codex process",
             rendered,
         )
 
@@ -1142,7 +1334,7 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_doctor_plain_output_shows_recommended_command(self):
         report = acw.DoctorReport(
-            checks=[("warn", "watcher health: warn - rollout channel closed")],
+            checks=[("warn", "runtime health: warn - rollout channel closed")],
             result="warn",
             exit_code=0,
             recommendations=["acw restart uvm"],
@@ -1432,7 +1624,7 @@ class WatchdUnitTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("Sessions (details): 1", text)
         self.assertIn("WINDOW:          0:9:acw", text)
-        self.assertIn("ANOMALY:         no watcher for live Codex pane", text)
+        self.assertIn("ANOMALY:         no runtime for managed live Codex pane", text)
 
     def test_status_prints_tmux_recovery_hint_when_metadata_is_unavailable(self):
         snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
@@ -1512,7 +1704,7 @@ class WatchdUnitTests(unittest.TestCase):
                 with redirect_stdout(out), redirect_stderr(io.StringIO()):
                     acw.cmd_resume([])
         restart_panes.assert_called_once_with(["%1", "%3"])
-        self.assertIn("resuming 2 paused watcher(s) via restart", out.getvalue())
+        self.assertIn("resuming 2 paused managed session(s) via restart", out.getvalue())
 
     def test_resume_rejects_star_selector(self):
         err = io.StringIO()
@@ -1536,7 +1728,7 @@ class WatchdUnitTests(unittest.TestCase):
                             acw.cmd_resume(["aot"])
         restart_one.assert_called_once_with("aot", "%7", [])
         kill.assert_not_called()
-        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={THREAD}", out.getvalue())
+        self.assertIn(f"resuming paused session via restart: pane=%7 thread_id={THREAD}", out.getvalue())
 
     def test_resume_multiple_targets_restarts_each_paused_target(self):
         resolved = {"formal": "%6", "aot": "%7"}
@@ -1562,8 +1754,8 @@ class WatchdUnitTests(unittest.TestCase):
             restart_one.call_args_list,
         )
         text = out.getvalue()
-        self.assertIn(f"resuming paused watcher via restart: pane=%6 thread_id={THREAD}", text)
-        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={OTHER_THREAD}", text)
+        self.assertIn(f"resuming paused session via restart: pane=%6 thread_id={THREAD}", text)
+        self.assertIn(f"resuming paused session via restart: pane=%7 thread_id={OTHER_THREAD}", text)
 
     def test_resume_multiple_targets_continues_when_one_is_not_paused(self):
         resolved = {"formal": "%6", "aot": "%7"}
@@ -1584,7 +1776,7 @@ class WatchdUnitTests(unittest.TestCase):
         restart_one.assert_called_once_with("aot", "%7", [])
         text = out.getvalue()
         self.assertIn(f"not paused: pane=%6 thread_id={THREAD}", text)
-        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={OTHER_THREAD}", text)
+        self.assertIn(f"resuming paused session via restart: pane=%7 thread_id={OTHER_THREAD}", text)
 
     def test_restart_rejects_star_selector(self):
         err = io.StringIO()
@@ -1741,7 +1933,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("restart: resolving Codex thread for pane=%7", text)
         self.assertIn(f"restart: thread_id={THREAD}", text)
         self.assertIn("restart: loading saved continue message for pane=%7", text)
-        self.assertIn("restart: starting watcher for pane=%7", text)
+        self.assertIn("restart: starting runtime for pane=%7", text)
 
     def test_restart_target_with_restart_codex_fails_when_thread_unknown(self):
         model = acw._build_runtime_model(_snapshot(

@@ -81,7 +81,7 @@ Durable desired state lives in:
 ~/.codex/acw_state.sqlite
 ```
 
-The `sessions` table holds manager-owned intent for one managed session:
+The `agents` table holds manager-owned intent for one managed session:
 
 - `thread_id`
 - `pane`
@@ -108,21 +108,34 @@ Observed managed-worker state lives in:
 ~/.codex/acw_state.sqlite
 ```
 
-The `runtimes` table is written by the daemon and describes the currently
-attached live session runtime for one managed session:
+The `agent_runtimes` table is written by the daemon and describes the
+currently attached live session runtime for one managed session:
 
 - daemon-assigned runtime id (`id=` in the UI; it identifies one live
   managed session runtime and is not an OS pid)
 - daemon pid
-- pane
-- thread
 - runtime status
 - paused flag
 - generation
 - watch log path
 - heartbeat timestamp
 
-The runtime row is the daemon-owned observed state.
+The runtime row is the daemon-owned observed state. Pane and thread identity
+stay in `agents`, so SQLite enforces the 1:1 mapping between one managed agent,
+one pane, one thread, and one live runtime row.
+
+### 2b. Shared daemon state
+
+The `daemon_scopes` table tracks one shared daemon heartbeat per tmux scope:
+
+- scope key (`tmux_socket`)
+- daemon pid
+- control socket path
+- heartbeat timestamp
+- daemon start timestamp
+
+That lets `status` and `doctor` report "shared daemon is down" as one scope
+failure instead of inventing many pane-local runtime failures.
 
 ### 3. Live tmux and process state
 
@@ -217,7 +230,11 @@ They do not spawn or discover per-pane manager processes anymore.
 
 Each tmux scope now has one daemon control socket:
 
-- `~/.codex/acw_daemon.<scope>.sock`
+- `$XDG_RUNTIME_DIR/acw-<uid>/acw_daemon.<scope>.sock`
+  - falls back to `/tmp/acw-<uid>/acw_daemon.<scope>.sock` when
+    `XDG_RUNTIME_DIR` is not set
+  - kept out of `~/.codex/` so long private test-home paths do not exceed the
+    AF_UNIX socket-path limit
 
 The CLI uses it for mutating commands like:
 
@@ -227,8 +244,6 @@ The CLI uses it for mutating commands like:
 - `resume`
 - `restart`
 - `edit`
-- `migrate`
-
 The transport is intentionally small:
 
 - local Unix domain socket only
@@ -287,7 +302,7 @@ per-pane OS processes around.
 2. Prove the live Codex thread.
 3. Resolve or edit the continue message.
 4. Reject conflicting pane/thread/session state.
-5. Upsert the thread-keyed session row for that pane.
+5. Upsert the agent row for that pane/thread.
 6. Ensure the shared daemon is running.
 7. Wait for the matching runtime row.
 
@@ -457,12 +472,11 @@ All manager-owned state lives under `~/.codex/`.
 Important files:
 
 - `acw_state.sqlite`
-  - `sessions` table: desired state for one managed session
-  - `runtimes` table: observed daemon runtime state for one live managed session
+  - `agents` table: desired state for one managed session
+  - `agent_runtimes` table: observed daemon runtime state for one live managed session
+  - `daemon_scopes` table: daemon heartbeat/control metadata for one tmux scope
 - `acw_daemon.<scope>.pid`
   - daemon pid for one tmux socket scope
-- `acw_daemon.<scope>.sock`
-  - daemon control socket for one tmux socket scope
 - `acw_daemon.<scope>.log`
   - daemon stdout/stderr log
 - `auto_continue_logwatch.<pane>.log`

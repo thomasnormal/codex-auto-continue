@@ -4,10 +4,19 @@ import unittest
 from pathlib import Path
 
 from test.support.real_codex_harness import harness_process_roots
+from test.support.real_codex_harness import _scope_token
 from test.support.real_codex_harness import stale_harness_roots
 
 
 class RealCodexHarnessUnitTests(unittest.TestCase):
+    def test_scope_token_shortens_long_tmux_socket_paths(self):
+        scope = "/home/thomas-ahle/.codex/auto-continue-e2e-tmp/real-codex-abcd/tmux/tmux.sock"
+
+        token = _scope_token(scope)
+
+        self.assertTrue(token.startswith("tmux.sock-"))
+        self.assertLess(len(token), 40)
+
     def test_stale_harness_roots_marks_dead_owner_pid_as_stale(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir).chmod(0o700)

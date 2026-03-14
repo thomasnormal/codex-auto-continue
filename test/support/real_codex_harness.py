@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,15 @@ TASK_CLOSE_RE = re.compile(
     r"session_loop\{thread_id=([0-9a-fA-F\-]+)\}.*"
     r"turn\{[^}]*turn.id=([^ ]+)[^}]*\}: codex_core::tasks: close\b"
 )
+
+
+def _scope_token(scope: str) -> str:
+    sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", scope)
+    if len(sanitized) <= 48:
+        return sanitized
+    label = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(scope).name) or "scope"
+    digest = hashlib.sha1(scope.encode("utf-8")).hexdigest()[:12]
+    return f"{label[:24]}-{digest}"
 
 
 @dataclass
@@ -346,7 +356,7 @@ class RealCodexHarness:
 
     @property
     def manager_daemon_pid_file(self) -> Path:
-        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
+        scope_token = _scope_token(str(self.tmux_socket))
         return self.codex_dir / f"acw_daemon.{scope_token}.pid"
 
     @property
@@ -367,12 +377,13 @@ class RealCodexHarness:
     def manager_runtime_rows(self) -> list[dict[str, object]]:
         rows = self._manager_db_query(
             """
-            SELECT thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
-                   message_inline, tmux_socket, paused, runtime_status, runtime_detail,
-                   generation, worker_label, heartbeat_ts
-            FROM runtimes
-            WHERE tmux_socket = ?
-            ORDER BY pane, thread_id
+            SELECT a.thread_id, r.runtime_id, r.daemon_pid, a.pane, r.state_ref, r.watch_log, r.cwd,
+                   r.message_inline, a.tmux_socket, r.paused, r.runtime_status, r.runtime_detail,
+                   r.generation, r.worker_label, r.heartbeat_ts
+            FROM agent_runtimes r
+            JOIN agents a ON a.agent_id = r.agent_id
+            WHERE a.tmux_socket = ?
+            ORDER BY a.pane, a.thread_id
             """,
             (str(self.tmux_socket),),
         )
@@ -699,7 +710,7 @@ class RealCodexHarness:
             SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
                    health, health_detail, health_ts, last_continue_at,
                    last_handled_turn, last_handled_thread
-            FROM sessions
+            FROM agents
             WHERE thread_id = ?
             """,
             (thread_id,),

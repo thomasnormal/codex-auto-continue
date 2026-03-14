@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Process manager for auto-continue watchers."""
+"""Process manager for auto-continue managed sessions."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 import glob
+import hashlib
 import io
 import json
 import os
@@ -120,27 +121,25 @@ def build_help_text(prog: str) -> str:
   {prog} resume [target ...]
   {prog} restart [target]
   {prog} edit <target>
-  {prog} migrate [--dry-run]
   {prog} repair [target] [--dry-run|--all]
   {prog} cleanup
   {prog} doctor [target]
 
 Commands:
-  status    Show watcher state. Default command when no subcommand is given.
-  start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
-  stop      Stop one watcher, one pane's watchers, or all watchers, and forget their saved sessions.
+  status    Show managed session state. Default command when no subcommand is given.
+  start     Start managing a live tmux target. Auto-detect the Codex thread unless you pass one explicitly.
+  stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.
   pause     Pause one managed session, or all managed sessions when no target is given.
-  resume    Restart one or more paused watchers, or all paused watchers, from current state.
-  restart   Restart one watcher or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
-  edit      Edit the stored continue message for a running watcher, then restart it.
-  migrate   Import currently running legacy per-pane auto_continue_logwatch.py sessions into the shared daemon/SQLite model.
+  resume    Restart one or more paused managed sessions, or all paused managed sessions, from current state.
+  restart   Restart one managed session or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
+  edit      Edit the stored continue message for a running managed session, then restart it.
   repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.
   cleanup   Remove dead saved sessions and stale daemon/runtime files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
 Targets:
   Commands with a target accept a tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
-  pause, resume, and restart act on all watchers when no target is given. resume also accepts multiple explicit targets.
+  pause, resume, and restart act on all managed sessions when no target is given. resume also accepts multiple explicit targets.
 
 Examples:
   {prog}
@@ -150,8 +149,6 @@ Examples:
   {prog} resume formal aot
   {prog} restart bugs --restart-codex
   {prog} edit %6
-  {prog} migrate
-  {prog} migrate --dry-run
   {prog} repair --dry-run
   {prog} repair %6
   {prog} repair --all
@@ -301,7 +298,14 @@ def _tmux_scope_key(socket_path: str | None = None) -> str:
 
 def _tmux_scope_token(socket_path: str | None = None) -> str:
     scope = _tmux_scope_key(socket_path)
-    return sanitize_key(scope if scope else "default")
+    if not scope:
+        return "default"
+    sanitized = sanitize_key(scope)
+    if len(sanitized) <= 48:
+        return sanitized
+    label = sanitize_key(os.path.basename(scope)) or "scope"
+    digest = hashlib.sha1(scope.encode("utf-8")).hexdigest()[:12]
+    return f"{label[:24]}-{digest}"
 
 
 def _tmux_scope_label(socket_path: str | None = None) -> str:
@@ -321,8 +325,19 @@ def daemon_log_file_for_scope(socket_path: str | None = None) -> str:
     return os.path.join(STATE_DIR, f"acw_daemon.{_tmux_scope_token(socket_path)}.log")
 
 
+def _daemon_socket_root() -> str:
+    root = os.environ.get("XDG_RUNTIME_DIR", "").strip() or tempfile.gettempdir()
+    path = Path(root) / f"acw-{os.getuid()}"
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return str(path)
+
+
 def daemon_socket_file_for_scope(socket_path: str | None = None) -> str:
-    return os.path.join(STATE_DIR, f"acw_daemon.{_tmux_scope_token(socket_path)}.sock")
+    return os.path.join(_daemon_socket_root(), f"acw_daemon.{_tmux_scope_token(socket_path)}.sock")
 
 
 def daemon_runtime_file_for_thread(thread_id: str, socket_path: str | None = None) -> str:
@@ -360,6 +375,32 @@ def _read_runtime_rows(socket_path: str | None = None) -> list[dict[str, str]]:
         scope=_tmux_scope_key(socket_path),
     )
     return [{str(key): value for key, value in row.items()} for row in rows]
+
+
+def _read_daemon_scope_state(socket_path: str | None = None) -> dict[str, str]:
+    row = acw_state.read_daemon_scope_state(
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(socket_path),
+    )
+    return {str(key): str(value) for key, value in row.items()}
+
+
+def _write_daemon_scope_state(
+    *,
+    daemon_pid: str,
+    socket_path: str,
+    heartbeat_ts: str,
+    started_ts: str = "",
+    scope: str | None = None,
+) -> None:
+    acw_state.write_daemon_scope_state(
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(scope),
+        daemon_pid=daemon_pid,
+        socket_path=socket_path,
+        heartbeat_ts=heartbeat_ts,
+        started_ts=started_ts,
+    )
 
 
 def _tmux_client_env_healthy() -> bool:
@@ -597,7 +638,7 @@ def resolve_pane_target(target: str) -> str:
         _print_tmux_unavailable_hint(target)
         sys.exit(1)
 
-    print(f"error: no watcher or window found for '{target}'", file=sys.stderr)
+    print(f"error: no managed session or window found for '{target}'", file=sys.stderr)
     print(
         "hint: use a pane id ('%6'), window name, or window index ('2')",
         file=sys.stderr,
@@ -852,126 +893,6 @@ def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | Non
     return None
 
 
-def _read_process_argv(pid: str) -> list[str]:
-    if not pid.isdigit():
-        return []
-    try:
-        raw = (Path("/proc") / pid / "cmdline").read_bytes()
-    except OSError:
-        return []
-    return [part.decode("utf-8", errors="ignore") for part in raw.split(b"\0") if part]
-
-
-def _argv_flag_value(argv: list[str], flag: str) -> str:
-    for index, part in enumerate(argv):
-        if part != flag:
-            continue
-        if index + 1 < len(argv):
-            return argv[index + 1].strip()
-        return ""
-    return ""
-
-
-def _parse_legacy_watcher_argv(
-    argv: list[str],
-    *,
-    pid: str,
-    process_state: str = "",
-) -> LegacyWatcherRecord | None:
-    if not any(os.path.basename(part) == "auto_continue_logwatch.py" for part in argv):
-        return None
-    pane = _argv_flag_value(argv, "--pane")
-    thread_id = _argv_flag_value(argv, "--thread-id").lower()
-    if not is_pane_id(pane) or not is_thread_id(thread_id):
-        return None
-    return LegacyWatcherRecord(
-        pid=pid,
-        pane=pane,
-        thread_id=thread_id,
-        tmux_socket=_argv_flag_value(argv, "--tmux-socket"),
-        state_file=_argv_flag_value(argv, "--state-file"),
-        watch_log=_argv_flag_value(argv, "--watch-log"),
-        paused=process_state.startswith("T"),
-    )
-
-
-def _list_legacy_watchers(socket_path: str | None = None) -> list[LegacyWatcherRecord]:
-    scope = _tmux_scope_key(socket_path)
-    try:
-        ps_out = subprocess.check_output(
-            ["ps", "-u", str(os.getuid()), "-o", "pid=,state=,args="],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-
-    records: list[LegacyWatcherRecord] = []
-    for line in ps_out.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) != 3:
-            continue
-        pid, process_state, args = parts
-        if "auto_continue_logwatch.py" not in args:
-            continue
-        record = _parse_legacy_watcher_argv(_read_process_argv(pid), pid=pid, process_state=process_state)
-        if record is None:
-            continue
-        if _tmux_scope_key(record.tmux_socket) != scope:
-            continue
-        records.append(record)
-    return sorted(records, key=lambda item: (item.pane, item.thread_id, item.pid))
-
-
-def _read_legacy_session_file(path: str) -> dict:
-    if not path:
-        return {}
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _terminate_legacy_watcher(pid: str, *, timeout_secs: float = 2.0) -> tuple[bool, str]:
-    if not pid.isdigit():
-        return False, f"invalid legacy watcher pid '{pid}'"
-
-    def _alive() -> bool:
-        try:
-            os.kill(int(pid), 0)
-            return True
-        except OSError:
-            return False
-
-    if not _alive():
-        return True, ""
-
-    try:
-        os.kill(int(pid), signal.SIGTERM)
-    except OSError as exc:
-        return False, str(exc)
-
-    deadline = time.time() + timeout_secs
-    while time.time() < deadline:
-        if not _alive():
-            return True, ""
-        time.sleep(0.05)
-
-    try:
-        os.kill(int(pid), signal.SIGKILL)
-    except OSError as exc:
-        return False, str(exc)
-
-    deadline = time.time() + timeout_secs
-    while time.time() < deadline:
-        if not _alive():
-            return True, ""
-        time.sleep(0.05)
-
-    return False, f"legacy watcher pid={pid} did not exit after SIGTERM/SIGKILL"
-
-
 def _is_pid_stopped(pid: int) -> bool:
     """Check if a process is in stopped (T) state via ``ps``."""
     try:
@@ -1141,6 +1062,12 @@ def _daemon_rpc_call(
         )
         sys.exit(1)
     payload["daemon_pid"] = str(payload.get("daemon_pid", "")).strip() or daemon_pid
+    _write_daemon_scope_state(
+        daemon_pid=payload["daemon_pid"],
+        socket_path=daemon_socket_file_for_scope(),
+        heartbeat_ts=_watch_now_ts(),
+        scope=_tmux_scope_key(),
+    )
     return payload
 
 
@@ -1688,12 +1615,27 @@ def _daemon_main(argv: list[str]) -> None:
     idle_since = 0.0
     log_tail = _DaemonCodexLogTail(log_path=DAEMON_CODEX_LOG_PATH)
     runtimes: dict[str, _DaemonSessionRuntime] = {}
+    started_ts = _watch_now_ts()
+    _write_daemon_scope_state(
+        daemon_pid=str(os.getpid()),
+        socket_path=str(socket_file),
+        heartbeat_ts=started_ts,
+        started_ts=started_ts,
+        scope=scope,
+    )
 
     try:
         while True:
             _daemon_process_rpc_requests(rpc_server, scope=scope, log_tail=log_tail, runtimes=runtimes)
             active_count = _daemon_reconcile_once(scope, log_tail=log_tail, runtimes=runtimes)
             _daemon_process_rpc_requests(rpc_server, scope=scope, log_tail=log_tail, runtimes=runtimes)
+            _write_daemon_scope_state(
+                daemon_pid=str(os.getpid()),
+                socket_path=str(socket_file),
+                heartbeat_ts=_watch_now_ts(),
+                started_ts=started_ts,
+                scope=scope,
+            )
 
             if active_count == 0:
                 if idle_since == 0.0:
@@ -1751,15 +1693,15 @@ def _validate_existing_pane_watcher(
     if len(watchers) != 1:
         joined = " ".join(sorted(w.pid or "?" for w in watchers))
         return (
-            f"error: multiple watcher runtimes already running for pane={pane}: {joined}",
-            f"hint: run 'acw repair {pane} --dry-run' to inspect the fix plan, or 'acw stop {pane}' to stop all pane watchers first",
+            f"error: multiple managed runtimes already running for pane={pane}: {joined}",
+            f"hint: run 'acw repair {pane} --dry-run' to inspect the fix plan, or 'acw stop {pane}' to stop all pane runtimes first",
         )
 
     row = watchers[0]
     thread_id = row.thread_id
     if requested_thread and is_thread_id(thread_id) and thread_id.lower() != requested_thread.lower():
         return (
-            f"error: existing watcher for pane={pane} is using thread {thread_id[:8]}…, "
+            f"error: existing runtime for pane={pane} is using thread {thread_id[:8]}…, "
             f"not requested thread {requested_thread[:8]}…",
             f"hint: inspect 'acw repair {pane} --dry-run' or stop it first with 'acw stop {pane}' if you want to start a different session there",
         )
@@ -1768,14 +1710,14 @@ def _validate_existing_pane_watcher(
     other = _other_watcher_for_thread(pane, thread_id)
     if other:
         return (
-            f"error: existing watcher for pane={pane} is duplicated; pane={other['pane']} "
+            f"error: existing runtime for pane={pane} is duplicated; pane={other['pane']} "
             f"id={other.get('runtime_id') or other.get('pid', '?')} is already watching thread {thread_id[:8]}…",
-            f"hint: inspect 'acw repair {pane} --dry-run' or stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
+            f"hint: inspect 'acw repair {pane} --dry-run' or stop the duplicate runtimes with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
         )
     if anomalies:
         detail = "; ".join(anomalies)
         return (
-            f"error: existing watcher for pane={pane} is inconsistent: {detail}",
+            f"error: existing runtime for pane={pane} is inconsistent: {detail}",
             f"hint: stop it first with 'acw stop {pane}', then start once after the pane/session identity is clean",
         )
     return None
@@ -1840,7 +1782,7 @@ def cmd_start(argv: list[str]) -> None:
     other = _other_watcher_for_thread(pane, thread_id)
     if other:
         print(
-            f"error: another watcher (id={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
+            f"error: another runtime (id={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
             f"is already watching thread {thread_id[:8]}…",
             file=sys.stderr,
         )
@@ -1858,7 +1800,7 @@ def cmd_start(argv: list[str]) -> None:
             file=sys.stderr,
         )
         print(
-            f"hint: clean up the duplicate panes first, then start exactly one watcher for {thread_id[:8]}…",
+            f"hint: clean up the duplicate panes first, then start exactly one managed runtime for {thread_id[:8]}…",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1983,7 +1925,7 @@ def cmd_stop(argv: list[str]) -> None:
             stop_pane_watchers(pane)
             return
 
-        print(f"error: no watcher found for '{target}'", file=sys.stderr)
+        print(f"error: no managed session found for '{target}'", file=sys.stderr)
         print(
             "hint: use a pane id ('%6'), window name, or window index ('2')",
             file=sys.stderr,
@@ -2007,7 +1949,7 @@ def cmd_stop(argv: list[str]) -> None:
 
 
 def cmd_pause(argv: list[str]) -> None:
-    """Pause watcher(s) without forgetting their saved sessions."""
+    """Pause managed session runtime(s) without forgetting saved session state."""
     if argv and argv[0] == "*":
         print("error: '*' is no longer supported for pause; use 'acw pause' with no target", file=sys.stderr)
         sys.exit(2)
@@ -2067,7 +2009,7 @@ def cmd_pause(argv: list[str]) -> None:
 
 
 def cmd_resume(argv: list[str]) -> None:
-    """Resume paused watcher(s) by restarting from current state."""
+    """Resume paused managed session runtime(s) by restarting from current state."""
     if "*" in argv:
         print("error: '*' is no longer supported for resume; use 'acw resume' with no target", file=sys.stderr)
         sys.exit(2)
@@ -2090,7 +2032,7 @@ def cmd_resume(argv: list[str]) -> None:
                 if row.get("paused", "") != "1":
                     print(f"not paused: pane={pane} thread_id={thread_id}")
                     continue
-                print(f"resuming paused watcher via restart: pane={pane} thread_id={thread_id}")
+                print(f"resuming paused session via restart: pane={pane} thread_id={thread_id}")
                 _restart_one(pane_arg, pane, [])
                 break
         return
@@ -2102,10 +2044,10 @@ def cmd_resume(argv: list[str]) -> None:
             paused_panes.append(r["pane"])
 
     if not paused_panes:
-        print("no paused watchers")
+        print("no paused managed sessions")
         return
 
-    print(f"resuming {len(paused_panes)} paused watcher(s) via restart")
+    print(f"resuming {len(paused_panes)} paused managed session(s) via restart")
     _restart_panes(paused_panes)
 
 
@@ -2308,7 +2250,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         if thread_error:
             print(f"error: {thread_error}", file=sys.stderr)
             print(
-                f"hint: clean up pane {pane} so exactly one live pane, one watcher, and one session agree on the thread",
+                f"hint: clean up pane {pane} so exactly one live pane, one runtime, and one session agree on the thread",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -2366,7 +2308,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         _print_progress(f"restarting codex: pane={pane} thread_id={resolved_thread}")
         _daemon_rpc_restart_codex(pane, resolved_thread)
 
-    _print_progress(f"restart: starting watcher for pane={pane}")
+    _print_progress(f"restart: starting runtime for pane={pane}")
     window_name = (run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or "").strip()
     row = _daemon_rpc_upsert_session(
         resolved_thread,
@@ -2427,7 +2369,7 @@ def cmd_edit(argv: list[str]) -> None:
     if thread_error:
         print(f"error: {thread_error}", file=sys.stderr)
         print(
-            f"hint: clean up pane {pane} so exactly one live pane, one watcher, and one saved session agree before editing",
+            f"hint: clean up pane {pane} so exactly one live pane, one runtime, and one saved session agree before editing",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -2456,101 +2398,6 @@ def cmd_edit(argv: list[str]) -> None:
     print(f"edit: message updated for pane {pane}")
     if _runtime_watchers_for_pane(model, pane):
         cmd_restart([pane, "--message", new_value])
-
-
-def cmd_migrate(argv: list[str]) -> None:
-    if len(argv) > 1 or (argv and argv[0] != "--dry-run"):
-        print("error: migrate accepts at most one optional flag: --dry-run", file=sys.stderr)
-        sys.exit(2)
-    dry_run = bool(argv)
-    records = _list_legacy_watchers()
-    if not records:
-        print("migrate: no legacy per-pane watchers found in the current tmux scope")
-        return
-
-    print(f"migrate: found {len(records)} legacy watcher(s) in scope {_tmux_scope_label()}")
-    for record in records:
-        state = _read_legacy_session_file(record.state_file)
-        message = _message_text(str(state.get("message", "")).strip())
-        status = "paused" if record.paused or bool(state.get("paused", False)) else "running"
-        print(
-            f"migrate: {record.pane} thread_id={record.thread_id} pid={record.pid} "
-            f"state={status} message={_truncate(message or '-', 60)}"
-        )
-    if dry_run:
-        return
-
-    migrated = 0
-    failures: list[str] = []
-
-    for record in records:
-        state = _read_legacy_session_file(record.state_file)
-        message = _message_text(str(state.get("message", "")).strip())
-        if not message:
-            failures.append(
-                f"pane={record.pane} thread_id={record.thread_id}: could not recover a saved continue message "
-                f"from {record.state_file or '(no state file)'}"
-            )
-            continue
-
-        name = (run_tmux("display-message", "-p", "-t", record.pane, "#{window_name}") or "").strip()
-        if not name:
-            name = str(state.get("name", "")).strip()
-        if not name:
-            failures.append(f"pane={record.pane} thread_id={record.thread_id}: could not determine tmux window name")
-            continue
-
-        _print_progress(f"migrate: stopping legacy watcher pid={record.pid} pane={record.pane}")
-        ok, detail = _terminate_legacy_watcher(record.pid)
-        if not ok:
-            failures.append(
-                f"pane={record.pane} thread_id={record.thread_id}: failed to stop legacy watcher pid={record.pid}: {detail}"
-            )
-            continue
-
-        paused = record.paused or bool(state.get("paused", False))
-        generation = _current_session_generation(state)
-        row = _daemon_rpc_upsert_session(
-            record.thread_id,
-            pane=record.pane,
-            name=name,
-            message=message,
-            paused=paused,
-            generation=generation,
-            extra_session={
-                "tmux_socket": _tmux_scope_key(record.tmux_socket),
-                "health": str(state.get("health", "")).strip(),
-                "health_detail": str(state.get("health_detail", "")).strip(),
-                "health_ts": str(state.get("health_ts", "")).strip(),
-                "last_continue_at": str(state.get("last_continue_at", "")).strip(),
-                "last_handled_turn": str(
-                    state.get("last_handled_turn", state.get("last_sent_turn", ""))
-                ).strip(),
-                "last_handled_thread": str(
-                    state.get(
-                        "last_handled_thread",
-                        state.get("last_sent_thread", state.get("thread_id", "")),
-                    )
-                ).strip(),
-            },
-        )
-
-        if record.state_file:
-            Path(record.state_file).unlink(missing_ok=True)
-        runtime_id = row.get("runtime_id") or row.get("pid", "")
-        daemon_pid = row.get("daemon_pid", "")
-        print(
-            f"migrated: pane={record.pane} thread_id={record.thread_id} id={runtime_id} daemon_pid={daemon_pid}"
-        )
-        migrated += 1
-
-    cleanup_stale_files(remove_dead_sessions=True)
-    print(f"migrate: imported {migrated} legacy watcher(s)")
-    if failures:
-        for failure in failures:
-            print(f"error: {failure}", file=sys.stderr)
-        sys.exit(1)
-
 
 # ---------------------------------------------------------------------------
 # Repair
@@ -2629,18 +2476,18 @@ def _repair_command_hint(step: RepairStep) -> str:
 
 def _apply_repair_step(step: RepairStep) -> None:
     if step.kind == "restart_watcher":
-        _print_progress(f"repair: restarting watcher on pane={step.target}")
+        _print_progress(f"repair: restarting runtime on pane={step.target}")
         _stop_pane_watchers_keep_session(step.target)
         cmd_start([step.target, step.thread_id, "--message", step.message])
         return
 
     if step.kind == "start_watcher":
-        _print_progress(f"repair: starting watcher on pane={step.target}")
+        _print_progress(f"repair: starting runtime on pane={step.target}")
         cmd_start([step.target, step.thread_id, "--message", step.message])
         return
 
     if step.kind == "stop_watchers_keep_session":
-        _print_progress(f"repair: stopping watcher entries on pane={step.target} while keeping saved session state")
+        _print_progress(f"repair: stopping runtime entries on pane={step.target} while keeping saved session state")
         _stop_pane_watchers_keep_session(step.target)
         return
 
@@ -2841,18 +2688,6 @@ class LiveWatcherRecord:
     runtime_detail: str = ""
     generation: int = 0
     worker_label: str = ""
-
-
-@dataclass(frozen=True)
-class LegacyWatcherRecord:
-    pid: str
-    pane: str
-    thread_id: str
-    tmux_socket: str
-    state_file: str
-    watch_log: str
-    paused: bool = False
-
 
 @dataclass(frozen=True)
 class LivePaneRecord:
@@ -3142,7 +2977,7 @@ def _watcher_anomalies(model: RuntimeModel, watcher: LiveWatcherRecord) -> list[
 
 
 def _unwatched_pane_anomalies(model: RuntimeModel, pane: LivePaneRecord) -> list[str]:
-    anomalies = ["no watcher for live Codex pane"]
+    anomalies = ["no runtime for managed live Codex pane"]
     if len(_runtime_panes_for_thread(model, pane.detected_thread)) != 1:
         panes = sorted({row.pane_id for row in _runtime_panes_for_thread(model, pane.detected_thread) if row.pane_id})
         anomalies.append(f"thread also active in panes {', '.join(panes)}")
@@ -3481,6 +3316,93 @@ def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> 
     return commands
 
 
+def _daemon_scope_alive(scope_state: dict[str, str]) -> bool:
+    alive_text = str(scope_state.get("alive", "")).strip().lower()
+    if alive_text in {"1", "true", "yes"}:
+        return True
+    if alive_text in {"0", "false", "no"}:
+        return False
+    daemon_pid = str(scope_state.get("daemon_pid", "")).strip()
+    if not daemon_pid.isdigit():
+        return False
+    try:
+        os.kill(int(daemon_pid), 0)
+    except OSError:
+        return False
+    socket_path = str(scope_state.get("socket_path", "")).strip()
+    if not socket_path or not Path(socket_path).exists():
+        return False
+    return True
+
+
+def _daemon_scope_down_detail(
+    scope_state: dict[str, str],
+    *,
+    pid_file: str,
+    socket_file: str,
+) -> str:
+    daemon_pid = str(scope_state.get("daemon_pid", "")).strip()
+    if daemon_pid:
+        if not daemon_pid.isdigit():
+            return f"daemon pid '{daemon_pid}' is invalid"
+        try:
+            os.kill(int(daemon_pid), 0)
+        except OSError:
+            if Path(pid_file).exists():
+                return f"pid file points to dead daemon pid {daemon_pid}"
+            return f"daemon pid {daemon_pid} is not running"
+
+    socket_path = str(scope_state.get("socket_path", "")).strip() or socket_file
+    if socket_path and not Path(socket_path).exists():
+        return f"control socket {socket_path} is missing"
+    return "no daemon heartbeat or control socket found"
+
+
+def _observed_daemon_scope_state(socket_path: str | None = None) -> dict[str, str]:
+    scope_state = dict(_read_daemon_scope_state(socket_path))
+    pid_file = daemon_pid_file_for_scope(socket_path)
+    socket_file = daemon_socket_file_for_scope(socket_path)
+    pid_from_file = _read_pid_file(pid_file) or ""
+    socket_exists = Path(socket_file).exists()
+
+    if pid_from_file:
+        scope_state["daemon_pid"] = pid_from_file
+    if socket_exists:
+        scope_state["socket_path"] = socket_file
+    elif not str(scope_state.get("socket_path", "")).strip() and pid_from_file:
+        scope_state["socket_path"] = socket_file
+
+    if not str(scope_state.get("alive", "")).strip():
+        scope_state["alive"] = "1" if _daemon_scope_alive(scope_state) else "0"
+
+    if scope_state["alive"] in {"0", "false", "no"} and not str(scope_state.get("detail", "")).strip():
+        scope_state["detail"] = _daemon_scope_down_detail(
+            scope_state,
+            pid_file=pid_file,
+            socket_file=socket_file,
+        )
+
+    return scope_state
+
+
+def _shared_daemon_error_message(unwatched_rows: list[tuple[dict[str, str], str]]) -> str:
+    if not unwatched_rows:
+        return ""
+    scope_state = _observed_daemon_scope_state()
+    if _daemon_scope_alive(scope_state):
+        return ""
+    detail = str(scope_state.get("detail", "")).strip()
+    scope_label = _tmux_scope_label()
+    msg = (
+        f"Shared daemon error: acw daemon is down for tmux scope {scope_label}; "
+        f"{len(unwatched_rows)} managed live Codex pane(s) currently have no runtime."
+    )
+    if detail:
+        msg += f" Detail: {detail}."
+    msg += " Fix: run acw repair --all or any mutating acw command to restart the daemon."
+    return msg
+
+
 def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
     messages: list[str] = []
     seen: set[str] = set()
@@ -3504,6 +3426,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         elif kind == "dead_session":
             dead_rows.append((row, current_pane, window_label))
 
+    daemon_down_message = _shared_daemon_error_message(unwatched_rows)
     live_issue_found = any(row.get("anomalies") for row, _ in watcher_rows) or bool(unwatched_rows or unresolved_rows)
 
     watchers_by_pane: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -3520,7 +3443,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         if len(rows) <= 1:
             continue
         runtime_ids = ", ".join(sorted((row.get("runtime_id") or row.get("pid", "?")) for row in rows))
-        msg = f"Invariant error: pane {pane} has {len(rows)} watcher runtimes ({runtime_ids}). Fix: acw repair {pane}"
+        msg = f"Invariant error: pane {pane} has {len(rows)} managed runtimes ({runtime_ids}). Fix: acw repair {pane}"
         if msg not in seen:
             seen.add(msg)
             messages.append(msg)
@@ -3531,8 +3454,8 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
             continue
         cleanup = "; ".join(f"acw stop {pane}" for pane in panes)
         msg = (
-            f"Invariant error: thread {_short_thread_id(thread_id)} is watched on panes {', '.join(panes)}. "
-            f"Clean up: {cleanup}; then start exactly one watcher."
+            f"Invariant error: thread {_short_thread_id(thread_id)} has managed runtimes on panes {', '.join(panes)}. "
+            f"Clean up: {cleanup}; then start exactly one managed runtime."
         )
         if msg not in seen:
             seen.add(msg)
@@ -3551,15 +3474,20 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
             seen.add(msg)
             messages.append(msg)
 
-    for row, current_pane in unwatched_rows:
-        pane = current_pane or row.get("pane", "")
-        msg = (
-            f"Invariant error: live Codex pane {pane} has thread {_short_thread_id(row.get('thread', ''))} "
-            f"but no watcher. Fix: acw repair {pane}"
-        )
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
+    if daemon_down_message:
+        if daemon_down_message not in seen:
+            seen.add(daemon_down_message)
+            messages.append(daemon_down_message)
+    else:
+        for row, current_pane in unwatched_rows:
+            pane = current_pane or row.get("pane", "")
+            msg = (
+                f"Invariant error: live Codex pane {pane} has thread {_short_thread_id(row.get('thread', ''))} "
+                f"but no runtime. Fix: acw repair {pane}"
+            )
+            if msg not in seen:
+                seen.add(msg)
+                messages.append(msg)
 
     for row, current_pane in unresolved_rows:
         pane = current_pane or row.get("pane", "")
@@ -3578,7 +3506,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         runtime_id = row.get("runtime_id") or row.get("pid", "?")
         if "no saved session" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher id={runtime_id} has no saved session. "
+                f"Invariant error: pane {pane} runtime id={runtime_id} has no saved session. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3586,7 +3514,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if "no live Codex agent detected in pane" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher id={runtime_id} has no live Codex agent in the pane. "
+                f"Invariant error: pane {pane} runtime id={runtime_id} has no live Codex agent in the pane. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3594,7 +3522,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("could not determine thread_id") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher id={runtime_id} has a live Codex process but its thread id "
+                f"Invariant error: pane {pane} runtime id={runtime_id} has a live Codex process but its thread id "
                 f"could not be detected. Fix: acw repair {pane} --dry-run"
             )
             if msg not in seen:
@@ -3602,7 +3530,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("pane agent thread is ") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher id={runtime_id} is bound to the wrong thread. "
+                f"Invariant error: pane {pane} runtime id={runtime_id} is bound to the wrong thread. "
                 f"Fix: acw repair {pane}"
             )
             if msg not in seen:
@@ -3630,10 +3558,6 @@ def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]
         print(f"Recommendation: run {cmd}")
     for message in _status_invariant_messages(resolved):
         print(message)
-    legacy_count = len(_list_legacy_watchers())
-    if legacy_count:
-        noun = "watcher" if legacy_count == 1 else "watchers"
-        print(f"Hint: run acw migrate to import {legacy_count} legacy per-pane {noun}.")
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
@@ -3807,7 +3731,7 @@ def _resolve_restart_pane_target(target: str, model: RuntimeModel | None = None)
         _print_tmux_unavailable_hint(target)
         sys.exit(1)
 
-    print(f"error: no watcher, window, or live Codex pane found for '{target}'", file=sys.stderr)
+    print(f"error: no managed session, window, or live Codex pane found for '{target}'", file=sys.stderr)
     print(
         "hint: use a pane id ('%6'), window name, window index ('2'), or a saved session name with a live Codex pane",
         file=sys.stderr,
@@ -3974,7 +3898,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                 RepairStep(
                     kind="stop_watchers_keep_session",
                     target=pane,
-                    summary=f"pane {pane} is missing from tmux; stop its watcher entries but keep any saved session",
+                    summary=f"pane {pane} is missing from tmux; stop its runtime entries but keep any saved session",
                     auto_apply=True,
                 )
             ]
@@ -3986,7 +3910,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                 RepairStep(
                     kind="stop_watchers_keep_session",
                     target=pane,
-                    summary=f"pane {pane} has no live Codex agent; stop its watcher entries but keep any saved session",
+                    summary=f"pane {pane} has no live Codex agent; stop its runtime entries but keep any saved session",
                     auto_apply=True,
                 )
             ]
@@ -3994,7 +3918,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="manual",
                 target=pane,
-                summary=f"pane {pane} has no live Codex agent; restart Codex there manually before repairing watcher state",
+                summary=f"pane {pane} has no live Codex agent; restart Codex there manually before repairing runtime state",
                 auto_apply=False,
             )
         ]
@@ -4077,7 +4001,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                     kind="manual",
                     target=pane,
                     summary=(
-                        f"pane {pane} has live thread {_short_thread_id(live_thread)} but no watcher and no saved continue message; "
+                        f"pane {pane} has live thread {_short_thread_id(live_thread)} but no runtime and no saved continue message; "
                         "start it manually with an explicit --message"
                     ),
                     auto_apply=False,
@@ -4088,7 +4012,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="start_watcher",
                 target=pane,
-                summary=f"start one watcher on pane {pane} for thread {_short_thread_id(live_thread)}",
+                summary=f"start one managed runtime on pane {pane} for thread {_short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
@@ -4102,7 +4026,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                     kind="manual",
                     target=pane,
                     summary=(
-                        f"pane {pane} has duplicate watcher entries but no saved continue message for thread "
+                        f"pane {pane} has duplicate runtime entries but no saved continue message for thread "
                         f"{_short_thread_id(live_thread)}; repair it manually"
                     ),
                     auto_apply=False,
@@ -4113,7 +4037,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="restart_watcher",
                 target=pane,
-                summary=f"replace duplicate watcher entries on pane {pane} with one watcher for thread {_short_thread_id(live_thread)}",
+                summary=f"replace duplicate runtime entries on pane {pane} with one managed runtime for thread {_short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
@@ -4127,7 +4051,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                 RepairStep(
                     kind="manual",
                     target=pane,
-                    summary=f"pane {pane} has a watcher with an invalid thread id and no saved continue message; repair it manually",
+                    summary=f"pane {pane} has a runtime with an invalid thread id and no saved continue message; repair it manually",
                     auto_apply=False,
                 )
             ]
@@ -4135,7 +4059,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="restart_watcher",
                 target=pane,
-                summary=f"restart the watcher on pane {pane} with the live thread {_short_thread_id(live_thread)}",
+                summary=f"restart the runtime on pane {pane} with the live thread {_short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
@@ -4149,7 +4073,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                     kind="manual",
                     target=pane,
                     summary=(
-                        f"pane {pane} watcher is bound to {_short_thread_id(watcher.thread_id)}, but the live pane is "
+                        f"pane {pane} runtime is bound to {_short_thread_id(watcher.thread_id)}, but the live pane is "
                         f"{_short_thread_id(live_thread)} and no saved continue message is available; repair it manually"
                     ),
                     auto_apply=False,
@@ -4160,7 +4084,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="restart_watcher",
                 target=pane,
-                summary=f"rebind the watcher on pane {pane} to the live thread {_short_thread_id(live_thread)}",
+                summary=f"rebind the runtime on pane {pane} to the live thread {_short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
@@ -4321,16 +4245,16 @@ def _doctor_report(target: str = "") -> DoctorReport:
     command_target = _doctor_recommendation_target(target, pane, ps_rows)
     if len(rows) > 1:
         runtime_ids = ", ".join(sorted(watcher.pid or "?" for watcher in rows))
-        checks.append(("error", f"multiple watcher runtimes running on pane {pane}: {runtime_ids}"))
+        checks.append(("error", f"multiple managed runtimes running on pane {pane}: {runtime_ids}"))
         errors += 1
         recommendations.append(f"acw stop {shlex.quote(pane)}")
     elif rows:
         watcher = rows[0]
-        checks.append(("ok", f"watcher running: pane={pane} id={watcher.pid}"))
+        checks.append(("ok", f"runtime running: pane={pane} id={watcher.pid}"))
         anomalies = _watcher_anomalies(model, watcher)
         if anomalies:
             detail = "; ".join(anomalies)
-            checks.append(("error", f"watcher identity mismatch: {detail}"))
+            checks.append(("error", f"runtime identity mismatch: {detail}"))
             errors += 1
             recommendations.append(f"acw stop {shlex.quote(pane)}")
         else:
@@ -4349,16 +4273,16 @@ def _doctor_report(target: str = "") -> DoctorReport:
             watcher_state = _compute_state(row, sj)
             health_detail = sj.get("health_detail", "").strip()
             if watcher_state == "running":
-                checks.append(("ok", "watcher health: running"))
+                checks.append(("ok", "runtime health: running"))
             elif watcher_state == "paused":
-                msg = "watcher paused"
+                msg = "runtime paused"
                 if health_detail:
                     msg += f" - {health_detail}"
                 checks.append(("warn", msg))
                 warnings += 1
                 recommendations.append(f"acw resume {shlex.quote(command_target)}")
             else:
-                msg = f"watcher health: {watcher_state}"
+                msg = f"runtime health: {watcher_state}"
                 if health_detail:
                     msg += f" - {health_detail}"
                 level = "warn" if watcher_state == "warn" else "error"
@@ -4369,7 +4293,7 @@ def _doctor_report(target: str = "") -> DoctorReport:
                     errors += 1
                 recommendations.append(f"acw restart {shlex.quote(command_target)}")
     else:
-        checks.append(("info", f"no watcher running for pane {pane}"))
+        checks.append(("info", f"no managed runtime running for pane {pane}"))
         if tid and is_thread_id(tid):
             recommendations.append(f"acw start {shlex.quote(command_target)} {tid}")
 
@@ -4519,7 +4443,7 @@ def main() -> None:
     # Only clean up stale files on commands that mutate state.  Read-only
     # commands (status, pause, resume) skip the cleanup overhead (ps scan +
     # multiple globs).
-    if subcmd in ("start", "stop", "restart", "edit", "migrate", "repair", "cleanup"):
+    if subcmd in ("start", "stop", "restart", "edit", "repair", "cleanup"):
         cleanup_stale_files()
 
     commands = {
@@ -4528,7 +4452,6 @@ def main() -> None:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "restart": cmd_restart,
-        "migrate": cmd_migrate,
         "repair": cmd_repair,
         "cleanup": cmd_cleanup,
         "status": cmd_status,

@@ -243,7 +243,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("deadwatch", status.stdout, self.harness.diagnostics())
         self.assertIn("STATE:           error", status.stdout, self.harness.diagnostics())
-        self.assertIn("no watcher for live Codex pane", status.stdout, self.harness.diagnostics())
+        self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
 
     def test_manager_restart_without_target_recovers_dead_watcher(self):
         self.harness.rename_window("recoverdead")

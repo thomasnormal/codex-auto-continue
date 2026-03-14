@@ -13,7 +13,11 @@ THREAD_ID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-_SESSION_DEFAULTS: dict[str, object] = {
+_JSON_MIGRATION_KEY = "json_migration_v1"
+_SQLITE_MIGRATION_KEY = "sqlite_agent_model_v1"
+
+_AGENT_DEFAULTS: dict[str, object] = {
+    "agent_id": "",
     "thread_id": "",
     "pane": "",
     "name": "",
@@ -30,6 +34,7 @@ _SESSION_DEFAULTS: dict[str, object] = {
 }
 
 _RUNTIME_DEFAULTS: dict[str, object] = {
+    "agent_id": "",
     "thread": "",
     "runtime_id": "",
     "daemon_pid": "",
@@ -45,6 +50,14 @@ _RUNTIME_DEFAULTS: dict[str, object] = {
     "generation": 0,
     "worker_label": "",
     "heartbeat_ts": "",
+}
+
+_DAEMON_SCOPE_DEFAULTS: dict[str, object] = {
+    "tmux_socket": "",
+    "daemon_pid": "",
+    "socket_path": "",
+    "heartbeat_ts": "",
+    "started_ts": "",
 }
 
 
@@ -73,8 +86,10 @@ def _connect(state_dir: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(conn)
     _maybe_migrate_legacy_json(conn, state_dir)
+    _maybe_migrate_legacy_sqlite_tables(conn)
     return conn
 
 
@@ -86,8 +101,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             value TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS sessions (
-            thread_id TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS agents (
+            agent_id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
             pane TEXT NOT NULL DEFAULT '',
             name TEXT NOT NULL DEFAULT '',
             message TEXT NOT NULL DEFAULT '',
@@ -99,127 +115,51 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             health_ts TEXT NOT NULL DEFAULT '',
             last_continue_at TEXT NOT NULL DEFAULT '',
             last_handled_turn TEXT NOT NULL DEFAULT '',
-            last_handled_thread TEXT NOT NULL DEFAULT ''
+            last_handled_thread TEXT NOT NULL DEFAULT '',
+            CHECK(agent_id <> ''),
+            CHECK(thread_id <> '')
         );
 
-        CREATE INDEX IF NOT EXISTS sessions_by_scope_name
-        ON sessions (tmux_socket, name);
+        CREATE UNIQUE INDEX IF NOT EXISTS agents_by_scope_thread
+        ON agents (tmux_socket, thread_id);
 
-        CREATE INDEX IF NOT EXISTS sessions_by_scope_pane
-        ON sessions (tmux_socket, pane);
+        CREATE UNIQUE INDEX IF NOT EXISTS agents_by_scope_pane
+        ON agents (tmux_socket, pane)
+        WHERE pane <> '';
 
-        CREATE TABLE IF NOT EXISTS runtimes (
-            thread_id TEXT PRIMARY KEY,
+        CREATE INDEX IF NOT EXISTS agents_by_scope_name
+        ON agents (tmux_socket, name);
+
+        CREATE TABLE IF NOT EXISTS agent_runtimes (
+            agent_id TEXT PRIMARY KEY,
             runtime_id TEXT NOT NULL DEFAULT '',
             daemon_pid TEXT NOT NULL DEFAULT '',
-            pane TEXT NOT NULL DEFAULT '',
             state_ref TEXT NOT NULL DEFAULT '',
             watch_log TEXT NOT NULL DEFAULT '',
             cwd TEXT NOT NULL DEFAULT '',
             message_inline TEXT NOT NULL DEFAULT '',
-            tmux_socket TEXT NOT NULL DEFAULT '',
             paused INTEGER NOT NULL DEFAULT 0,
             runtime_status TEXT NOT NULL DEFAULT '',
             runtime_detail TEXT NOT NULL DEFAULT '',
             generation INTEGER NOT NULL DEFAULT 0,
             worker_label TEXT NOT NULL DEFAULT '',
-            heartbeat_ts TEXT NOT NULL DEFAULT ''
+            heartbeat_ts TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS runtimes_by_scope_pane
-        ON runtimes (tmux_socket, pane);
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_runtimes_by_runtime_id
+        ON agent_runtimes (runtime_id)
+        WHERE runtime_id <> '';
 
-        CREATE INDEX IF NOT EXISTS runtimes_by_scope_runtime_id
-        ON runtimes (tmux_socket, runtime_id);
+        CREATE TABLE IF NOT EXISTS daemon_scopes (
+            tmux_socket TEXT PRIMARY KEY,
+            daemon_pid TEXT NOT NULL DEFAULT '',
+            socket_path TEXT NOT NULL DEFAULT '',
+            heartbeat_ts TEXT NOT NULL DEFAULT '',
+            started_ts TEXT NOT NULL DEFAULT ''
+        );
         """
     )
-
-
-def _migration_done(conn: sqlite3.Connection) -> bool:
-    row = conn.execute("SELECT value FROM acw_meta WHERE key = 'json_migration_v1'").fetchone()
-    return bool(row and str(row[0]) == "1")
-
-
-def _mark_migration_done(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "INSERT INTO acw_meta(key, value) VALUES(?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        ("json_migration_v1", "1"),
-    )
-
-
-def _maybe_migrate_legacy_json(conn: sqlite3.Connection, state_dir: str) -> None:
-    if _migration_done(conn):
-        return
-
-    state_root = Path(state_dir)
-    session_paths = sorted(state_root.glob("acw_session.*.json"))
-    runtime_paths = sorted(state_root.glob("acw_runtime.*.json"))
-
-    with conn:
-        for path in session_paths:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(data, dict):
-                continue
-            thread_id = str(data.get("thread_id", "")).strip().lower()
-            if not is_thread_id(thread_id):
-                continue
-            merged = _SESSION_DEFAULTS | {
-                "thread_id": thread_id,
-                "pane": str(data.get("pane", "")).strip(),
-                "name": str(data.get("name", "")).strip(),
-                "message": str(data.get("message", "")).strip(),
-                "tmux_socket": str(data.get("tmux_socket", "")).strip(),
-                "paused": bool(data.get("paused", False)),
-                "generation": _coerce_int(data.get("generation", 0)),
-                "health": str(data.get("health", "")).strip(),
-                "health_detail": str(data.get("health_detail", "")).strip(),
-                "health_ts": str(data.get("health_ts", "")).strip(),
-                "last_continue_at": str(data.get("last_continue_at", "")).strip(),
-                "last_handled_turn": str(data.get("last_handled_turn", "")).strip(),
-                "last_handled_thread": str(data.get("last_handled_thread", "")).strip(),
-            }
-            _upsert_session(conn, merged)
-
-        for path in runtime_paths:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(data, dict):
-                continue
-            thread_id = str(data.get("thread", "")).strip().lower()
-            if not is_thread_id(thread_id):
-                continue
-            merged = _RUNTIME_DEFAULTS | {
-                "thread": thread_id,
-                "runtime_id": str(data.get("runtime_id", "")).strip()
-                or str(data.get("pid", "")).strip(),
-                "daemon_pid": str(data.get("daemon_pid", "")).strip(),
-                "pane": str(data.get("pane", "")).strip(),
-                "state": session_state_ref(thread_id),
-                "watch": str(data.get("watch", "")).strip(),
-                "cwd": str(data.get("cwd", "")).strip(),
-                "msg_inline": str(data.get("msg_inline", "")).strip(),
-                "tmux_socket": str(data.get("tmux_socket", "")).strip(),
-                "paused": bool(data.get("paused", False)),
-                "runtime_status": str(data.get("runtime_status", "")).strip(),
-                "runtime_detail": str(data.get("runtime_detail", "")).strip(),
-                "generation": _coerce_int(data.get("generation", 0)),
-                "worker_label": str(data.get("worker_label", "")).strip()
-                or str(data.get("runtime_id", "")).strip()
-                or str(data.get("pid", "")).strip(),
-                "heartbeat_ts": str(data.get("heartbeat_ts", "")).strip(),
-            }
-            _upsert_runtime(conn, merged)
-
-        _mark_migration_done(conn)
-
-    for path in [*session_paths, *runtime_paths]:
-        path.unlink(missing_ok=True)
 
 
 def _coerce_int(value: object) -> int:
@@ -229,26 +169,64 @@ def _coerce_int(value: object) -> int:
         return 0
 
 
-def _session_from_row(row: sqlite3.Row | None) -> dict[str, object]:
-    data = dict(_SESSION_DEFAULTS)
+def _meta_value(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute("SELECT value FROM acw_meta WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _set_meta_value(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO acw_meta(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+
+
+def _migration_done(conn: sqlite3.Connection, key: str) -> bool:
+    return _meta_value(conn, key) == "1"
+
+
+def _mark_migration_done(conn: sqlite3.Connection, key: str) -> None:
+    _set_meta_value(conn, key, "1")
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _agent_id_for_thread(thread_id: str) -> str:
+    return thread_id.lower()
+
+
+def _agent_from_row(row: sqlite3.Row | None) -> dict[str, object]:
+    data = dict(_AGENT_DEFAULTS)
     if row is None:
         return data
     keys = set(row.keys())
     data.update(
         {
+            "agent_id": str(row["agent_id"]).strip() if "agent_id" in keys else "",
             "thread_id": str(row["thread_id"]).lower() if "thread_id" in keys else "",
-            "pane": str(row["pane"]) if "pane" in keys else "",
-            "name": str(row["name"]) if "name" in keys else "",
-            "message": str(row["message"]) if "message" in keys else "",
-            "tmux_socket": str(row["tmux_socket"]) if "tmux_socket" in keys else "",
+            "pane": str(row["pane"]).strip() if "pane" in keys else "",
+            "name": str(row["name"]).strip() if "name" in keys else "",
+            "message": str(row["message"]).strip() if "message" in keys else "",
+            "tmux_socket": str(row["tmux_socket"]).strip() if "tmux_socket" in keys else "",
             "paused": bool(row["paused"]) if "paused" in keys else False,
             "generation": _coerce_int(row["generation"]) if "generation" in keys else 0,
-            "health": str(row["health"]) if "health" in keys else "",
-            "health_detail": str(row["health_detail"]) if "health_detail" in keys else "",
-            "health_ts": str(row["health_ts"]) if "health_ts" in keys else "",
-            "last_continue_at": str(row["last_continue_at"]) if "last_continue_at" in keys else "",
-            "last_handled_turn": str(row["last_handled_turn"]) if "last_handled_turn" in keys else "",
-            "last_handled_thread": str(row["last_handled_thread"]) if "last_handled_thread" in keys else "",
+            "health": str(row["health"]).strip() if "health" in keys else "",
+            "health_detail": str(row["health_detail"]).strip() if "health_detail" in keys else "",
+            "health_ts": str(row["health_ts"]).strip() if "health_ts" in keys else "",
+            "last_continue_at": str(row["last_continue_at"]).strip() if "last_continue_at" in keys else "",
+            "last_handled_turn": str(row["last_handled_turn"]).strip() if "last_handled_turn" in keys else "",
+            "last_handled_thread": str(row["last_handled_thread"]).strip()
+            if "last_handled_thread" in keys
+            else "",
         }
     )
     return data
@@ -262,6 +240,7 @@ def _runtime_from_row(row: sqlite3.Row | None) -> dict[str, object]:
     runtime_id = str(row["runtime_id"]).strip() if "runtime_id" in keys else ""
     data.update(
         {
+            "agent_id": str(row["agent_id"]).strip() if "agent_id" in keys else "",
             "thread": str(row["thread_id"]).lower() if "thread_id" in keys else "",
             "runtime_id": runtime_id,
             "pid": runtime_id,
@@ -283,15 +262,63 @@ def _runtime_from_row(row: sqlite3.Row | None) -> dict[str, object]:
     return data
 
 
-def _upsert_session(conn: sqlite3.Connection, data: dict[str, object]) -> None:
+def _daemon_scope_from_row(row: sqlite3.Row | None) -> dict[str, object]:
+    data = dict(_DAEMON_SCOPE_DEFAULTS)
+    if row is None:
+        return data
+    keys = set(row.keys())
+    data.update(
+        {
+            "tmux_socket": str(row["tmux_socket"]).strip() if "tmux_socket" in keys else "",
+            "daemon_pid": str(row["daemon_pid"]).strip() if "daemon_pid" in keys else "",
+            "socket_path": str(row["socket_path"]).strip() if "socket_path" in keys else "",
+            "heartbeat_ts": str(row["heartbeat_ts"]).strip() if "heartbeat_ts" in keys else "",
+            "started_ts": str(row["started_ts"]).strip() if "started_ts" in keys else "",
+        }
+    )
+    return data
+
+
+def _agent_query() -> str:
+    return """
+        SELECT agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
+               health, health_detail, health_ts, last_continue_at,
+               last_handled_turn, last_handled_thread
+        FROM agents
+    """
+
+
+def _runtime_query() -> str:
+    return """
+        SELECT a.agent_id, a.thread_id, a.pane, a.tmux_socket,
+               r.runtime_id, r.daemon_pid, r.state_ref, r.watch_log, r.cwd,
+               r.message_inline, r.paused, r.runtime_status, r.runtime_detail,
+               r.generation, r.worker_label, r.heartbeat_ts
+        FROM agent_runtimes r
+        JOIN agents a ON a.agent_id = r.agent_id
+    """
+
+
+def _agent_row_for_thread(conn: sqlite3.Connection, thread_id: str) -> dict[str, object]:
+    row = conn.execute(_agent_query() + " WHERE thread_id = ?", (thread_id.lower(),)).fetchone()
+    return _agent_from_row(row)
+
+
+def _runtime_row_for_thread(conn: sqlite3.Connection, thread_id: str) -> dict[str, object]:
+    row = conn.execute(_runtime_query() + " WHERE a.thread_id = ?", (thread_id.lower(),)).fetchone()
+    return _runtime_from_row(row)
+
+
+def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
     conn.execute(
         """
-        INSERT INTO sessions(
-            thread_id, pane, name, message, tmux_socket, paused, generation,
+        INSERT INTO agents(
+            agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
             health, health_detail, health_ts, last_continue_at,
             last_handled_turn, last_handled_thread
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(thread_id) DO UPDATE SET
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
             pane = excluded.pane,
             name = excluded.name,
             message = excluded.message,
@@ -306,7 +333,8 @@ def _upsert_session(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             last_handled_thread = excluded.last_handled_thread
         """,
         (
-            str(data["thread_id"]).lower(),
+            str(data["agent_id"]).strip(),
+            str(data["thread_id"]).strip().lower(),
             str(data["pane"]).strip(),
             str(data["name"]).strip(),
             str(data["message"]).strip(),
@@ -326,20 +354,18 @@ def _upsert_session(conn: sqlite3.Connection, data: dict[str, object]) -> None:
 def _upsert_runtime(conn: sqlite3.Connection, data: dict[str, object]) -> None:
     conn.execute(
         """
-        INSERT INTO runtimes(
-            thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
-            message_inline, tmux_socket, paused, runtime_status, runtime_detail,
+        INSERT INTO agent_runtimes(
+            agent_id, runtime_id, daemon_pid, state_ref, watch_log, cwd,
+            message_inline, paused, runtime_status, runtime_detail,
             generation, worker_label, heartbeat_ts
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(thread_id) DO UPDATE SET
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent_id) DO UPDATE SET
             runtime_id = excluded.runtime_id,
             daemon_pid = excluded.daemon_pid,
-            pane = excluded.pane,
             state_ref = excluded.state_ref,
             watch_log = excluded.watch_log,
             cwd = excluded.cwd,
             message_inline = excluded.message_inline,
-            tmux_socket = excluded.tmux_socket,
             paused = excluded.paused,
             runtime_status = excluded.runtime_status,
             runtime_detail = excluded.runtime_detail,
@@ -348,15 +374,13 @@ def _upsert_runtime(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             heartbeat_ts = excluded.heartbeat_ts
         """,
         (
-            str(data["thread"]).lower(),
+            str(data["agent_id"]).strip(),
             str(data["runtime_id"]).strip(),
             str(data["daemon_pid"]).strip(),
-            str(data["pane"]).strip(),
             str(data["state"]).strip(),
             str(data["watch"]).strip(),
             str(data["cwd"]).strip(),
             str(data["msg_inline"]).strip(),
-            str(data["tmux_socket"]).strip(),
             1 if data["paused"] else 0,
             str(data["runtime_status"]).strip(),
             str(data["runtime_detail"]).strip(),
@@ -367,24 +391,206 @@ def _upsert_runtime(conn: sqlite3.Connection, data: dict[str, object]) -> None:
     )
 
 
+def _upsert_daemon_scope(conn: sqlite3.Connection, data: dict[str, object]) -> None:
+    conn.execute(
+        """
+        INSERT INTO daemon_scopes(
+            tmux_socket, daemon_pid, socket_path, heartbeat_ts, started_ts
+        ) VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(tmux_socket) DO UPDATE SET
+            daemon_pid = excluded.daemon_pid,
+            socket_path = excluded.socket_path,
+            heartbeat_ts = excluded.heartbeat_ts,
+            started_ts = excluded.started_ts
+        """,
+        (
+            str(data["tmux_socket"]).strip(),
+            str(data["daemon_pid"]).strip(),
+            str(data["socket_path"]).strip(),
+            str(data["heartbeat_ts"]).strip(),
+            str(data["started_ts"]).strip(),
+        ),
+    )
+
+
+def _ensure_agent(conn: sqlite3.Connection, thread_id: str, *, pane: str = "", scope: str = "") -> dict[str, object]:
+    existing = _agent_row_for_thread(conn, thread_id)
+    if existing.get("agent_id"):
+        changed = False
+        if pane and not existing.get("pane"):
+            existing["pane"] = pane
+            changed = True
+        if scope and not existing.get("tmux_socket"):
+            existing["tmux_socket"] = scope
+            changed = True
+        if changed:
+            _upsert_agent(conn, existing)
+        return existing
+
+    created = dict(_AGENT_DEFAULTS)
+    created.update(
+        {
+            "agent_id": _agent_id_for_thread(thread_id),
+            "thread_id": thread_id.lower(),
+            "pane": pane,
+            "tmux_socket": scope,
+        }
+    )
+    _upsert_agent(conn, created)
+    return created
+
+
+def _migrate_session_payload(conn: sqlite3.Connection, payload: dict[str, object]) -> None:
+    thread_id = str(payload.get("thread_id", "")).strip().lower()
+    if not is_thread_id(thread_id):
+        return
+    merged = dict(_AGENT_DEFAULTS)
+    merged.update(
+        {
+            "agent_id": _agent_id_for_thread(thread_id),
+            "thread_id": thread_id,
+            "pane": str(payload.get("pane", "")).strip(),
+            "name": str(payload.get("name", "")).strip(),
+            "message": str(payload.get("message", "")).strip(),
+            "tmux_socket": str(payload.get("tmux_socket", "")).strip(),
+            "paused": bool(payload.get("paused", False)),
+            "generation": _coerce_int(payload.get("generation", 0)),
+            "health": str(payload.get("health", "")).strip(),
+            "health_detail": str(payload.get("health_detail", "")).strip(),
+            "health_ts": str(payload.get("health_ts", "")).strip(),
+            "last_continue_at": str(payload.get("last_continue_at", "")).strip(),
+            "last_handled_turn": str(payload.get("last_handled_turn", "")).strip(),
+            "last_handled_thread": str(payload.get("last_handled_thread", "")).strip(),
+        }
+    )
+    _upsert_agent(conn, merged)
+
+
+def _migrate_runtime_payload(conn: sqlite3.Connection, payload: dict[str, object]) -> None:
+    thread_id = str(payload.get("thread", payload.get("thread_id", ""))).strip().lower()
+    if not is_thread_id(thread_id):
+        return
+    pane = str(payload.get("pane", "")).strip()
+    scope = str(payload.get("tmux_socket", "")).strip()
+    agent = _ensure_agent(conn, thread_id, pane=pane, scope=scope)
+    merged = dict(_RUNTIME_DEFAULTS)
+    merged.update(
+        {
+            "agent_id": str(agent["agent_id"]).strip(),
+            "thread": thread_id,
+            "runtime_id": str(payload.get("runtime_id", payload.get("pid", ""))).strip(),
+            "daemon_pid": str(payload.get("daemon_pid", "")).strip(),
+            "pane": pane or str(agent.get("pane", "")).strip(),
+            "state": str(payload.get("state", payload.get("state_ref", ""))).strip() or session_state_ref(thread_id),
+            "watch": str(payload.get("watch", payload.get("watch_log", ""))).strip(),
+            "cwd": str(payload.get("cwd", "")).strip(),
+            "msg_inline": str(payload.get("msg_inline", payload.get("message_inline", ""))).strip(),
+            "tmux_socket": scope or str(agent.get("tmux_socket", "")).strip(),
+            "paused": bool(payload.get("paused", False)),
+            "runtime_status": str(payload.get("runtime_status", "")).strip(),
+            "runtime_detail": str(payload.get("runtime_detail", "")).strip(),
+            "generation": _coerce_int(payload.get("generation", 0)),
+            "worker_label": str(payload.get("worker_label", "")).strip()
+            or str(payload.get("runtime_id", payload.get("pid", ""))).strip(),
+            "heartbeat_ts": str(payload.get("heartbeat_ts", "")).strip(),
+        }
+    )
+    if pane and pane != agent.get("pane", ""):
+        agent = dict(agent)
+        agent["pane"] = pane
+        _upsert_agent(conn, agent)
+    _upsert_runtime(conn, merged)
+
+
+def _maybe_migrate_legacy_json(conn: sqlite3.Connection, state_dir: str) -> None:
+    if _migration_done(conn, _JSON_MIGRATION_KEY):
+        return
+
+    state_root = Path(state_dir)
+    session_paths = sorted(state_root.glob("acw_session.*.json"))
+    runtime_paths = sorted(state_root.glob("acw_runtime.*.json"))
+
+    with conn:
+        for path in session_paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                _migrate_session_payload(conn, payload)
+
+        for path in runtime_paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                _migrate_runtime_payload(conn, payload)
+
+        _mark_migration_done(conn, _JSON_MIGRATION_KEY)
+
+    for path in [*session_paths, *runtime_paths]:
+        path.unlink(missing_ok=True)
+
+
+def _maybe_migrate_legacy_sqlite_tables(conn: sqlite3.Connection) -> None:
+    if _migration_done(conn, _SQLITE_MIGRATION_KEY):
+        return
+
+    has_sessions = _table_exists(conn, "sessions")
+    has_runtimes = _table_exists(conn, "runtimes")
+    if not has_sessions and not has_runtimes:
+        with conn:
+            _mark_migration_done(conn, _SQLITE_MIGRATION_KEY)
+        return
+
+    with conn:
+        if has_sessions:
+            rows = conn.execute(
+                """
+                SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
+                       health, health_detail, health_ts, last_continue_at,
+                       last_handled_turn, last_handled_thread
+                FROM sessions
+                """
+            ).fetchall()
+            for row in rows:
+                _migrate_session_payload(conn, dict(row))
+
+        if has_runtimes:
+            rows = conn.execute(
+                """
+                SELECT thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
+                       message_inline, tmux_socket, paused, runtime_status, runtime_detail,
+                       generation, worker_label, heartbeat_ts
+                FROM runtimes
+                """
+            ).fetchall()
+            for row in rows:
+                payload = dict(row)
+                payload["thread"] = payload.pop("thread_id", "")
+                payload["state"] = payload.pop("state_ref", "")
+                payload["watch"] = payload.pop("watch_log", "")
+                payload["msg_inline"] = payload.pop("message_inline", "")
+                _migrate_runtime_payload(conn, payload)
+
+        if has_runtimes:
+            conn.execute("DROP TABLE IF EXISTS runtimes")
+        if has_sessions:
+            conn.execute("DROP TABLE IF EXISTS sessions")
+        _mark_migration_done(conn, _SQLITE_MIGRATION_KEY)
+
+
 def read_session_state(thread_id: str, *, state_dir: str) -> dict[str, object]:
     thread = (thread_id or "").strip().lower()
     if not is_thread_id(thread):
         return {}
     conn = _connect(state_dir)
     try:
-        row = conn.execute(
-            """
-            SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
-                   health, health_detail, health_ts, last_continue_at,
-                   last_handled_turn, last_handled_thread
-            FROM sessions WHERE thread_id = ?
-            """,
-            (thread,),
-        ).fetchone()
+        row = conn.execute(_agent_query() + " WHERE thread_id = ?", (thread,)).fetchone()
         if row is None:
             return {}
-        return _session_from_row(row)
+        return _agent_from_row(row)
     finally:
         conn.close()
 
@@ -395,23 +601,16 @@ def write_session_state(thread_id: str, data: dict[str, object], *, state_dir: s
         return
     conn = _connect(state_dir)
     try:
-        existing = _session_from_row(
-            conn.execute(
-                """
-                SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
-                       health, health_detail, health_ts, last_continue_at,
-                       last_handled_turn, last_handled_thread
-                FROM sessions WHERE thread_id = ?
-                """,
-                (thread,),
-            ).fetchone()
-        )
-        merged = dict(_SESSION_DEFAULTS)
+        existing = _agent_row_for_thread(conn, thread)
+        merged = dict(_AGENT_DEFAULTS)
         merged.update(existing)
         merged.update(data)
         merged["thread_id"] = thread
+        merged["agent_id"] = str(merged.get("agent_id", "")).strip() or str(existing.get("agent_id", "")).strip()
+        if not merged["agent_id"]:
+            merged["agent_id"] = _agent_id_for_thread(thread)
         with conn:
-            _upsert_session(conn, merged)
+            _upsert_agent(conn, merged)
     finally:
         conn.close()
 
@@ -423,7 +622,7 @@ def remove_session_state(thread_id: str, *, state_dir: str) -> bool:
     conn = _connect(state_dir)
     try:
         with conn:
-            deleted = conn.execute("DELETE FROM sessions WHERE thread_id = ?", (thread,)).rowcount
+            deleted = conn.execute("DELETE FROM agents WHERE thread_id = ?", (thread,)).rowcount
         return bool(deleted)
     finally:
         conn.close()
@@ -433,18 +632,12 @@ def load_sessions(*, state_dir: str, scope: str) -> list[dict[str, object]]:
     conn = _connect(state_dir)
     try:
         rows = conn.execute(
-            """
-            SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
-                   health, health_detail, health_ts, last_continue_at
-            FROM sessions
-            WHERE tmux_socket = ?
-            ORDER BY name, thread_id
-            """,
+            _agent_query() + " WHERE tmux_socket = ? ORDER BY name, thread_id",
             (scope,),
         ).fetchall()
         result: list[dict[str, object]] = []
         for row in rows:
-            session = _session_from_row(row)
+            session = _agent_from_row(row)
             session["state_file"] = session_state_ref(str(session["thread_id"]))
             result.append(session)
         return result
@@ -464,22 +657,22 @@ def write_runtime_state(
         return
     conn = _connect(state_dir)
     try:
-        existing = _runtime_from_row(
-            conn.execute(
-                """
-                SELECT thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
-                       message_inline, tmux_socket, paused, runtime_status, runtime_detail,
-                       generation, worker_label, heartbeat_ts
-                FROM runtimes WHERE thread_id = ?
-                """,
-                (thread,),
-            ).fetchone()
-        )
+        existing = _runtime_row_for_thread(conn, thread)
+        pane = str(data.get("pane", existing.get("pane", ""))).strip()
+        agent = _ensure_agent(conn, thread, pane=pane, scope=scope)
+        if pane and pane != agent.get("pane", ""):
+            agent = dict(agent)
+            agent["pane"] = pane
+            with conn:
+                _upsert_agent(conn, agent)
+
         merged = dict(_RUNTIME_DEFAULTS)
         merged.update(existing)
         merged.update(data)
+        merged["agent_id"] = str(agent["agent_id"]).strip()
         merged["thread"] = thread
-        merged["tmux_socket"] = scope
+        merged["pane"] = str(agent.get("pane", "")).strip()
+        merged["tmux_socket"] = str(agent.get("tmux_socket", "")).strip() or scope
         merged["state"] = str(merged.get("state", "")).strip() or session_state_ref(thread)
         merged["runtime_id"] = str(merged.get("runtime_id", "")).strip() or str(merged.get("pid", "")).strip()
         merged["worker_label"] = str(merged.get("worker_label", "")).strip() or str(merged["runtime_id"]).strip()
@@ -495,11 +688,13 @@ def remove_runtime_state(thread_id: str, *, state_dir: str, scope: str = "") -> 
         return
     conn = _connect(state_dir)
     try:
+        agent = _agent_row_for_thread(conn, thread)
+        if not agent.get("agent_id"):
+            return
+        if scope and str(agent.get("tmux_socket", "")).strip() != scope:
+            return
         with conn:
-            if scope:
-                conn.execute("DELETE FROM runtimes WHERE thread_id = ? AND tmux_socket = ?", (thread, scope))
-            else:
-                conn.execute("DELETE FROM runtimes WHERE thread_id = ?", (thread,))
+            conn.execute("DELETE FROM agent_runtimes WHERE agent_id = ?", (str(agent["agent_id"]),))
     finally:
         conn.close()
 
@@ -508,18 +703,11 @@ def read_runtime_rows(*, state_dir: str, scope: str) -> list[dict[str, object]]:
     conn = _connect(state_dir)
     try:
         rows = conn.execute(
-            """
-            SELECT thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
-                   message_inline, tmux_socket, paused, runtime_status, runtime_detail,
-                   generation, worker_label, heartbeat_ts
-            FROM runtimes
-            WHERE tmux_socket = ?
-            ORDER BY pane, thread_id
-            """,
+            _runtime_query() + " WHERE a.tmux_socket = ? ORDER BY a.pane, a.thread_id",
             (scope,),
         ).fetchall()
         result: list[dict[str, object]] = []
-        stale_threads: list[str] = []
+        stale_agent_ids: list[str] = []
         for row in rows:
             runtime = _runtime_from_row(row)
             daemon_pid = str(runtime.get("daemon_pid", "")).strip()
@@ -527,14 +715,82 @@ def read_runtime_rows(*, state_dir: str, scope: str) -> list[dict[str, object]]:
                 try:
                     os.kill(int(daemon_pid), 0)
                 except OSError:
-                    stale_threads.append(str(runtime["thread"]))
+                    stale_agent_ids.append(str(runtime["agent_id"]).strip())
                     continue
             runtime["paused"] = "1" if runtime["paused"] else ""
             result.append(runtime)
-        if stale_threads:
+        if stale_agent_ids:
             with conn:
-                conn.executemany("DELETE FROM runtimes WHERE thread_id = ?", [(thread,) for thread in stale_threads])
+                conn.executemany(
+                    "DELETE FROM agent_runtimes WHERE agent_id = ?",
+                    [(agent_id,) for agent_id in stale_agent_ids],
+                )
         return result
+    finally:
+        conn.close()
+
+
+def write_daemon_scope_state(
+    *,
+    state_dir: str,
+    scope: str,
+    daemon_pid: str,
+    socket_path: str,
+    heartbeat_ts: str,
+    started_ts: str = "",
+) -> None:
+    conn = _connect(state_dir)
+    try:
+        merged = dict(_DAEMON_SCOPE_DEFAULTS)
+        merged.update(
+            _daemon_scope_from_row(
+                conn.execute(
+                    """
+                    SELECT tmux_socket, daemon_pid, socket_path, heartbeat_ts, started_ts
+                    FROM daemon_scopes
+                    WHERE tmux_socket = ?
+                    """,
+                    (scope,),
+                ).fetchone()
+            )
+        )
+        merged.update(
+            {
+                "tmux_socket": scope,
+                "daemon_pid": daemon_pid,
+                "socket_path": socket_path,
+                "heartbeat_ts": heartbeat_ts,
+            }
+        )
+        if started_ts:
+            merged["started_ts"] = started_ts
+        with conn:
+            _upsert_daemon_scope(conn, merged)
+    finally:
+        conn.close()
+
+
+def read_daemon_scope_state(*, state_dir: str, scope: str) -> dict[str, object]:
+    conn = _connect(state_dir)
+    try:
+        row = conn.execute(
+            """
+            SELECT tmux_socket, daemon_pid, socket_path, heartbeat_ts, started_ts
+            FROM daemon_scopes
+            WHERE tmux_socket = ?
+            """,
+            (scope,),
+        ).fetchone()
+        return _daemon_scope_from_row(row)
+    finally:
+        conn.close()
+
+
+def clear_daemon_scope_state(*, state_dir: str, scope: str) -> None:
+    conn = _connect(state_dir)
+    try:
+        with conn:
+            conn.execute("DELETE FROM daemon_scopes WHERE tmux_socket = ?", (scope,))
     finally:
         conn.close()
 
@@ -558,33 +814,38 @@ def cleanup_rows(
         removed_runtimes = 0
         removed_sessions = 0
         runtime_rows = conn.execute(
-            "SELECT thread_id, daemon_pid FROM runtimes WHERE tmux_socket = ?",
+            """
+            SELECT a.agent_id, a.thread_id, r.daemon_pid
+            FROM agent_runtimes r
+            JOIN agents a ON a.agent_id = r.agent_id
+            WHERE a.tmux_socket = ?
+            """,
             (scope,),
         ).fetchall()
-        stale_threads: list[str] = []
+        stale_agent_ids: list[str] = []
         for row in runtime_rows:
             daemon_pid = str(row["daemon_pid"]).strip()
             if daemon_pid and daemon_pid_alive(daemon_pid):
                 continue
-            stale_threads.append(str(row["thread_id"]).lower())
+            stale_agent_ids.append(str(row["agent_id"]).strip())
         with conn:
-            if stale_threads:
+            if stale_agent_ids:
                 removed_runtimes = conn.executemany(
-                    "DELETE FROM runtimes WHERE thread_id = ?",
-                    [(thread,) for thread in stale_threads],
+                    "DELETE FROM agent_runtimes WHERE agent_id = ?",
+                    [(agent_id,) for agent_id in stale_agent_ids],
                 ).rowcount
-            removable_sessions = [
-                row[0]
+            removable_agents = [
+                str(row["agent_id"]).strip()
                 for row in conn.execute(
-                    "SELECT thread_id FROM sessions WHERE tmux_socket = ?",
+                    "SELECT agent_id, thread_id FROM agents WHERE tmux_socket = ?",
                     (scope,),
                 ).fetchall()
-                if str(row[0]).lower() not in active_threads
+                if str(row["thread_id"]).lower() not in active_threads
             ]
-            if removable_sessions:
+            if removable_agents:
                 removed_sessions = conn.executemany(
-                    "DELETE FROM sessions WHERE thread_id = ?",
-                    [(thread,) for thread in removable_sessions],
+                    "DELETE FROM agents WHERE agent_id = ?",
+                    [(agent_id,) for agent_id in removable_agents],
                 ).rowcount
         return removed_sessions, removed_runtimes
     finally:
