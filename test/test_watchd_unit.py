@@ -366,16 +366,43 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertGreaterEqual(separator_count, 2)
 
     def test_resolve_thread_id_fails_when_unknown(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%1",
+                "",
+                window_label="0:1:uvm",
+                window_name="uvm",
+                detected_thread_detail="could not determine thread_id for pane=%1 from the live Codex process",
+                has_codex_process=True,
+            ),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
             with redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     acw.resolve_thread_id("%1", "")
 
     def test_resolve_thread_id_fails_for_auto_when_unknown(self):
-        with patch.object(acw, "detect_thread_id_for_pane", return_value=None):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%1",
+                "",
+                window_label="0:1:uvm",
+                window_name="uvm",
+                detected_thread_detail="could not determine thread_id for pane=%1 from the live Codex process",
+                has_codex_process=True,
+            ),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
             with redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     acw.resolve_thread_id("%1", "auto")
+
+    def test_resolve_thread_id_uses_runtime_model_thread(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%1", THREAD, window_label="0:1:uvm", window_name="uvm"),),
+        ))
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            self.assertEqual(THREAD, acw.resolve_thread_id("%1", ""))
 
     def test_start_rejects_duplicate_thread_watcher(self):
         err = io.StringIO()
@@ -712,9 +739,30 @@ class WatchdUnitTests(unittest.TestCase):
             return None
 
         with patch.object(acw, "run_tmux", side_effect=fake_tmux):
-            with patch.object(acw, "_threads_from_pstree", return_value=[THREAD]):
-                mapping = acw._build_thread_pane_map()
+            with patch.object(
+                acw.subprocess,
+                "check_output",
+                return_value="222 1234 codex\n",
+            ):
+                with patch.object(acw, "_thread_from_codex_pid", return_value=THREAD):
+                    mapping = acw._build_thread_pane_map()
         self.assertEqual("%7", mapping[THREAD])
+
+    def test_list_live_pane_records_uses_one_process_snapshot_for_all_panes(self):
+        listing = (
+            "0\t7\tformal\t%7\t1234\n"
+            "0\t8\tbugs\t%8\t5678\n"
+        )
+        with patch.object(acw, "run_tmux", return_value=listing):
+            with patch.object(
+                acw.subprocess,
+                "check_output",
+                return_value="222 1234 codex\n333 5678 codex\n",
+            ) as check_output:
+                with patch.object(acw, "_thread_from_codex_pid", side_effect=[THREAD, OTHER_THREAD]):
+                    rows = acw._list_live_pane_records()
+        self.assertEqual(1, check_output.call_count)
+        self.assertEqual([THREAD, OTHER_THREAD], [row.detected_thread for row in rows])
 
     def test_build_thread_pane_map_does_not_guess_when_process_tree_has_no_thread(self):
         def fake_tmux(*args):
@@ -723,8 +771,12 @@ class WatchdUnitTests(unittest.TestCase):
             return None
 
         with patch.object(acw, "run_tmux", side_effect=fake_tmux):
-            with patch.object(acw, "_threads_from_pstree", return_value=[]):
-                with patch.object(acw, "_discover_thread_for_pane", side_effect=AssertionError("should not be called")):
+            with patch.object(
+                acw.subprocess,
+                "check_output",
+                return_value="222 1234 codex\n",
+            ):
+                with patch.object(acw, "_thread_from_codex_pid", return_value=None):
                     mapping = acw._build_thread_pane_map()
         self.assertEqual({}, mapping)
 
@@ -1127,21 +1179,99 @@ class WatchdUnitTests(unittest.TestCase):
         stop_watchers.assert_not_called()
         self.assertIn("could not determine thread_id for pane=%7", err.getvalue())
 
-    def test_restart_codex_in_pane_sends_resume_command(self):
-        with patch.object(acw, "run_tmux", return_value="") as run_tmux:
-            with patch.object(acw.time, "sleep") as sleep:
-                with patch.object(acw, "_accept_directory_trust_prompt_in_pane") as accept_trust:
-                    acw._restart_codex_in_pane("%7", THREAD)
+    def test_codex_top_level_descendants_returns_direct_child_of_shell(self):
+        graph = (
+            {
+                "1000": ("2000",),
+                "2000": ("3000",),
+            },
+            {
+                "1000": "bash",
+                "2000": "node",
+                "3000": "codex",
+            },
+            {
+                "1000": "1",
+                "2000": "1000",
+                "3000": "2000",
+            },
+        )
+        self.assertEqual(["2000"], acw._codex_top_level_descendants("1000", graph))
+
+    def test_terminate_codex_processes_in_pane_sends_sigterm_to_top_level_descendant(self):
+        with patch.object(acw, "_pane_command_snapshot", return_value=("node", "bash", "1000", "")):
+            with patch.object(acw, "_codex_top_level_descendants", return_value=["2000"]) as top_level:
+                with patch.object(acw.os, "kill") as kill:
+                    ok, error = acw._terminate_codex_processes_in_pane("%7")
+        self.assertTrue(ok)
+        self.assertEqual("", error)
+        top_level.assert_called_once_with("1000")
+        kill.assert_called_once_with(2000, acw.signal.SIGTERM)
+
+    def test_restart_codex_in_pane_waits_for_shell_before_resume(self):
+        with patch.object(acw, "_wait_for_shell_prompt", side_effect=[(False, ""), (True, "")]) as wait_shell:
+            with patch.object(acw, "_terminate_codex_processes_in_pane", return_value=(True, "")) as terminate:
+                with patch.object(acw, "run_tmux", return_value="") as run_tmux:
+                    with patch.object(acw, "_wait_for_codex_process", return_value=(True, "")) as wait_codex:
+                        with patch.object(acw, "_accept_directory_trust_prompt_in_pane") as accept_trust:
+                            acw._restart_codex_in_pane("%7", THREAD)
         self.assertEqual(
             [
-                (("send-keys", "-t", "%7", "C-c"),),
                 (("send-keys", "-t", "%7", "-l", f"codex resume {THREAD}"),),
                 (("send-keys", "-t", "%7", "C-m"),),
             ],
             run_tmux.call_args_list,
         )
-        sleep.assert_called_once_with(0.2)
-        accept_trust.assert_called_once_with("%7")
+        self.assertEqual(
+            [(("%7",), {"attempts": 1}), (("%7",), {})],
+            [(call.args, call.kwargs) for call in wait_shell.call_args_list],
+        )
+        terminate.assert_called_once_with("%7")
+        wait_codex.assert_called_once_with("%7")
+        accept_trust.assert_called_once_with("%7", timeout_secs=2.0)
+
+    def test_restart_codex_in_pane_fails_when_shell_never_returns(self):
+        with patch.object(
+            acw,
+            "_wait_for_shell_prompt",
+            side_effect=[
+                (False, ""),
+                (False, "pane %7 did not return to a shell prompt (current command 'node', expected 'bash')"),
+            ],
+        ) as wait_shell:
+            with patch.object(acw, "_terminate_codex_processes_in_pane", return_value=(True, "")) as terminate:
+                with patch.object(acw, "run_tmux", return_value="") as run_tmux:
+                    with redirect_stderr(io.StringIO()) as err:
+                        with self.assertRaises(SystemExit) as ctx:
+                            acw._restart_codex_in_pane("%7", THREAD)
+        self.assertEqual(1, ctx.exception.code)
+        terminate.assert_called_once_with("%7")
+        self.assertEqual([], run_tmux.call_args_list)
+        self.assertEqual(
+            [(("%7",), {"attempts": 1}), (("%7",), {})],
+            [(call.args, call.kwargs) for call in wait_shell.call_args_list],
+        )
+        self.assertIn("did not return to a shell prompt", err.getvalue())
+
+    def test_restart_codex_in_pane_fails_when_codex_does_not_relaunch(self):
+        with patch.object(acw, "_wait_for_shell_prompt", side_effect=[(False, ""), (True, "")]) as wait_shell:
+            with patch.object(acw, "_terminate_codex_processes_in_pane", return_value=(True, "")) as terminate:
+                with patch.object(acw, "run_tmux", return_value="") as run_tmux:
+                    with patch.object(acw, "_wait_for_codex_process", return_value=(False, "Codex did not relaunch in pane %7")):
+                        with redirect_stderr(io.StringIO()) as err:
+                            with self.assertRaises(SystemExit) as ctx:
+                                acw._restart_codex_in_pane("%7", THREAD)
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn(
+            (("send-keys", "-t", "%7", "-l", f"codex resume {THREAD}"),),
+            run_tmux.call_args_list,
+        )
+        self.assertEqual(
+            [(("%7",), {"attempts": 1}), (("%7",), {})],
+            [(call.args, call.kwargs) for call in wait_shell.call_args_list],
+        )
+        terminate.assert_called_once_with("%7")
+        self.assertIn("Codex did not relaunch", err.getvalue())
 
     def test_accept_directory_trust_prompt_in_pane_confirms_prompt(self):
         with patch.object(

@@ -20,7 +20,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from auto_continue_logwatch import discover_thread_for_pane as _discover_thread_for_pane
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
 
@@ -73,7 +72,21 @@ DEFAULT_MESSAGE_TEXT = (
     "please continue with the workstream.\n\n"
     "Keep momentum, validate changes, and move to the next highest-value task.\n"
 )
-PSTREE_PROCESS_PID_RE = re.compile(r"(?<!\{)[A-Za-z0-9_.+-]+\((\d+)\)")
+KNOWN_SHELL_COMMANDS = frozenset(
+    command
+    for command in {
+        os.path.basename(os.environ.get("SHELL", "")).strip().lower(),
+        "bash",
+        "sh",
+        "dash",
+        "zsh",
+        "fish",
+        "ksh",
+        "tcsh",
+        "csh",
+    }
+    if command
+)
 
 os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -564,28 +577,21 @@ def resolve_start_pane_target(target: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def detect_thread_id_for_pane(pane: str) -> str | None:
-    tid = _discover_thread_for_pane(pane)
-    if tid and is_thread_id(tid):
-        return tid
-    return None
-
-
-def resolve_thread_id(pane: str, requested: str = "") -> str:
+def resolve_thread_id(pane: str, requested: str = "", *, model: RuntimeModel | None = None) -> str:
     if requested and requested != "auto":
         if is_thread_id(requested):
             return requested.lower()
         print(f"error: invalid thread_id '{requested}'", file=sys.stderr)
         sys.exit(1)
 
-    tid = detect_thread_id_for_pane(pane)
+    if model is None:
+        model = _build_runtime_model()
+    tid, thread_error = _strict_thread_for_pane(model, pane)
     if tid and is_thread_id(tid):
         return tid
 
-    print(
-        f"error: could not determine thread_id for pane={pane}; start requires a concrete thread id",
-        file=sys.stderr,
-    )
+    error_text = thread_error or f"could not determine thread_id for pane={pane}; start requires a concrete thread id"
+    print(f"error: {error_text}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -1042,7 +1048,7 @@ def cmd_start(argv: list[str]) -> None:
         _print_progress(f"start: using explicit thread_id for pane={pane}")
     else:
         _print_progress(f"start: resolving Codex thread for pane={pane}")
-    thread_id = resolve_thread_id(pane, thread_arg)
+    thread_id = resolve_thread_id(pane, thread_arg, model=model)
     _print_progress(f"start: thread_id={thread_id}")
 
     other = _other_watcher_for_thread(pane, thread_id)
@@ -1372,7 +1378,7 @@ def _restart_panes(panes: list[str]) -> None:
             print(f"restart: failure detail: {detail}")
 
 
-def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 15.0) -> bool:
+def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 2.0) -> bool:
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-80") or ""
@@ -1385,18 +1391,136 @@ def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 15.0
     return False
 
 
+def _command_name_for_pid(pid: str) -> str:
+    if not pid.isdigit():
+        return ""
+    proc_comm = Path("/proc") / pid / "comm"
+    try:
+        return proc_comm.read_text().strip().lower()
+    except OSError:
+        pass
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", pid, "-o", "comm="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip().lower()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def _pane_command_snapshot(pane: str) -> tuple[str, str, str, str]:
+    listing = run_tmux("list-panes", "-t", pane, "-F", "#{pane_current_command}\t#{pane_pid}")
+    if listing is None:
+        return "", "", "", f"tmux list-panes failed for pane={pane}"
+    line = next((entry for entry in listing.splitlines() if entry.strip()), "")
+    if not line:
+        return "", "", "", f"tmux pane {pane} is missing"
+    parts = line.split("\t")
+    current_command = parts[0].strip().lower() if parts else ""
+    pane_pid = parts[1].strip() if len(parts) > 1 else ""
+    if not pane_pid.isdigit():
+        return current_command, "", "", f"tmux pane {pane} did not report a valid pane pid"
+    shell_command = _command_name_for_pid(pane_pid)
+    if not shell_command:
+        return current_command, "", pane_pid, f"could not determine root shell command for pane={pane}"
+    return current_command, shell_command, pane_pid, ""
+
+
+def _wait_for_shell_prompt(
+    pane: str,
+    *,
+    attempts: int = 30,
+    poll_interval_secs: float = 0.1,
+) -> tuple[bool, str]:
+    last_current = ""
+    last_shell = ""
+    for index in range(max(1, attempts)):
+        current_command, shell_command, _pane_pid, error = _pane_command_snapshot(pane)
+        if error:
+            return False, error
+        last_current = current_command
+        last_shell = shell_command
+        if shell_command not in KNOWN_SHELL_COMMANDS:
+            return False, f"pane {pane} root command is '{shell_command}', not a supported shell"
+        if current_command == shell_command:
+            return True, ""
+        if index + 1 < attempts:
+            time.sleep(poll_interval_secs)
+    current_label = last_current or "unknown"
+    shell_label = last_shell or "shell"
+    return (
+        False,
+        f"pane {pane} did not return to a shell prompt (current command '{current_label}', expected '{shell_label}')",
+    )
+
+
+def _wait_for_codex_process(
+    pane: str,
+    *,
+    attempts: int = 30,
+    poll_interval_secs: float = 0.1,
+) -> tuple[bool, str]:
+    for index in range(max(1, attempts)):
+        _current_command, _shell_command, pane_pid, error = _pane_command_snapshot(pane)
+        if error:
+            return False, error
+        if _codex_pids_in_process_tree(pane_pid):
+            return True, ""
+        if index + 1 < attempts:
+            time.sleep(poll_interval_secs)
+    return False, f"Codex did not relaunch in pane {pane}"
+
+
+def _terminate_codex_processes_in_pane(pane: str) -> tuple[bool, str]:
+    current_command, shell_command, pane_pid, error = _pane_command_snapshot(pane)
+    if error:
+        return False, error
+    if shell_command in KNOWN_SHELL_COMMANDS and current_command == shell_command:
+        return True, ""
+
+    top_level_pids = _codex_top_level_descendants(pane_pid)
+    if not top_level_pids:
+        current_label = current_command or "unknown"
+        return False, f"pane {pane} is running '{current_label}', but no live Codex process was found to restart"
+
+    for pid in top_level_pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            return False, f"failed to terminate Codex pid={pid} in pane {pane}: {exc}"
+    return True, ""
+
+
 def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
-    if run_tmux("send-keys", "-t", pane, "C-c") is None:
-        print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
-        sys.exit(1)
-    time.sleep(0.2)
+    at_shell, shell_error = _wait_for_shell_prompt(pane, attempts=1)
+    if not at_shell:
+        _print_progress(f"restarting codex: terminating live Codex process in pane={pane}")
+        terminated, terminate_error = _terminate_codex_processes_in_pane(pane)
+        if not terminated:
+            print(f"error: {terminate_error}", file=sys.stderr)
+            sys.exit(1)
+        _print_progress(f"restarting codex: waiting for shell prompt in pane={pane}")
+        at_shell, shell_error = _wait_for_shell_prompt(pane)
+        if not at_shell:
+            print(f"error: {shell_error}", file=sys.stderr)
+            sys.exit(1)
+    _print_progress(f"restarting codex: launching codex resume in pane={pane}")
     if run_tmux("send-keys", "-t", pane, "-l", f"codex resume {thread_id}") is None:
         print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
         sys.exit(1)
     if run_tmux("send-keys", "-t", pane, "C-m") is None:
         print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
         sys.exit(1)
-    _accept_directory_trust_prompt_in_pane(pane)
+    _print_progress(f"restarting codex: waiting for Codex process in pane={pane}")
+    relaunched, relaunch_error = _wait_for_codex_process(pane)
+    if not relaunched:
+        print(f"error: {relaunch_error}", file=sys.stderr)
+        sys.exit(1)
+    _print_progress(f"restarting codex: checking directory trust prompt in pane={pane}")
+    _accept_directory_trust_prompt_in_pane(pane, timeout_secs=2.0)
 
 
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
@@ -1578,19 +1702,74 @@ def _build_pane_window_map() -> dict[str, str]:
     return mapping
 
 
-def _threads_from_pstree(shell_pid: str) -> list[str]:
-    """Walk a process tree and return thread_ids from any codex processes found."""
+def _load_process_graph() -> tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str]]:
+    """Return a process-tree snapshot as ``(children_by_parent, command_by_pid, parent_by_pid)``."""
     try:
-        result = subprocess.run(
-            ["pstree", "-p", shell_pid],
-            capture_output=True, text=True, check=False,
+        output = subprocess.check_output(
+            ["ps", "-eo", "pid=", "-o", "ppid=", "-o", "comm="],
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
-        if result.returncode != 0:
-            return []
-    except FileNotFoundError:
-            return []
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {}, {}, {}
+
+    children_by_parent: dict[str, list[str]] = defaultdict(list)
+    command_by_pid: dict[str, str] = {}
+    parent_by_pid: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, ppid, command = parts
+        if not pid.isdigit() or not ppid.isdigit():
+            continue
+        children_by_parent[ppid].append(pid)
+        command_by_pid[pid] = command.strip()
+        parent_by_pid[pid] = ppid
+
+    return _freeze_multimap(children_by_parent), command_by_pid, parent_by_pid  # type: ignore[arg-type]
+
+
+def _load_process_snapshot() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
+    """Return a process-tree snapshot as ``(children_by_parent, command_by_pid)``."""
+    children_by_parent, command_by_pid, _parent_by_pid = _load_process_graph()
+    return children_by_parent, command_by_pid
+
+
+def _codex_pids_in_process_tree(
+    shell_pid: str,
+    process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
+) -> list[str]:
+    """Return Codex process ids found below ``shell_pid`` in one process snapshot."""
+    if not shell_pid.isdigit():
+        return []
+    if process_snapshot is None:
+        process_snapshot = _load_process_snapshot()
+
+    children_by_parent, command_by_pid = process_snapshot
+    codex_pids: list[str] = []
+    stack = list(children_by_parent.get(shell_pid, ()))
+    seen: set[str] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if command_by_pid.get(pid, "") == "codex":
+            codex_pids.append(pid)
+        stack.extend(children_by_parent.get(pid, ()))
+    return codex_pids
+
+
+def _threads_from_process_tree(
+    shell_pid: str,
+    process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
+) -> list[str]:
+    """Walk a process tree and return thread_ids from any Codex processes found."""
+    if process_snapshot is None:
+        process_snapshot = _load_process_snapshot()
     threads: list[str] = []
-    for pid in PSTREE_PROCESS_PID_RE.findall(result.stdout):
+    for pid in _codex_pids_in_process_tree(shell_pid, process_snapshot):
         tid = _thread_from_codex_pid(pid)
         if tid:
             threads.append(tid)
@@ -1598,40 +1777,43 @@ def _threads_from_pstree(shell_pid: str) -> list[str]:
     return threads
 
 
-def _codex_pids_from_pstree(shell_pid: str) -> list[str]:
-    """Return Codex process ids found in a pane's process tree."""
-    try:
-        result = subprocess.run(
-            ["pstree", "-p", shell_pid],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            return []
-    except FileNotFoundError:
+def _codex_top_level_descendants(
+    shell_pid: str,
+    process_graph: tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str]] | None = None,
+) -> list[str]:
+    if not shell_pid.isdigit():
         return []
+    if process_graph is None:
+        process_graph = _load_process_graph()
+    children_by_parent, command_by_pid, parent_by_pid = process_graph
+    codex_pids = _codex_pids_in_process_tree(shell_pid, (children_by_parent, command_by_pid))
+    top_level: set[str] = set()
+    for codex_pid in codex_pids:
+        candidate = codex_pid
+        while True:
+            parent = parent_by_pid.get(candidate, "")
+            if not parent or parent == shell_pid:
+                break
+            candidate = parent
+        top_level.add(candidate)
+    return sorted(top_level)
 
-    codex_pids: list[str] = []
-    for pid in PSTREE_PROCESS_PID_RE.findall(result.stdout):
-        try:
-            exe = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
-        except OSError:
-            continue
-        if exe.removesuffix(" (deleted)") == "codex":
-            codex_pids.append(pid)
-    return codex_pids
 
-
-def _pane_thread_probe(pane_id: str, shell_pid: str) -> tuple[str, str, str, bool]:
+def _pane_thread_probe(
+    pane_id: str,
+    shell_pid: str,
+    process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
+) -> tuple[str, str, str, bool]:
     """Return ``(thread_id, source, detail, has_codex_process)`` for a pane."""
     if not shell_pid.isdigit():
         return "", "", "", False
 
     # Prefer direct pid->thread mapping; this is strong evidence.
-    tids = _threads_from_pstree(shell_pid)
+    tids = _threads_from_process_tree(shell_pid, process_snapshot)
     if tids:
         return tids[0].lower(), "pid", "", True
 
-    codex_pids = _codex_pids_from_pstree(shell_pid)
+    codex_pids = _codex_pids_in_process_tree(shell_pid, process_snapshot)
     if not codex_pids:
         return "", "", "", False
     return "", "", f"could not determine thread_id for pane={pane_id} from the live Codex process", True
@@ -1641,6 +1823,7 @@ def _build_thread_pane_map() -> dict[str, str]:
     """Map thread_id -> current tmux pane_id by scanning pane process trees."""
     listing = run_tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}")
     mapping: dict[str, str] = {}
+    process_snapshot = _load_process_snapshot()
     if listing:
         for line in listing.splitlines():
             parts = line.strip().split("\t")
@@ -1649,7 +1832,7 @@ def _build_thread_pane_map() -> dict[str, str]:
             pane_id, shell_pid = parts[0], parts[1]
             if not pane_id or not shell_pid.isdigit():
                 continue
-            tids = _threads_from_pstree(shell_pid)
+            tids = _threads_from_process_tree(shell_pid, process_snapshot)
             for tid in tids:
                 mapping[tid] = pane_id
     return mapping
@@ -1886,6 +2069,7 @@ def _list_live_pane_records() -> list[LivePaneRecord]:
     if not listing:
         return records
 
+    process_snapshot = _load_process_snapshot()
     for line in listing.splitlines():
         parts = line.split("\t")
         if len(parts) < 5:
@@ -1897,6 +2081,7 @@ def _list_live_pane_records() -> list[LivePaneRecord]:
         detected_thread, detected_thread_source, detected_thread_detail, has_codex_process = _pane_thread_probe(
             pane_id,
             shell_pid,
+            process_snapshot,
         )
         if not is_thread_id(detected_thread):
             detected_thread = ""
