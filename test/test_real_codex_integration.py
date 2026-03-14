@@ -149,8 +149,8 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("resolved: target=formal pane=", resume.stdout, self.harness.diagnostics())
         self.assertIn("resolved: target=aot pane=", resume.stdout, self.harness.diagnostics())
-        self.assertTrue(self.harness.manager_pid_file_for_pane(formal_pane).is_file(), self.harness.diagnostics())
-        self.assertTrue(self.harness.manager_pid_file_for_pane(aot_pane).is_file(), self.harness.diagnostics())
+        self.assertTrue(self.harness.manager_runtime_file(formal_turn.thread_id).is_file(), self.harness.diagnostics())
+        self.assertTrue(self.harness.manager_runtime_file(aot_turn.thread_id).is_file(), self.harness.diagnostics())
         self.assertNotEqual(formal_pid_before, self.harness._read_manager_pid_for_pane(formal_pane))
         self.assertNotEqual(aot_pid_before, self.harness._read_manager_pid_for_pane(aot_pane))
 
@@ -235,7 +235,8 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         status = self.harness.run_manager("status", "--details")
 
         self.assertIn("deadwatch", status.stdout, self.harness.diagnostics())
-        self.assertIn("STATE:           dead", status.stdout, self.harness.diagnostics())
+        self.assertIn("STATE:           error", status.stdout, self.harness.diagnostics())
+        self.assertIn("no watcher for live Codex pane", status.stdout, self.harness.diagnostics())
 
     def test_manager_restart_without_target_recovers_dead_watcher(self):
         self.harness.rename_window("recoverdead")

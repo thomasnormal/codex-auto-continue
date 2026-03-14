@@ -21,6 +21,7 @@ import auto_continue_watchd as acw  # noqa: E402
 
 THREAD = "11111111-1111-1111-1111-111111111111"
 OTHER_THREAD = "22222222-2222-2222-2222-222222222222"
+ORIGINAL_READ_RUNTIME_ROWS = acw._read_runtime_rows
 
 
 def _session_record(
@@ -106,6 +107,44 @@ def _snapshot(
 
 
 class WatchdUnitTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        def _runtime_wait_stub(thread_id, predicate, timeout_secs=5.0):
+            for pane_index in range(0, 40):
+                for generation in range(0, 5):
+                    candidate = {
+                        "thread": thread_id,
+                        "pane": f"%{pane_index}",
+                        "runtime_status": "running",
+                        "generation": str(generation),
+                        "paused": "",
+                    }
+                    if predicate(candidate):
+                        return candidate
+                    paused_candidate = {
+                        "thread": thread_id,
+                        "pane": f"%{pane_index}",
+                        "runtime_status": "paused",
+                        "generation": str(generation),
+                        "paused": "1",
+                    }
+                    if predicate(paused_candidate):
+                        return paused_candidate
+            return None
+
+        self._patchers = [
+            patch.object(acw, "_read_runtime_rows", return_value=[]),
+            patch.object(acw, "_ensure_daemon_running", return_value="9999"),
+            patch.object(acw, "_wait_for_runtime_row", side_effect=_runtime_wait_stub),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+        self.addCleanup(self._stop_patchers)
+
+    def _stop_patchers(self):
+        for patcher in reversed(getattr(self, "_patchers", [])):
+            patcher.stop()
+
     def test_main_help_prints_command_summary(self):
         out = io.StringIO()
         err = io.StringIO()
@@ -524,10 +563,32 @@ class WatchdUnitTests(unittest.TestCase):
         )
         with patch.dict(acw.os.environ, {"AUTO_CONTINUE_TMUX_SOCKET": "/tmp/current.sock"}, clear=False):
             with patch.object(acw.subprocess, "check_output", return_value=ps_out):
-                rows = acw.watcher_rows()
+                rows = acw._legacy_watcher_rows()
         self.assertEqual(1, len(rows))
         self.assertEqual("202", rows[0]["pid"])
         self.assertEqual("/tmp/current.sock", rows[0]["tmux_socket"])
+
+    def test_read_runtime_rows_uses_worker_id_and_daemon_pid_liveness(self):
+        runtime_file = "/state/acw_runtime.scope.11111111-1111-1111-1111-111111111111.json"
+        payload = {
+            "thread": THREAD,
+            "pane": "%7",
+            "pid": "4321",
+            "daemon_pid": "9999",
+            "runtime_status": "running",
+            "tmux_socket": "/tmp/current.sock",
+        }
+
+        with patch.object(acw.glob, "glob", return_value=[runtime_file]):
+            with patch("builtins.open", mock_open(read_data=json.dumps(payload))):
+                with patch.object(acw.os, "kill") as kill:
+                    rows = ORIGINAL_READ_RUNTIME_ROWS("/tmp/current.sock")
+
+        kill.assert_called_once_with(9999, 0)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("4321", rows[0]["pid"])
+        self.assertEqual("%7", rows[0]["pane"])
+        self.assertEqual("running", rows[0]["runtime_status"])
 
     def test_doctor_checks_current_pane_and_thread(self):
         model = acw._build_runtime_model(_snapshot(
@@ -791,8 +852,9 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw.glob, "glob", side_effect=fake_glob):
             with patch.object(acw, "watcher_rows", return_value=[]):
                 with patch.object(acw, "_build_runtime_model", return_value=acw._build_runtime_model(_snapshot())):
-                    with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files(remove_dead_sessions=True)
+                    with patch("builtins.open", mock_open(read_data=json.dumps({"thread_id": THREAD}))):
+                        with patch.object(acw.Path, "unlink") as unlink:
+                            acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_called_once_with(missing_ok=True)
 
     def test_cleanup_stale_files_keeps_dead_session_state_with_live_pane(self):
@@ -815,8 +877,9 @@ class WatchdUnitTests(unittest.TestCase):
                     panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
                 ))
                 with patch.object(acw, "_build_runtime_model", return_value=live_model):
-                    with patch.object(acw.Path, "unlink") as unlink:
-                        acw.cleanup_stale_files(remove_dead_sessions=True)
+                    with patch("builtins.open", mock_open(read_data=json.dumps({"thread_id": THREAD}))):
+                        with patch.object(acw.Path, "unlink") as unlink:
+                            acw.cleanup_stale_files(remove_dead_sessions=True)
         unlink.assert_not_called()
 
     def test_build_thread_pane_map_uses_tmux_process_tree(self):
@@ -1227,13 +1290,11 @@ class WatchdUnitTests(unittest.TestCase):
             sessions=(_session_record(THREAD, name="bugs", message="continue"),),
         ))
         with patch.object(acw, "_build_runtime_model", return_value=model):
-            with patch.object(acw, "stop_pane_watchers") as stop_watchers:
-                with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
-                    with patch.object(acw, "cmd_start") as cmd_start:
-                        acw._restart_one("bugs", "%7", ["--restart-codex"])
-        stop_watchers.assert_called_once_with("%7")
+            with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
+                with patch.object(acw, "_write_managed_session") as write_session:
+                    acw._restart_one("bugs", "%7", ["--restart-codex"])
         restart_codex.assert_called_once_with("%7", THREAD)
-        cmd_start.assert_called_once_with(["%7", THREAD, "--message", "continue"])
+        write_session.assert_called_once()
 
     def test_restart_target_fails_when_watcher_thread_and_live_pane_disagree(self):
         model = acw._build_runtime_model(_snapshot(
@@ -1259,17 +1320,15 @@ class WatchdUnitTests(unittest.TestCase):
             sessions=(_session_record(THREAD, name="bugs", message="continue"),),
         ))
         with patch.object(acw, "_build_runtime_model", return_value=model):
-            with patch.object(acw, "stop_pane_watchers"):
-                with patch.object(acw, "cmd_start"):
-                    out = io.StringIO()
-                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                        acw._restart_one("bugs", "%7", [])
+            with patch.object(acw, "_write_managed_session"):
+                out = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    acw._restart_one("bugs", "%7", [])
         text = out.getvalue()
         self.assertIn("restart: preparing pane=%7", text)
         self.assertIn("restart: resolving Codex thread for pane=%7", text)
         self.assertIn(f"restart: thread_id={THREAD}", text)
         self.assertIn("restart: loading saved continue message for pane=%7", text)
-        self.assertIn("restart: stopping watcher for pane=%7", text)
         self.assertIn("restart: starting watcher for pane=%7", text)
 
     def test_restart_target_with_restart_codex_fails_when_thread_unknown(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -336,17 +337,40 @@ class RealCodexHarness:
 
     @property
     def manager_pid_file(self) -> Path:
-        if not self.pane_id:
-            raise RuntimeError("pane not initialized")
-        return self.manager_pid_file_for_pane(self.pane_id)
+        return self.manager_daemon_pid_file
 
     def manager_watch_log_for_pane(self, pane_id: str) -> Path:
         pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", pane_id)
         return self.codex_dir / f"auto_continue_logwatch.{pane_key}.log"
 
-    def manager_pid_file_for_pane(self, pane_id: str) -> Path:
-        pane_key = re.sub(r"[^a-zA-Z0-9._-]", "_", pane_id)
-        return self.codex_dir / f"auto_continue_logwatch.{pane_key}.pid"
+    @property
+    def manager_daemon_pid_file(self) -> Path:
+        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
+        return self.codex_dir / f"acw_daemon.{scope_token}.pid"
+
+    def manager_runtime_file(self, thread_id: str) -> Path:
+        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
+        return self.codex_dir / f"acw_runtime.{scope_token}.{thread_id}.json"
+
+    def manager_runtime_rows(self) -> list[dict[str, object]]:
+        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
+        rows: list[dict[str, object]] = []
+        for path in sorted(self.codex_dir.glob(f"acw_runtime.{scope_token}.*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            data["_path"] = str(path)
+            rows.append(data)
+        return rows
+
+    def manager_runtime_row_for_pane(self, pane_id: str) -> Optional[dict[str, object]]:
+        rows = [row for row in self.manager_runtime_rows() if str(row.get("pane", "")) == pane_id]
+        if len(rows) != 1:
+            return None
+        return rows[0]
 
     def start(self) -> None:
         self.tmux("new-session", "-d", "-s", self.session_name, "-x", "200", "-y", "50")
@@ -531,9 +555,16 @@ class RealCodexHarness:
     ) -> None:
         log_path = self.manager_watch_log_for_pane(pane_id)
         self._wait_for(
-            lambda: log_path.is_file()
-            and f"watch: pane={pane_id} thread_id={thread_id}"
-            in log_path.read_text(encoding="utf-8", errors="ignore"),
+            lambda: (
+                (runtime := self.manager_runtime_file(thread_id)).is_file()
+                and '"pane": "{pane}"'.format(pane=pane_id)
+                in runtime.read_text(encoding="utf-8", errors="ignore")
+                and '"runtime_status": "running"'
+                in runtime.read_text(encoding="utf-8", errors="ignore")
+                and log_path.is_file()
+                and f"watch: pane={pane_id} thread_id={thread_id}"
+                in log_path.read_text(encoding="utf-8", errors="ignore")
+            ),
             timeout=timeout,
             description="manager watcher startup",
         )
@@ -619,34 +650,15 @@ class RealCodexHarness:
         self._wait_for(self._watcher_is_stopped, timeout=timeout, description="watcher stopped")
 
     def wait_for_manager_watcher_stopped_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
-        pid_file = self.manager_pid_file_for_pane(pane_id)
-
         def _stopped() -> bool:
-            if not pid_file.is_file():
-                return True
-            try:
-                pid_text = pid_file.read_text(encoding="utf-8").strip()
-            except OSError:
-                return False
-            if not pid_text.isdigit():
-                return True
-            return not self._pid_is_alive(int(pid_text))
+            return self.manager_runtime_row_for_pane(pane_id) is None
 
         self._wait_for(_stopped, timeout=timeout, description="manager watcher stopped")
 
     def wait_for_manager_watcher_paused_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
-        pid_file = self.manager_pid_file_for_pane(pane_id)
-
         def _paused() -> bool:
-            if not pid_file.is_file():
-                return False
-            try:
-                pid_text = pid_file.read_text(encoding="utf-8").strip()
-            except OSError:
-                return False
-            if not pid_text.isdigit():
-                return False
-            return self._pid_is_stopped(int(pid_text))
+            row = self.manager_runtime_row_for_pane(pane_id)
+            return bool(row) and bool(row.get("paused"))
 
         self._wait_for(_paused, timeout=timeout, description="manager watcher paused")
 
@@ -685,9 +697,9 @@ class RealCodexHarness:
         return script
 
     def stop_manager_watcher(self) -> None:
-        pid = self._read_manager_pid()
+        pid = self._read_manager_daemon_pid()
         if pid is None:
-            raise AssertionError(f"manager watcher pid file missing\n{self.diagnostics()}")
+            raise AssertionError(f"manager daemon pid file missing\n{self.diagnostics()}")
         os.kill(pid, signal.SIGTERM)
         self._wait_for(lambda: not self._pid_is_alive(pid), timeout=15.0, description="manager watcher exit")
 
@@ -720,7 +732,7 @@ class RealCodexHarness:
         state_dump = dst / "state"
         state_dump.mkdir(exist_ok=True)
         state_dump.chmod(0o700)
-        for pattern in ("acw_session.*.json", "auto_continue_logwatch.*.pid", "auto_continue_logwatch*.log"):
+        for pattern in ("acw_session.*.json", "acw_runtime.*.json", "acw_daemon.*", "auto_continue_logwatch*.log"):
             for src in self.codex_dir.glob(pattern):
                 shutil.copy2(src, state_dump / src.name)
         return dst
@@ -796,17 +808,23 @@ class RealCodexHarness:
             return 0
         return len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
 
+    def _read_manager_daemon_pid(self) -> Optional[int]:
+        if not self.manager_daemon_pid_file.is_file():
+            return None
+        try:
+            text = self.manager_daemon_pid_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return int(text) if text.isdigit() else None
+
     def _read_manager_pid(self) -> Optional[int]:
         return self._read_manager_pid_for_pane(self.pane_id)
 
     def _read_manager_pid_for_pane(self, pane_id: str) -> Optional[int]:
-        pid_file = self.manager_pid_file_for_pane(pane_id)
-        if not pid_file.is_file():
+        row = self.manager_runtime_row_for_pane(pane_id)
+        if not row:
             return None
-        try:
-            text = pid_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
+        text = str(row.get("pid", "")).strip()
         return int(text) if text.isdigit() else None
 
     def _pid_is_alive(self, pid: int) -> bool:

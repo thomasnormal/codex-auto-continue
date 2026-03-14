@@ -2,6 +2,11 @@
 
 ## 2026-03-14
 
+- Change: rewrote the manager runtime from one watcher process per pane to one shared daemon per tmux socket. `acw start`/`stop`/`pause`/`resume`/`restart` now mutate thread-keyed session state, ensure the daemon is running, and wait for per-thread runtime rows instead of spawning or discovering per-pane manager-owned processes.
+- Change: extracted the logwatch event loop into `watch_session(...)` so both the direct `auto_continue_logwatch.py` CLI path and daemon-managed workers share the same Codex completion, interrupt, pane-error, and tmux-send behavior.
+- Change: split manager state into desired and observed files. Saved `acw_session.<thread>.json` files now carry desired pane/message/pause/generation state, while `acw_runtime.<scope>.<thread>.json` carries daemon-owned runtime state for one live managed worker.
+- Change: updated the real-Codex harness and integration suite to follow the daemon/runtime model instead of per-pane pid files. Real manager coverage now proves `start`, multi-target `resume`, `restart --restart-codex`, dead-worker recovery, and `doctor` against the shared daemon architecture.
+- Change: the daemon rewrite also reduced common CLI latency on this checkout. Measured wall clock here is about 0.57s for `acw status` and about 0.23s for `acw edit %0`, which is materially better than the old multi-second per-run manager startup path.
 - Change: split the status table `WINDOW/PANE` metadata over separate lines for the thread id and watcher pid. This keeps the rich table easier to scan when invariant-heavy sessions need both identifiers at once.
 - Change: compacted the `STARTED` and `LAST_ACW` values in the status table to drop the repeated `ago` suffix, and rebalanced the rich status layout to give `LAST_AGENT` a larger fixed share of the remaining width than `MESSAGE`.
 - Change: added a first-class `acw repair` workflow on top of the runtime identity model. `repair` defaults to a dry run with no target, applies only safe live-state fixes when asked, preserves saved sessions when it stops orphan/broken watcher processes, and leaves dead-session deletion to `acw cleanup`.

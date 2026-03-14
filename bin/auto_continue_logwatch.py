@@ -93,6 +93,368 @@ class CodexLogEvent:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class SessionWatchConfig:
+    pane: str
+    thread_id: str = "auto"
+    tmux_socket: str = ""
+    message: str = "please continue"
+    cwd: str = ""
+    log_path: str = ""
+    cooldown_secs: float = 1.0
+    send_delay_secs: float = 0.25
+    enter_delay_secs: float = 0.15
+    state_file: str = ""
+    watch_log: str = ""
+    enable_watchdog: bool = True
+
+
+def watch_session(
+    config: SessionWatchConfig,
+    *,
+    stop_event: Optional[threading.Event] = None,
+    pause_event: Optional[threading.Event] = None,
+    auto_pause_handler: Optional[Callable[[str, Path, Path, dict], None]] = None,
+) -> int:
+    if config.tmux_socket:
+        os.environ["AUTO_CONTINUE_TMUX_SOCKET"] = config.tmux_socket
+
+    cwd = Path(config.cwd or os.getcwd())
+    if not config.pane:
+        sys.stderr.write("auto_continue_logwatch: --pane is required (or TMUX_PANE env)\n")
+        return 2
+    if not tmux_pane_exists(config.pane):
+        sys.stderr.write(f"auto_continue_logwatch: tmux pane not found: {config.pane}\n")
+        return 2
+
+    state_file = Path(config.state_file) if config.state_file else _session_state_path("unknown")
+    watch_log = Path(config.watch_log) if config.watch_log else (cwd / ".codex" / "auto_continue_logwatch.log")
+    codex_log = Path(config.log_path or (Path.home() / ".codex" / "log" / "codex-tui.log"))
+
+    msg = config.message
+    # Strip comment lines (starting with #).
+    msg = "\n".join(
+        line for line in msg.splitlines() if not line.lstrip().startswith("#")
+    ).strip()
+
+    auto_mode = config.thread_id == "auto"
+    watched_thread = config.thread_id
+    if watched_thread == "auto":
+        watched_thread = discover_thread_id(codex_log, pane=config.pane) or ""
+
+    # Read initial state from session state file.
+    state = read_state(state_file)
+    last_handled_turn = str(state.get("last_handled_turn", state.get("last_sent_turn", "")))
+    last_handled_thread = str(
+        state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
+    )
+
+    if not watched_thread:
+        append_log(watch_log, "warn: could not auto-discover thread id yet; waiting for first event")
+    else:
+        append_log(watch_log, f"watch: pane={config.pane} thread_id={watched_thread}")
+
+    last_send_time = 0.0
+    codex_fh = None
+    health = "ok"
+    health_detail = ""
+    last_health_check = 0.0
+    watcher_start = time.time()
+    interrupt_skip_armed = False
+
+    def mark_handled_turn(turn_id: str, thread_id: str) -> None:
+        nonlocal last_handled_turn, last_handled_thread
+        last_handled_turn = turn_id
+        last_handled_thread = thread_id
+        state["last_handled_turn"] = turn_id
+        state["last_handled_thread"] = thread_id
+
+    def skip_interrupted_turn(turn_id: str, thread_id: str, reason: str) -> None:
+        nonlocal interrupt_skip_armed
+        interrupt_skip_armed = False
+        mark_handled_turn(turn_id, thread_id)
+        write_state(state_file, state)
+        append_log(
+            watch_log,
+            f"skip: interrupted turn={turn_id} thread={thread_id} reason={reason}",
+        )
+
+    def update_health(now: float) -> None:
+        nonlocal health, health_detail
+        new_health, new_detail = compute_health(
+            watched_thread=watched_thread,
+            watcher_start=watcher_start,
+            now=now,
+            codex_log_exists=codex_log.exists(),
+        )
+        if new_health == health and new_detail == health_detail:
+            return
+        health = new_health
+        health_detail = new_detail
+        if health_detail:
+            append_log(watch_log, f"health: {health} - {health_detail}")
+        else:
+            append_log(watch_log, f"health: {health}")
+
+    pause_handler = auto_pause_handler or auto_pause_current_watcher
+
+    # Initialize session state file.
+    if watched_thread and is_thread_id(watched_thread):
+        state["thread_id"] = watched_thread
+        wn = tmux_window_name(config.pane)
+        if wn:
+            state["name"] = wn
+        if "message" not in state:
+            state["message"] = msg
+        write_state(state_file, state)
+
+    # Check if codex already finished its turn before we started. Scan the tail
+    # of codex-tui.log and only replay a completion when it is the latest known
+    # activity for this thread.
+    pending_initial_event: Optional[tuple[str, str, str]] = None
+    if watched_thread and codex_log.exists():
+        pending_initial_event = check_codex_log_tail_for_pending(
+            codex_log, watched_thread, last_handled_turn, last_handled_thread,
+            watch_log,
+        )
+
+    # --- Set up inotify file watching (falls back to polling if unavailable) ---
+    _wake_event = threading.Event()
+    _watched_paths: set[str] = set()
+    _watched_dirs: set[str] = set()
+    _observer = None
+
+    def _add_inotify_watch(file_path: Path) -> None:
+        """Register a file for inotify monitoring."""
+        nonlocal _observer
+        if _WatchdogObserver is None or not config.enable_watchdog:
+            return
+        path_str = str(file_path.resolve())
+        if path_str in _watched_paths:
+            return
+        _watched_paths.add(path_str)
+        dir_str = str(file_path.resolve().parent)
+        if dir_str in _watched_dirs:
+            return
+        if not os.path.isdir(dir_str):
+            return
+        if _observer is None:
+            _observer = _WatchdogObserver()
+            _observer.daemon = True
+            _observer._acw_handler = _WakeHandler(_wake_event, _watched_paths)
+            _observer.start()
+        try:
+            _observer.schedule(_observer._acw_handler, dir_str, recursive=False)
+        except OSError:
+            return
+        _watched_dirs.add(dir_str)
+
+    codex_log.parent.mkdir(parents=True, exist_ok=True)
+    _add_inotify_watch(codex_log)
+
+    def _wait_interruptibly(timeout: float) -> None:
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            if stop_event and stop_event.is_set():
+                return
+            if pause_event and pause_event.is_set():
+                return
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            _wake_event.wait(timeout=min(0.2, remaining))
+            if _wake_event.is_set():
+                return
+
+    try:
+        while True:
+            if stop_event and stop_event.is_set():
+                append_log(watch_log, "stop: requested")
+                return 0
+
+            if pause_event and pause_event.is_set():
+                if not _wake_event.is_set():
+                    _wait_interruptibly(0.2)
+                continue
+
+            _wake_event.clear()
+
+            events: list[CodexLogEvent] = []
+            tnow = time.time()
+
+            # Inject the pending startup event on the first iteration only.
+            if pending_initial_event is not None:
+                events.append(CodexLogEvent("completion", *pending_initial_event))
+                pending_initial_event = None
+
+            # --- Poll codex-tui.log ---
+            if codex_fh is not None or codex_log.exists():
+                if codex_fh is None:
+                    codex_fh = codex_log.open("r", encoding="utf-8", errors="ignore")
+                    codex_fh.seek(0, os.SEEK_END)
+                while True:
+                    line = codex_fh.readline()
+                    if not line:
+                        break
+                    interrupt_thread = parse_codex_log_interrupt(line)
+                    if interrupt_thread:
+                        events.append(
+                            CodexLogEvent(
+                                "interrupt",
+                                interrupt_thread,
+                                detail="Conversation interrupted",
+                            )
+                        )
+                        continue
+                    event = parse_codex_log_event(line)
+                    if event:
+                        events.append(CodexLogEvent("completion", *event))
+                # Detect truncation/rotation.
+                try:
+                    if codex_fh.tell() > codex_log.stat().st_size:
+                        codex_fh.close()
+                        codex_fh = None
+                except FileNotFoundError:
+                    codex_fh.close()
+                    codex_fh = None
+
+            # --- Process collected events ---
+            for event in events:
+                tnow = time.time()
+                thread_id = event.thread_id
+
+                if auto_mode:
+                    if not watched_thread:
+                        watched_thread = thread_id
+                        append_log(watch_log, f"watch: auto-selected thread_id={watched_thread}")
+
+                if thread_id != watched_thread:
+                    continue
+
+                if event.kind == "interrupt":
+                    if not interrupt_skip_armed:
+                        interrupt_skip_armed = True
+                        append_log(watch_log, f"skip: armed after interrupt thread={thread_id}")
+                    continue
+
+                turn_id = event.turn_id
+                needs_follow_up = event.detail
+                if needs_follow_up != "false":
+                    continue
+                if turn_id == last_handled_turn and thread_id == last_handled_thread:
+                    continue
+
+                if interrupt_skip_armed:
+                    skip_interrupted_turn(turn_id, thread_id, "Conversation interrupted")
+                    continue
+
+                pane_interrupt = check_pane_for_interrupt(config.pane)
+                if pane_interrupt:
+                    skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
+                    continue
+
+                pane_error = check_pane_for_errors(config.pane)
+                if pane_error:
+                    pause_handler(pane_error, watch_log, state_file, state)
+                    continue
+
+                if tnow - last_send_time < max(0.0, config.cooldown_secs):
+                    append_log(watch_log, f"skip: cooldown turn={turn_id}")
+                    continue
+
+                if config.send_delay_secs > 0.0:
+                    time.sleep(config.send_delay_secs)
+
+                pane_interrupt = check_pane_for_interrupt(config.pane)
+                if pane_interrupt:
+                    skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
+                    continue
+
+                pane_error = check_pane_for_errors(config.pane)
+                if pane_error:
+                    pause_handler(pane_error, watch_log, state_file, state)
+                    continue
+
+                send_result = tmux_send(
+                    config.pane,
+                    msg,
+                    max(0.0, config.enter_delay_secs),
+                    interrupt_checker=lambda: check_pane_for_interrupt(config.pane),
+                )
+                if send_result.status == "ok":
+                    last_send_time = tnow
+                    mark_handled_turn(turn_id, thread_id)
+                    now = now_ts()
+                    state["thread_id"] = watched_thread
+                    state["last_continue_at"] = now
+                    state["health"] = health
+                    state["health_detail"] = health_detail
+                    write_state(state_file, state)
+                    append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
+                elif send_result.status == "interrupted":
+                    skip_interrupted_turn(turn_id, thread_id, send_result.detail)
+                else:
+                    if send_result.detail:
+                        append_log(
+                            watch_log,
+                            (
+                                "error: tmux send failed "
+                                f"turn={turn_id} thread={thread_id} detail={send_result.detail}"
+                            ),
+                        )
+                    else:
+                        append_log(
+                            watch_log,
+                            f"error: tmux send failed turn={turn_id} thread={thread_id}",
+                        )
+
+            # --- Periodic health check ---
+            if tnow - last_health_check > HEALTH_CHECK_INTERVAL:
+                last_health_check = tnow
+
+                # Re-discover thread from pane's codex process in case the
+                # session was restarted with a new thread.
+                if auto_mode and config.pane:
+                    live_tid = discover_thread_for_pane(config.pane)
+                    if live_tid and live_tid != watched_thread:
+                        prev_thread = watched_thread
+                        watched_thread = live_tid
+                        append_log(
+                            watch_log,
+                            f"watch: pane-rebind thread_id={prev_thread} -> {watched_thread}",
+                        )
+                        # Update state file for the new thread.
+                        state_file = _session_state_path(watched_thread)
+                        state = {"thread_id": watched_thread, "message": msg}
+                        wn = tmux_window_name(config.pane)
+                        if wn:
+                            state["name"] = wn
+                        write_state(state_file, state)
+
+                update_health(tnow)
+
+                now = now_ts()
+                state["health"] = health
+                state["health_detail"] = health_detail
+                state["health_ts"] = now
+                write_state(state_file, state)
+
+            # Wait for inotify file notification, or fall back to timeout for
+            # periodic health checks.
+            if not _wake_event.is_set():
+                if _observer is None:
+                    timeout = 1.0
+                else:
+                    timeout = HEALTH_CHECK_INTERVAL
+                _wait_interruptibly(timeout)
+    finally:
+        if codex_fh is not None:
+            codex_fh.close()
+        if _observer is not None:
+            _observer.stop()
+            _observer.join(timeout=1.0)
+
+
 def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
     """Return a normalized completion event from codex-tui.log."""
     m = EVENT_RE.search(line)
@@ -654,313 +1016,21 @@ def main() -> int:
     p.add_argument("--state-file", default="")
     p.add_argument("--watch-log", default="")
     args = p.parse_args()
-
-    if args.tmux_socket:
-        os.environ["AUTO_CONTINUE_TMUX_SOCKET"] = args.tmux_socket
-
-    cwd = Path(args.cwd)
-    if not args.pane:
-        sys.stderr.write("auto_continue_logwatch: --pane is required (or TMUX_PANE env)\n")
-        return 2
-    if not tmux_pane_exists(args.pane):
-        sys.stderr.write(f"auto_continue_logwatch: tmux pane not found: {args.pane}\n")
-        return 2
-
-    state_file = Path(args.state_file) if args.state_file else _session_state_path("unknown")
-    watch_log = Path(args.watch_log) if args.watch_log else (cwd / ".codex" / "auto_continue_logwatch.log")
-    codex_log = Path(args.log_path)
-
-    msg = args.message
-    # Strip comment lines (starting with #).
-    msg = "\n".join(
-        line for line in msg.splitlines() if not line.lstrip().startswith("#")
-    ).strip()
-
-    auto_mode = args.thread_id == "auto"
-    watched_thread = args.thread_id
-    if watched_thread == "auto":
-        watched_thread = discover_thread_id(codex_log, pane=args.pane) or ""
-
-    # Read initial state from session state file.
-    state = read_state(state_file)
-    last_handled_turn = str(state.get("last_handled_turn", state.get("last_sent_turn", "")))
-    last_handled_thread = str(
-        state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
+    return watch_session(
+        SessionWatchConfig(
+            pane=args.pane,
+            thread_id=args.thread_id,
+            tmux_socket=args.tmux_socket,
+            message=args.message,
+            cwd=args.cwd,
+            log_path=args.log_path,
+            cooldown_secs=args.cooldown_secs,
+            send_delay_secs=args.send_delay_secs,
+            enter_delay_secs=args.enter_delay_secs,
+            state_file=args.state_file,
+            watch_log=args.watch_log,
+        )
     )
-
-    if not watched_thread:
-        append_log(watch_log, "warn: could not auto-discover thread id yet; waiting for first event")
-    else:
-        append_log(watch_log, f"watch: pane={args.pane} thread_id={watched_thread}")
-
-    last_send_time = 0.0
-    codex_fh = None
-    health = "ok"
-    health_detail = ""
-    last_health_check = 0.0
-    watcher_start = time.time()
-    interrupt_skip_armed = False
-
-    def mark_handled_turn(turn_id: str, thread_id: str) -> None:
-        nonlocal last_handled_turn, last_handled_thread
-        last_handled_turn = turn_id
-        last_handled_thread = thread_id
-        state["last_handled_turn"] = turn_id
-        state["last_handled_thread"] = thread_id
-
-    def skip_interrupted_turn(turn_id: str, thread_id: str, reason: str) -> None:
-        nonlocal interrupt_skip_armed
-        interrupt_skip_armed = False
-        mark_handled_turn(turn_id, thread_id)
-        write_state(state_file, state)
-        append_log(
-            watch_log,
-            f"skip: interrupted turn={turn_id} thread={thread_id} reason={reason}",
-        )
-
-    def update_health(now: float) -> None:
-        nonlocal health, health_detail
-        new_health, new_detail = compute_health(
-            watched_thread=watched_thread,
-            watcher_start=watcher_start,
-            now=now,
-            codex_log_exists=codex_log.exists(),
-        )
-        if new_health == health and new_detail == health_detail:
-            return
-        health = new_health
-        health_detail = new_detail
-        if health_detail:
-            append_log(watch_log, f"health: {health} - {health_detail}")
-        else:
-            append_log(watch_log, f"health: {health}")
-
-    # Initialize session state file.
-    if watched_thread and is_thread_id(watched_thread):
-        state["thread_id"] = watched_thread
-        wn = tmux_window_name(args.pane)
-        if wn:
-            state["name"] = wn
-        if "message" not in state:
-            state["message"] = msg
-        write_state(state_file, state)
-
-    # Check if codex already finished its turn before we started. Scan the tail
-    # of codex-tui.log and only replay a completion when it is the latest known
-    # activity for this thread.
-    pending_initial_event: Optional[tuple[str, str, str]] = None
-    if watched_thread and codex_log.exists():
-        pending_initial_event = check_codex_log_tail_for_pending(
-            codex_log, watched_thread, last_handled_turn, last_handled_thread,
-            watch_log,
-        )
-
-    # --- Set up inotify file watching (falls back to polling if unavailable) ---
-    _wake_event = threading.Event()
-    _watched_paths: set[str] = set()
-    _watched_dirs: set[str] = set()
-    _observer = None
-
-    def _add_inotify_watch(file_path: Path) -> None:
-        """Register a file for inotify monitoring."""
-        nonlocal _observer
-        if _WatchdogObserver is None:
-            return
-        path_str = str(file_path.resolve())
-        if path_str in _watched_paths:
-            return
-        _watched_paths.add(path_str)
-        dir_str = str(file_path.resolve().parent)
-        if dir_str in _watched_dirs:
-            return
-        if not os.path.isdir(dir_str):
-            return
-        if _observer is None:
-            _observer = _WatchdogObserver()
-            _observer.daemon = True
-            _observer._acw_handler = _WakeHandler(_wake_event, _watched_paths)
-            _observer.start()
-        try:
-            _observer.schedule(_observer._acw_handler, dir_str, recursive=False)
-        except OSError:
-            return
-        _watched_dirs.add(dir_str)
-
-    codex_log.parent.mkdir(parents=True, exist_ok=True)
-    _add_inotify_watch(codex_log)
-
-    while True:
-        _wake_event.clear()
-
-        events: list[CodexLogEvent] = []
-        tnow = time.time()
-
-        # Inject the pending startup event on the first iteration only.
-        if pending_initial_event is not None:
-            events.append(CodexLogEvent("completion", *pending_initial_event))
-            pending_initial_event = None
-
-        # --- Poll codex-tui.log ---
-        if codex_fh is not None or codex_log.exists():
-            if codex_fh is None:
-                codex_fh = codex_log.open("r", encoding="utf-8", errors="ignore")
-                codex_fh.seek(0, os.SEEK_END)
-            while True:
-                line = codex_fh.readline()
-                if not line:
-                    break
-                interrupt_thread = parse_codex_log_interrupt(line)
-                if interrupt_thread:
-                    events.append(
-                        CodexLogEvent(
-                            "interrupt",
-                            interrupt_thread,
-                            detail="Conversation interrupted",
-                        )
-                    )
-                    continue
-                event = parse_codex_log_event(line)
-                if event:
-                    events.append(CodexLogEvent("completion", *event))
-            # Detect truncation/rotation.
-            try:
-                if codex_fh.tell() > codex_log.stat().st_size:
-                    codex_fh.close()
-                    codex_fh = None
-            except FileNotFoundError:
-                codex_fh.close()
-                codex_fh = None
-
-        # --- Process collected events ---
-        for event in events:
-            tnow = time.time()
-            thread_id = event.thread_id
-
-            if auto_mode:
-                if not watched_thread:
-                    watched_thread = thread_id
-                    append_log(watch_log, f"watch: auto-selected thread_id={watched_thread}")
-
-            if thread_id != watched_thread:
-                continue
-
-            if event.kind == "interrupt":
-                if not interrupt_skip_armed:
-                    interrupt_skip_armed = True
-                    append_log(watch_log, f"skip: armed after interrupt thread={thread_id}")
-                continue
-
-            turn_id = event.turn_id
-            needs_follow_up = event.detail
-            if needs_follow_up != "false":
-                continue
-            if turn_id == last_handled_turn and thread_id == last_handled_thread:
-                continue
-
-            if interrupt_skip_armed:
-                skip_interrupted_turn(turn_id, thread_id, "Conversation interrupted")
-                continue
-
-            pane_interrupt = check_pane_for_interrupt(args.pane)
-            if pane_interrupt:
-                skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
-                continue
-
-            pane_error = check_pane_for_errors(args.pane)
-            if pane_error:
-                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
-                continue
-
-            if tnow - last_send_time < max(0.0, args.cooldown_secs):
-                append_log(watch_log, f"skip: cooldown turn={turn_id}")
-                continue
-
-            if args.send_delay_secs > 0.0:
-                time.sleep(args.send_delay_secs)
-
-            pane_interrupt = check_pane_for_interrupt(args.pane)
-            if pane_interrupt:
-                skip_interrupted_turn(turn_id, thread_id, pane_interrupt)
-                continue
-
-            pane_error = check_pane_for_errors(args.pane)
-            if pane_error:
-                auto_pause_current_watcher(pane_error, watch_log, state_file, state)
-                continue
-
-            send_result = tmux_send(
-                args.pane,
-                msg,
-                max(0.0, args.enter_delay_secs),
-                interrupt_checker=lambda: check_pane_for_interrupt(args.pane),
-            )
-            if send_result.status == "ok":
-                last_send_time = tnow
-                mark_handled_turn(turn_id, thread_id)
-                now = now_ts()
-                state["thread_id"] = watched_thread
-                state["last_continue_at"] = now
-                state["health"] = health
-                state["health_detail"] = health_detail
-                write_state(state_file, state)
-                append_log(watch_log, f"continue: sent turn={turn_id} thread={thread_id}")
-            elif send_result.status == "interrupted":
-                skip_interrupted_turn(turn_id, thread_id, send_result.detail)
-            else:
-                if send_result.detail:
-                    append_log(
-                        watch_log,
-                        (
-                            "error: tmux send failed "
-                            f"turn={turn_id} thread={thread_id} detail={send_result.detail}"
-                        ),
-                    )
-                else:
-                    append_log(
-                        watch_log,
-                        f"error: tmux send failed turn={turn_id} thread={thread_id}",
-                    )
-
-        # --- Periodic health check ---
-        if tnow - last_health_check > HEALTH_CHECK_INTERVAL:
-            last_health_check = tnow
-
-            # Re-discover thread from pane's codex process in case the
-            # session was restarted with a new thread.
-            if auto_mode and args.pane:
-                live_tid = discover_thread_for_pane(args.pane)
-                if live_tid and live_tid != watched_thread:
-                    prev_thread = watched_thread
-                    watched_thread = live_tid
-                    watched_last_event_at = tnow
-                    append_log(
-                        watch_log,
-                        f"watch: pane-rebind thread_id={prev_thread} -> {watched_thread}",
-                    )
-                    # Update state file for the new thread.
-                    state_file = _session_state_path(watched_thread)
-                    state = {"thread_id": watched_thread, "message": msg}
-                    wn = tmux_window_name(args.pane)
-                    if wn:
-                        state["name"] = wn
-                    write_state(state_file, state)
-
-            update_health(tnow)
-
-            now = now_ts()
-            state["health"] = health
-            state["health_detail"] = health_detail
-            state["health_ts"] = now
-            write_state(state_file, state)
-
-        # Wait for inotify file notification, or fall back to timeout for
-        # periodic health checks.
-        if not _wake_event.is_set():
-            if _observer is None:
-                timeout = 1.0
-            else:
-                timeout = HEALTH_CHECK_INTERVAL
-            _wake_event.wait(timeout=timeout)
 
 
 if __name__ == "__main__":

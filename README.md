@@ -3,12 +3,15 @@
 [![CI](https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.yml/badge.svg)](https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`acw` watches a Codex tmux pane and sends your follow-up prompt after each
+`acw` watches Codex tmux panes and sends your follow-up prompt after each
 completed turn.
 
 It is designed for long-running Codex sessions where you want a stable
 "continue" loop, but still want to interrupt, inspect, edit the prompt, or
 recover from tmux problems without losing control of the pane.
+
+Internally, `acw` now uses one shared daemon per tmux socket plus thread-keyed
+managed session state, instead of one manager-owned watcher process per pane.
 
 ![acw status dashboard](docs/assets/acw-status-screenshot.svg)
 
@@ -119,9 +122,9 @@ acw resume
 acw restart
 ```
 
-`resume` restarts paused watchers from the current pane/thread state instead of
-thawing the old stopped process. That avoids replaying buffered Codex log
-history after a long pause.
+`resume` restarts paused managed workers from the current pane/thread state
+instead of thawing an old reader in place. That avoids replaying buffered
+Codex log history after a long pause.
 
 `stop` is the destructive "stop managing this session" operation. It removes
 the saved `acw_session.<thread>.json` state so the row disappears from `acw`
@@ -151,8 +154,8 @@ without touching anything. Use `acw repair <target>` for one managed pane, or
 `acw repair --all` to apply the safe repairs across all managed panes.
 
 `cleanup` is intentionally separate from `repair`: it only removes dead saved
-session files and stale watcher artifacts. It does not try to fix live
-pane/watcher/thread mismatches.
+session files and stale daemon/runtime or legacy watcher artifacts. It does not
+try to fix live pane/session/thread mismatches.
 
 ## Continue Message
 
@@ -174,13 +177,13 @@ acw edit tests
 `acw status` is the main control panel. It shows:
 
 - the live tmux window and pane
-- whether the watcher is `running`, `warn`, `paused`, or `dead`
+- whether the managed worker is `running`, `warn`, `paused`, `error`, or `dead`
 - when the Codex thread started
 - when `acw` last sent a continue prompt
 - recent visible agent output from the pane
 - the stored continue message
 
-It also flags invariant errors directly when the pane, watcher process,
+It also flags invariant errors directly when the pane, managed worker,
 Codex thread, and saved session state stop matching 1:1. `acw` no longer
 silently merges those mismatches into a single “best guess” row.
 
@@ -222,8 +225,9 @@ After fixing the problem in the pane, resume with:
 acw resume <target>
 ```
 
-If a watcher process is gone entirely, `acw status` shows it as `dead` even if
-the last on-disk health snapshot looked healthy.
+If the managed worker disappears but the live Codex pane is still present,
+`acw status` reports that as an invariant error instead of pretending the
+session is merely dead.
 
 ## Doctor
 
@@ -246,8 +250,8 @@ It checks:
 - whether the target pane resolves
 - whether a Codex thread is discoverable
 - what proved that thread identity
-- whether a watcher is running, paused, degraded, or dead
-- whether the pane, watcher, Codex thread, and saved session identity still
+- whether a managed worker is running, paused, degraded, or dead
+- whether the pane, worker, Codex thread, and saved session identity still
   match cleanly
 
 It also prints an explicit recommended next command when appropriate, including
@@ -264,7 +268,7 @@ and it fails instead of guessing when identity is ambiguous.
 
 `acw status` says `dead`
 
-- The watcher process is gone.
+- The managed worker is gone and there is no live pane claiming that session.
 - Run `acw restart <target>` or `acw start <target>`.
 
 `acw status` says `warn`

@@ -4,188 +4,357 @@
 
 `acw` is a tmux-side automation layer for Codex sessions.
 
-It has two runtime pieces:
+The current runtime model has three pieces:
 
 - `bin/auto_continue_watchd.py`
-  - the manager CLI
-  - starts, stops, restarts, diagnoses, and reports on watchers
-  - reconstructs the live world from tmux, `ps`, local Codex state, and saved
-    `acw` session files on every command
+  - the CLI and control plane
+  - resolves panes, threads, and saved sessions
+  - starts or updates managed sessions
+  - reports status, doctor output, repairs, and cleanup
+- a hidden shared daemon (`auto_continue_watchd.py _daemon`)
+  - one daemon per tmux socket scope
+  - owns all managed live workers for that tmux server
+  - reconciles desired session state with live runtime state
 - `bin/auto_continue_logwatch.py`
-  - the long-running per-pane watcher
+  - the session worker implementation
+  - reused both by the legacy direct script path and by daemon worker threads
   - tails `~/.codex/log/codex-tui.log`
-  - decides when a watched Codex thread completed a turn
-  - injects the saved continue message into the tmux pane
+  - injects continue prompts into tmux panes
 
-The design is intentionally external. `acw` does not depend on private Codex
-hooks or a manager process embedded inside Codex itself. It watches the same
-local artifacts an operator can inspect:
-
-- tmux pane metadata
-- process trees
-- Codex local SQLite state
-- `codex-tui.log`
-- `~/.codex/acw_session.<thread-id>.json`
+The key simplification is that `acw` no longer launches one OS watcher process
+per managed pane. The daemon is the only long-running manager-owned process for
+one tmux socket, and each managed session is a logical worker inside it.
 
 
-## Design Constraints
+## Core Model
 
-The current design is shaped by a few hard rules:
+`acw` is built around a strict 1:1:1 relationship:
 
-- Correctness over convenience.
-  `acw` does not guess thread IDs from weak signals like cwd or timing.
-- One logical managed session should map 1:1:1:1 to:
-  - one tmux pane
-  - one watcher process
-  - one Codex thread ID
-  - one saved `acw` session record
-- Live tmux and process state outrank saved state.
-  Saved session JSON is durable metadata, not the live truth.
-- The manager is not a resident daemon.
-  Every `acw` command re-queries tmux and the process table.
-- Watchers are intentionally simple.
-  They react to Codex completion signals and pane-visible failures; they do not
-  try to be a full task scheduler.
+- one live tmux pane
+- one live Codex thread id
+- one managed session record
+- one live managed worker
+
+Window or agent name is metadata attached to that mapping, not the primary
+identity.
+
+If any of those entities are:
+
+- missing
+- duplicated
+- mismatched
+
+that is treated as broken state. `acw` reports the invariant error instead of
+guessing.
 
 
-## High-Level Shape
+## Socket Scope
 
-```text
-operator
-  |
-  v
-acw command (watchd.py, one-shot CLI)
-  |
-  +--> tmux list-panes / display-message
-  +--> ps process snapshot
-  +--> ~/.codex/acw_session.<thread>.json
-  +--> ~/.codex/state_*.sqlite
-  |
-  +--> start / restart / repair / doctor / status / cleanup decisions
-  |
-  +--> spawn auto_continue_logwatch.py for one pane
-            |
-            +--> tail ~/.codex/log/codex-tui.log
-            +--> watch pane banners via tmux capture-pane
-            +--> write session health/state
-            +--> send continue prompt via tmux send-keys
-```
+All manager state is scoped to one tmux server.
+
+The scope key is:
+
+- `AUTO_CONTINUE_TMUX_SOCKET` when explicitly set
+- otherwise the live `$TMUX` socket path, except the default tmux socket is
+  normalized to the empty default scope
+
+This lets:
+
+- the default tmux server behave consistently whether `acw` is invoked inside
+  or outside tmux
+- private harness sockets keep fully isolated daemon/runtime state
 
 
 ## Sources Of Truth
 
-`acw` intentionally separates live state from saved state.
+### 1. Saved session state
 
-### 1. Live tmux state
-
-The manager queries tmux directly on each run, primarily with:
-
-- `list-panes -a`
-- `display-message`
-- `capture-pane`
-
-The main live pane snapshot is built in
-`_list_live_pane_records()` in `bin/auto_continue_watchd.py`.
-For each pane it records:
-
-- `session_name`
-- `window_index`
-- `window_name`
-- `pane_id`
-- `pane_pid`
-- detected Codex thread, if one can be proven
-
-This means live window renames or moves are noticed the next time any `acw`
-command runs. There is no cached global window map that status trusts for live
-panes.
-
-### 2. Live watcher processes
-
-The manager finds running watchers by scanning `ps` for
-`auto_continue_logwatch.py` processes in `watcher_rows()`.
-
-Each watcher row is parsed from argv and includes:
-
-- watcher pid
-- pane id
-- thread id
-- watch log path
-- state file path
-- message text from argv
-- tmux socket binding
-
-This is how `status`, `stop`, `pause`, and `restart` know which watcher
-processes are actually alive.
-
-### 3. Saved managed-session state
-
-Canonical durable `acw` session metadata lives in:
+Durable desired state lives in:
 
 ```text
 ~/.codex/acw_session.<thread-id>.json
 ```
 
-These files store the manager-owned metadata for a managed session:
+These files hold manager-owned intent for one managed session:
 
 - `thread_id`
-- session/window `name`
-- saved continue `message`
-- watcher health
-- health detail and timestamp
-- last continue time
+- `pane`
+- `name`
+- `message`
+- `tmux_socket`
+- `paused`
+- `generation`
 
-This is the durable identity for a managed session when the watcher is restarted
-or temporarily absent.
+They also carry durable health metadata written by the worker:
 
-### 4. Codex local SQLite state
+- `health`
+- `health_detail`
+- `health_ts`
+- `last_continue_at`
 
-`acw` reads Codex `state_*.sqlite` files for:
+The session file is the desired state for the daemon.
 
-- thread creation / activity timestamps
-- pid -> thread mappings from the `logs` table
+### 2. Runtime state
 
-This is the preferred durable source for mapping a live Codex process to a
-thread ID.
+Observed managed-worker state lives in:
+
+```text
+~/.codex/acw_runtime.<scope>.<thread-id>.json
+```
+
+These files are written by the daemon and describe the currently attached live
+worker for one managed session:
+
+- worker id (`pid` in the UI; this is a worker-thread identifier, not a
+  standalone process id)
+- daemon pid
+- pane
+- thread
+- runtime status
+- paused flag
+- generation
+- watch log path
+- heartbeat timestamp
+
+The runtime file is the daemon-owned observed state.
+
+### 3. Live tmux and process state
+
+The manager still probes tmux and live processes directly for correctness:
+
+- `tmux list-panes -a`
+- `tmux display-message`
+- tmux pane capture
+- one `ps` process snapshot for pane process trees
+
+This is how `acw` proves:
+
+- pane existence
+- live window names
+- pane shell pid
+- whether a live Codex process exists in the pane
+
+### 4. Codex SQLite state and process-owned evidence
+
+Thread identity is proven only from strong evidence:
+
+- pid -> thread mappings from Codex `state_*.sqlite`
+- explicit `codex resume <thread-id>` argv
+- thread ids embedded in Codex-owned open files
+
+`acw` never guesses a thread id from cwd, timestamps, or other weak signals.
 
 ### 5. `codex-tui.log`
 
-The watcher tails:
+The worker reads:
 
 ```text
 ~/.codex/log/codex-tui.log
 ```
 
-It watches for:
+It uses that log for:
 
 - completion events
 - interrupt events
-
-This is the primary event stream for deciding when to send the saved continue
-message.
-
-### 6. Live Codex process-owned evidence
-
-When SQLite is not enough, `acw` still only uses process-owned evidence:
-
-- explicit `codex resume <thread-id>` argv
-- thread IDs embedded in the Codex process's open files under `/proc/<pid>/fd`
-
-It does not fall back to cwd or timing guesses.
+- startup replay of one pending completion
 
 
-## Runtime Identity Model
+## Why The Shared Daemon Exists
 
-The most important architectural change in the current design is that the
-manager no longer collapses everything onto `thread_id` first.
+The older design used one `auto_continue_logwatch.py` process per pane.
+That caused a lot of avoidable complexity:
 
-Instead, each `acw` command builds a fresh `RuntimeSnapshot` and `RuntimeModel`
-containing three separate inventories:
+- one watcher pid per pane
+- pid files as primary runtime identity
+- repeated `ps` scans just to discover watcher state
+- pause/resume implemented as OS stop/continue
+- duplicated global `codex-tui.log` tailers
+
+The shared daemon simplifies the control plane:
+
+- one daemon process per tmux socket
+- one reconcile loop
+- one desired-state model
+- one runtime-state model
+- logical workers instead of manager-owned per-pane processes
+
+The worker logic itself still lives in `auto_continue_logwatch.py`; the daemon
+reuses that implementation instead of carrying a second copy of the event loop.
+
+
+## Daemon Reconcile Loop
+
+The hidden `_daemon` subcommand is started on demand by the CLI.
+
+At a high level the loop does this:
+
+1. Load all session files for the current tmux socket scope.
+2. Reconcile them against the in-memory worker map.
+3. Start missing workers.
+4. Stop workers whose session was deleted.
+5. Restart workers whose `(pane, message, generation)` signature changed.
+6. Apply paused/unpaused state to live workers.
+7. Write one runtime JSON file per live managed worker.
+8. Exit automatically after a short idle period when the scope has no sessions.
+
+That means normal commands are cheap:
+
+- they edit desired state
+- they ensure the daemon exists
+- they wait for the runtime file to reflect the new state
+
+They do not spawn or discover per-pane manager processes anymore.
+
+
+## Worker Model
+
+Each daemon worker runs `watch_session(...)` from
+`bin/auto_continue_logwatch.py`.
+
+The shared implementation still handles:
+
+- Codex completion detection
+- interrupt skipping
+- pane-visible error detection
+- auto-pause on auth/quota/remote-compact failures
+- health updates
+- tmux `send-keys`
+
+The important daemon-specific difference is pause semantics:
+
+- `pause` is a logical session flag, not `SIGSTOP`
+- `resume` still restarts the worker generation instead of thawing the old
+  reader, so stale log backlog is not replayed
+
+This preserves the correctness fix from the old resume rewrite without keeping
+per-pane OS processes around.
+
+
+## Manager Command Flows
+
+### `start`
+
+`start` now means:
+
+1. Resolve the target pane.
+2. Prove the live Codex thread.
+3. Resolve or edit the continue message.
+4. Reject conflicting pane/thread/session state.
+5. Write the thread-keyed session JSON for that pane.
+6. Ensure the shared daemon is running.
+7. Wait for the matching runtime row.
+
+### `stop`
+
+`stop` is destructive manager intent:
+
+- remove the saved session file
+- let the daemon tear down the runtime worker
+- forget the session from `acw status`
+
+For migration or cleanup, `stop` also still terminates legacy per-pane watcher
+processes if they exist.
+
+### `pause`
+
+`pause` sets `paused=true` in the saved session file and waits for the daemon
+runtime row to reflect that state.
+
+### `resume`
+
+`resume` does not unfreeze an old reader in place.
+
+Instead it restarts the managed worker generation from the current pane/thread
+state so backlog is not replayed.
+
+### `restart`
+
+`restart` is implemented as:
+
+1. resolve pane and prove thread
+2. load the saved message unless `--message` overrides it
+3. optionally relaunch Codex with `codex resume <thread-id>`
+4. bump the session `generation`
+5. ensure the daemon is running
+6. wait for the runtime row with the new generation
+
+With no target, `restart` iterates all live managed panes for the current
+scope.
+
+### `restart --restart-codex`
+
+The Codex relaunch path is still explicit and strict:
+
+1. prove the current thread
+2. terminate the live Codex subprocess tree in the pane
+3. wait for a real shell prompt
+4. run `codex resume <thread-id>`
+5. handle the directory-trust prompt if it appears
+6. request the new worker generation
+
+### `edit`
+
+`edit` is just:
+
+1. prove pane and thread
+2. seed the editor from the saved session message
+3. persist the new message
+4. restart the worker generation if the pane is managed
+
+### `status`
+
+`status` builds a fresh runtime model from:
 
 - live panes
-- live watcher processes
-- saved sessions
+- live managed runtime rows
+- saved session files
 
-These types live in `bin/auto_continue_watchd.py`:
+It does not collapse ambiguity away.
+If there are duplicate or missing entities, the table shows them as invariant
+errors.
+
+### `doctor`
+
+`doctor` is the strict proof path for one target.
+It reports:
+
+- tmux reachability
+- auth/state prerequisites
+- target resolution
+- live thread identity
+- thread provenance
+- worker/runtime/session agreement
+- a concrete next command when possible
+
+### `repair`
+
+`repair` is built on the same invariant model as `status` and `doctor`.
+
+It only auto-applies safe changes, such as:
+
+- recreating a missing saved session for a proven live pane
+- restarting one mismatched managed worker generation
+- syncing the saved session name to the live tmux window name
+
+It does not guess how to resolve genuinely ambiguous multi-pane or
+multi-thread corruption.
+
+### `cleanup`
+
+`cleanup` is intentionally narrower than `repair`.
+
+It only removes stale artifacts, such as:
+
+- dead legacy pid files
+- dead runtime rows from a vanished daemon
+- dead session files whose thread has neither a live pane nor a live worker
+
+
+## Runtime Snapshot Types
+
+The manager's in-memory model lives in `bin/auto_continue_watchd.py`.
+
+The main record types are:
 
 - `LivePaneRecord`
 - `LiveWatcherRecord`
@@ -193,459 +362,124 @@ These types live in `bin/auto_continue_watchd.py`:
 - `RuntimeSnapshot`
 - `RuntimeModel`
 
-The model indexes them by:
+These are indexed separately by:
 
 - pane id
 - thread id
 - session name
 
-This lets `status` and `doctor` report mismatches directly instead of hiding
-them behind optimistic merging.
+The critical design rule is:
 
-### Intended invariant
+**never merge multiplicity away.**
 
-For a healthy managed session, the system wants:
-
-- exactly one live tmux pane for the thread
-- exactly one live watcher for that pane
-- exactly one saved session for that thread
-- the pane's live Codex thread to match the watcher's configured thread
-- the saved session name to match the live window name
-
-Violations are surfaced as invariant errors rather than silently "healed" by
-guesswork.
-
-
-## Manager Architecture
-
-### The manager is one-shot, not resident
-
-`auto_continue_watchd.py` is a CLI command, not a daemon. Each invocation
-rebuilds its view of the world from:
-
-- tmux
-- `ps`
-- saved sessions
-- Codex SQLite state
-
-That is why `status`, `doctor`, `repair`, `start`, `restart`, and `edit` all notice pane
-renames, index moves, and process changes without a background manager loop.
-
-### Start flow
-
-`cmd_start()` is the main creation path.
-
-At a high level it does this:
-
-1. Resolve the target to a live tmux pane.
-2. Install the tmux `window-renamed` hook.
-3. Resolve or interactively edit the continue message.
-4. Build a fresh runtime model.
-5. Reject duplicates or inconsistent pre-existing watchers.
-6. Resolve the pane's Codex thread strictly.
-7. Write the thread-keyed session JSON.
-8. Disable tmux automatic window renaming for that pane.
-9. Spawn `auto_continue_logwatch.py`.
-10. Persist the watcher pid file.
-
-The key design point is that start fails if thread identity is not proven.
-
-### Stop / pause / resume / restart
-
-#### `stop`
-
-`stop` is destructive from the manager's point of view.
-
-It:
-
-- kills the watcher process
-- removes the pane pid file
-- forgets the saved `acw_session.<thread>.json`
-
-So `stop` means "stop managing this session", not just "temporarily stop the
-process".
-
-#### `pause`
-
-`pause` sends `SIGSTOP` to the watcher process and keeps the saved session.
-
-This is the reversible operation.
-
-#### `resume`
-
-`resume` does not send `SIGCONT`.
-It restarts paused watchers from current pane/thread state.
-
-That avoids backlog replay from an old stopped watcher that still has unread
-`codex-tui.log` history.
-
-#### `restart`
-
-`restart` is implemented as:
-
-- resolve target pane
-- prove the thread
-- load the saved message if needed
-- stop the old watcher
-- optionally relaunch Codex into the same thread
-- start a fresh watcher
-
-With no target, it restarts all live managed panes and also recovers dead
-managed sessions whose live Codex pane still exists.
-
-#### `restart --restart-codex`
-
-This path exists for same-session pane recovery.
-
-It intentionally does not send a blind `C-c` and hope the shell returns.
-Instead it:
-
-1. verifies whether the pane is already at its shell prompt
-2. if not, finds the top-level live Codex subprocess under the pane shell
-3. sends `SIGTERM` to that subtree root
-4. waits until the pane is back at a real shell
-5. runs `codex resume <thread-id>`
-6. waits until a new live Codex process appears
-7. briefly checks for the directory-trust prompt
-
-This is much more reliable than terminal-keystroke guesses when the pane is
-still inside an active Codex TUI session.
-
-### Edit flow
-
-`edit` is a message-management command.
-
-It:
-
-- resolves the live pane
-- proves pane/thread/session identity strictly
-- loads the canonical saved session message
-- opens the editor with that message
-- writes the updated message back to the saved session
-- restarts the watcher if one is running on that pane
-
-The important detail is that `edit` reads the saved session message, not the
-watcher's inline argv text.
+If two workers claim one thread, or two panes claim one thread, the model keeps
+both and reports the invariant violation.
 
 
 ## Thread Discovery
 
-Thread discovery is intentionally strict.
+Thread discovery is strict by design.
 
-The manager path is:
+For one live pane:
 
-1. enumerate live panes with `tmux list-panes -a`
-2. capture each pane's root shell pid
-3. build one shared process snapshot from `ps`
-4. walk each shell's descendant process tree
-5. find Codex processes
-6. map Codex pid -> thread id
+1. `tmux list-panes` provides the pane shell pid.
+2. One `ps` snapshot walks the process tree below that shell.
+3. Any live `codex` process is mapped to a thread id through:
+   - Codex SQLite pid rows first
+   - then explicit `resume <thread-id>` argv
+   - then Codex-owned open files
 
-That logic lives primarily in:
+If that still does not prove a thread, `acw` returns an error.
 
-- `_load_process_graph()`
-- `_codex_pids_in_process_tree()`
-- `_threads_from_process_tree()`
-- `_pane_thread_probe()`
 
-### Thread sources, in order
+## Rename Handling
 
-For a live Codex pid, `thread_from_codex_pid()` uses:
+The tmux `window-renamed` hook is still installed by the manager.
 
-1. Codex SQLite `logs.process_uuid = pid:<pid>:...`
-2. `/proc/<pid>/cmdline` looking for `resume <thread-id>`
-3. `/proc/<pid>/fd/*` targets containing a thread id
+When a window name changes, `acw` syncs the saved session `name` field for the
+thread attached to panes in that window.
 
-If none of those prove the thread, discovery returns "unknown".
+Because pane/thread identity is rebuilt from live state on every command, a
+rename is naturally visible to later `status`, `doctor`, and `edit` calls even
+without trusting the hook alone.
 
-### What it does not do
 
-It does not infer a thread from:
+## State Files
 
-- pane cwd
-- most-recent global thread
-- timing coincidence
-- another watcher's thread
-
-That rule is central to the current reliability model.
-
-
-## Watcher Architecture
-
-Each watcher is one long-running `auto_continue_logwatch.py` process tied to one
-tmux pane and one saved continue message.
-
-### Startup
-
-On startup, the watcher:
-
-1. validates the target pane still exists
-2. normalizes the continue message
-3. resolves the initial thread if started in `auto` mode
-4. loads prior session state
-5. seeds `last_handled_turn` from saved state
-6. writes initial session JSON
-7. scans the tail of `codex-tui.log` for a pending completion that happened
-   just before the watcher attached
-8. sets up inotify-style wakeups via `watchdog` when available
-
-### Main loop
-
-The main loop does three things repeatedly:
-
-#### 1. Collect events
-
-It reads newly appended `codex-tui.log` lines and converts them into:
-
-- `completion` events
-- `interrupt` events
-
-The accepted completion patterns currently include:
-
-- older `needs_follow_up=false`
-- newer `codex_core::tasks: close`
-
-#### 2. Filter and react
-
-For each event on the watched thread, it applies:
-
-- duplicate-turn suppression
-- one-turn skip after interrupts
-- pane-visible interrupt checks
-- pane-visible error checks
-- cooldown gating
-
-If the pane shows errors like auth/quota/remote compact failures, the watcher
-records an auto-pause reason and stops itself with `SIGSTOP`.
-
-#### 3. Send the continue message
-
-If the event survives all gates, the watcher:
-
-- optionally waits `send_delay_secs`
-- leaves tmux copy mode if needed
-- sends the message with `tmux send-keys -l`
-- waits `enter_delay_secs`
-- sends `Enter`
-- updates session state and watch log
-
-The send path has one retry after a best-effort tmux mode cancel.
-
-### Health and rebinding
-
-The watcher also performs periodic health updates.
-
-Health is computed from:
-
-- whether a thread is known
-- whether `codex-tui.log` exists
-- whether startup grace has expired
-
-In `auto` thread mode, the watcher periodically re-checks the pane's live Codex
-thread and can rebind to a new thread if the pane has been restarted into a new
-session.
-
-
-## Window Naming And Rename Handling
-
-There are two separate mechanisms here.
-
-### Live status / targeting
-
-For live panes, `acw` does not trust saved names.
-It always asks tmux again.
-
-That means if a window is:
-
-- renamed
-- moved to a different index
-- moved between sessions
-
-the next `acw status`, `acw doctor`, `acw start`, or `acw restart` sees the new
-live label immediately.
-
-### Saved-session rename sync
-
-`start` installs a global tmux `window-renamed` hook:
-
-- `ensure_tmux_window_rename_hook()`
-- callback: `cmd_window_renamed()`
-
-When a managed live window is renamed, the callback updates the saved
-session's `name` field.
-
-This matters for:
-
-- targeting dead sessions by name
-- presenting consistent names after watcher restarts
-
-### Important limitation
-
-The rename hook is only about saved metadata.
-Live status correctness does not depend on it.
-
-If the hook is absent, stale, or the watcher is already gone at rename time:
-
-- live panes are still shown correctly via tmux
-- saved session names for dead/offline recovery may drift
-
-
-## Status, Doctor, And Cleanup
-
-### Status
-
-`status` builds fresh entries from the runtime snapshot.
-
-It shows three kinds of managed rows:
-
-- live watcher rows
-- managed live panes whose watcher is missing
-- dead saved sessions with no live pane
-
-It intentionally ignores random unmanaged live Codex panes with no saved `acw`
-session.
-
-This keeps the dashboard focused on manager-owned state instead of every Codex
-process on the tmux server.
-
-### Doctor
-
-`doctor` is a stricter, targeted diagnosis command.
-
-It checks:
-
-- state-dir writability
-- Codex auth presence
-- tmux reachability
-- pane resolution
-- thread detectability
-- watcher presence
-- watcher identity / health
-
-It also prints concrete next-command recommendations like:
-
-- `acw repair ...`
-- `acw start ...`
-- `acw resume ...`
-- `acw restart ...`
-- `acw stop ...`
-
-When thread identity is proven, `doctor` also reports the provenance instead of
-just the thread value. Today that provenance is phrased in terms of live
-Codex-process-owned evidence rather than any pane-local heuristic.
-
-### Repair
-
-`repair` is the live-state recovery workflow built on the same runtime model as
-`status` and `doctor`.
-
-The important split is:
-
-- `repair` fixes live pane / watcher / thread / saved-session mismatches
-- `cleanup` removes dead saved-session state and other stale files
-
-`repair` uses the same strict model and never guesses a thread id. With no
-target, it defaults to a dry run and only considers manager-owned panes:
-
-- panes with a live watcher
-- panes whose live thread matches a saved `acw` session
-
-It intentionally ignores random unmanaged Codex panes in the all-pane view so
-the repair plan stays focused on `acw`-owned state.
-
-The first implementation only auto-applies safe local repairs, such as:
-
-- starting a missing watcher for a managed live pane
-- replacing duplicate watcher processes on one pane with a single watcher
-- rebinding one broken watcher to the pane's proven live thread
-- recreating a missing saved session from a healthy live watcher
-- syncing a saved session name to the current tmux window name
-- stopping orphan watcher processes while preserving saved session state
-
-When the model cannot choose safely, `repair` stops and prints a manual blocker
-instead, for example:
-
-- one thread active across multiple panes
-- one thread watched across multiple panes
-- unresolved live pane thread identity
-- missing continue message for a pane that needs a new watcher
-- one saved session name shared by multiple threads
-
-### Cleanup
-
-`cleanup` removes stale manager-owned files:
-
-- dead pid files
-- logs for dead watchers
-- dead saved sessions with neither a live watcher nor a live Codex pane
-
-Normal mutating commands use the fast cleanup path.
-Deep dead-session pruning only happens on explicit `acw cleanup`.
-
-
-## Runtime Files
-
-All manager-owned runtime state lives under `~/.codex/`.
+All manager-owned state lives under `~/.codex/`.
 
 Important files:
 
-- `auto_continue_logwatch.<pane>.pid`
-  - watcher pid file keyed by pane
+- `acw_session.<thread>.json`
+  - desired state for one managed session
+- `acw_runtime.<scope>.<thread>.json`
+  - observed daemon runtime state for one live worker
+- `acw_daemon.<scope>.pid`
+  - daemon pid for one tmux socket scope
+- `acw_daemon.<scope>.log`
+  - daemon stdout/stderr log
 - `auto_continue_logwatch.<pane>.log`
-  - watcher watch log
+  - per-pane worker event log
+
+Legacy files may still appear during migration:
+
+- `auto_continue_logwatch.<pane>.pid`
 - `auto_continue_logwatch.<pane>.runner.log`
-  - watcher process stdout/stderr
-- `acw_session.<thread-id>.json`
-  - canonical manager-owned saved session record
 
-The Codex-owned files `acw` reads but does not own include:
-
-- `~/.codex/log/codex-tui.log`
-- `~/.codex/state_*.sqlite`
+`cleanup` and `stop` still know how to remove those old artifacts.
 
 
-## Performance Characteristics
+## Performance
 
-The manager is intentionally snapshot-based, so every command does some live
-inspection work.
+The daemon rewrite improves command latency in two ways:
 
-The current design keeps that reasonable by:
+- no manager-side discovery of one OS watcher process per pane
+- no process spawning for normal start/edit/restart flows
 
-- using one shared `ps` snapshot per command
-- avoiding per-pane `pstree` subprocesses in the manager
-- avoiding deep stale-session cleanup on every command
-- using tmux queries only where needed
+On this checkout after the rewrite:
 
-The watcher side is mostly event-driven:
+- `status` is about `0.57s`
+- `edit %0` is about `0.23s`
 
-- `watchdog`/inotify if available
-- periodic timeout fallback if not
+The remaining cost is mostly:
 
-
-## Testing Model
-
-There are three layers of confidence in the repository:
-
-- unit tests for manager logic in `test/test_watchd_unit.py`
-- unit tests for watcher logic in `test/test_logwatch_unit.py`
-- real Codex integration and harness tests in:
-  - `test/test_real_codex_harness_unit.py`
-  - `test/test_real_codex_integration.py`
-  - `test/test_rollout_e2e.sh`
-
-The real-Codex tests matter because several behaviors are only meaningful when
-the tool interacts with an actual tmux server and a real Codex process tree.
+- live tmux metadata
+- one process-tree snapshot for thread proof
+- rendering
 
 
-## Practical Mental Model
+## Testing
 
-The shortest correct mental model is:
+The rewrite is covered at three levels:
 
-- `watchd.py` is a stateless-on-entry manager that reconstructs live state on
-  each command.
-- `logwatch.py` is the only long-running automation process.
-- thread identity is sacred and must be proven, never guessed.
-- saved session JSON is durable manager metadata, not the live truth.
-- tmux and the Codex process tree are the live truth.
+- unit tests for manager/runtime logic in `test/test_watchd_unit.py`
+- unit tests for worker logic in `test/test_logwatch_unit.py`
+- real Codex integration tests in `test/test_real_codex_integration.py`
 
-If those rules stay true, the rest of the system remains understandable.
+The important real-manager cases are:
+
+- `start` against a live Codex pane
+- multi-target `resume`
+- `restart --restart-codex`
+- dead-worker recovery
+- `doctor` and status behavior on live panes
+
+
+## Summary
+
+The current architecture is:
+
+- strict about identity
+- explicit about ambiguity
+- centered on thread-keyed desired state
+- backed by one daemon per tmux socket
+- still external to Codex and tmux internals
+
+That keeps the operator model simple:
+
+- `start` means "manage this pane/thread"
+- `pause` means "stop continuing this managed session"
+- `resume` and `restart` mean "request a fresh worker generation"
+- `stop` means "forget this managed session"
+- `repair` means "fix live invariant problems"
+- `cleanup` means "delete stale artifacts"
