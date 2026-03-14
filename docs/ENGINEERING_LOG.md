@@ -2,6 +2,7 @@
 
 ## 2026-03-13
 
+- Change: rewrote `docs/ARCHITECTURE.md` from a short component note into a detailed design document. It now describes the runtime identity model, sources of truth, strict thread discovery, manager command flows, watcher loop, rename handling, status/doctor/cleanup behavior, and why `acw` rebuilds live state on every command instead of relying on a resident manager daemon.
 - Change: `acw stop` now forgets the saved session state for the watcher it stops, instead of leaving behind a live-pane/no-watcher error that then requires a separate `acw cleanup`. This makes `stop` the intentional "stop managing this session" operation, while `pause` remains the reversible one.
 - Change: `acw status` now ignores unmanaged live Codex panes that have no saved `acw` session. Status still shows managed sessions whose watcher disappeared, but a random Codex pane or an accidentally started-and-then-stopped watcher no longer lingers forever as an invariant error row.
 - Change: removed the last heuristic thread-resolution path from `acw start`. All mutating commands now resolve pane threads through the shared runtime identity model, so `start` fails on unresolved or conflicting live pane state instead of bypassing the stricter `status`/`doctor` checks with an older pane-local detector.
