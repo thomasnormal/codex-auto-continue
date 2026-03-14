@@ -146,6 +146,15 @@ class WatchdUnitTests(unittest.TestCase):
             acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "1843260"),
         )
 
+    def test_format_age_compact_omits_ago_suffix(self):
+        with patch.object(acw.time, "time", return_value=10_000.0):
+            self.assertEqual("1h02m", acw._format_age(10_000.0 - 3720.0, compact=True))
+
+    def test_status_flex_widths_prefers_last_agent_column(self):
+        last_agent_col_w, msg_col_w = acw._status_flex_widths(120, [16, 7, 7, 8])
+        self.assertGreater(last_agent_col_w, msg_col_w)
+        self.assertEqual(63, last_agent_col_w + msg_col_w)
+
     def test_compute_state_shows_dead_without_live_pid_even_if_health_was_ok(self):
         self.assertEqual("dead", acw._compute_state({"pid": ""}, {"health": "ok"}))
 

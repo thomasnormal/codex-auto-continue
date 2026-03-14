@@ -1884,11 +1884,11 @@ def _build_thread_pane_map() -> dict[str, str]:
     return mapping
 
 
-def _thread_times(thread_id: str) -> tuple[str, str]:
+def _thread_times(thread_id: str, compact: bool = False) -> tuple[str, str]:
     """Return (started, last_message) for a thread from local Codex SQLite state."""
     started_at, last_activity_at = thread_times_from_state_db(thread_id)
-    started = _format_age(started_at) if started_at else "-"
-    last_msg = _format_age(last_activity_at) if last_activity_at else "-"
+    started = _format_age(started_at, compact=compact) if started_at else "-"
+    last_msg = _format_age(last_activity_at, compact=compact) if last_activity_at else "-"
     return started, last_msg
 
 
@@ -1921,22 +1921,23 @@ def _thread_title(thread_id: str) -> str:
     return ""
 
 
-def _format_age(epoch: float) -> str:
+def _format_age(epoch: float, compact: bool = False) -> str:
     """Format an epoch as a human-friendly relative age string."""
     delta = time.time() - epoch
     if delta < 0:
         delta = 0
+    suffix = "" if compact else " ago"
     if delta < 60:
-        return f"{int(delta)}s ago"
+        return f"{int(delta)}s{suffix}"
     if delta < 3600:
-        return f"{int(delta // 60)}m ago"
+        return f"{int(delta // 60)}m{suffix}"
     if delta < 86400:
         h = int(delta // 3600)
         m = int((delta % 3600) // 60)
-        return f"{h}h{m:02d}m ago"
+        return f"{h}h{m:02d}m{suffix}"
     d = int(delta // 86400)
     h = int((delta % 86400) // 3600)
-    return f"{d}d{h}h ago"
+    return f"{d}d{h}h{suffix}"
 
 
 _PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
@@ -2573,6 +2574,15 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
     return "\n".join(lines)
 
 
+def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
+    fixed_total = sum(fixed_col_widths)
+    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
+    flex_total = max(48, term_w - fixed_total - 19)
+    msg_col_w = max(20, min(32, flex_total // 3))
+    last_agent_col_w = max(32, min(72, flex_total - msg_col_w))
+    return last_agent_col_w, msg_col_w
+
+
 def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
     headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
     plain_rows: list[tuple[str, str, str, str, str, str]] = []
@@ -2821,12 +2831,12 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         sj = _read_state_json(r["state"])
         state_value = _compute_state(r, sj)
         state_detail = _status_row_detail(r, sj)
-        started, _last_activity = _thread_times(r["thread"])
+        started, _last_activity = _thread_times(r["thread"], compact=True)
         last_acw = sj.get("last_continue_at", "")
         if last_acw:
             try:
                 epoch = time.mktime(time.strptime(last_acw, "%Y-%m-%d %H:%M:%S"))
-                last_acw = _format_age(epoch)
+                last_acw = _format_age(epoch, compact=True)
             except (ValueError, OverflowError):
                 pass
         if not last_acw:
@@ -2857,27 +2867,26 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
 
     # Estimate MESSAGE column width from terminal width and other columns.
     term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT")
+    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
     col_widths = [len(h) for h in headers]
     for row in rows_data:
-        for i in range(5):
+        for i in range(4):
             # Measure first line only, strip rich markup tags.
             text = row[i].split("\n")[0]
             text = re.sub(r"\[/?[^\]]*\]", "", text)
             col_widths[i] = max(col_widths[i], len(text))
-    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
-    msg_col_w = max(20, min(60, term_w - sum(col_widths) - 19))
+    last_agent_col_w, msg_col_w = _status_flex_widths(term_w, col_widths)
 
     table = Table(show_lines=False, expand=True)
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
     table.add_column("STARTED", no_wrap=True)
     table.add_column("LAST_ACW", no_wrap=True)
-    table.add_column("LAST_AGENT", max_width=48)
-    table.add_column("MESSAGE", ratio=1, max_width=60)
+    table.add_column("LAST_AGENT", ratio=2, max_width=last_agent_col_w)
+    table.add_column("MESSAGE", ratio=1, max_width=msg_col_w)
 
     for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
-        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, 48)
+        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, last_agent_col_w)
         msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
         table.add_row(
             window_pane, state_value,

@@ -3,6 +3,7 @@
 ## 2026-03-14
 
 - Change: split the status table `WINDOW/PANE` metadata over separate lines for the thread id and watcher pid. This keeps the rich table easier to scan when invariant-heavy sessions need both identifiers at once.
+- Change: compacted the `STARTED` and `LAST_ACW` values in the status table to drop the repeated `ago` suffix, and rebalanced the rich status layout to give `LAST_AGENT` a larger fixed share of the remaining width than `MESSAGE`.
 
 ## 2026-03-13
 
