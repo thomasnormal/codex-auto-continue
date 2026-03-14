@@ -10,9 +10,7 @@ import json
 import os
 import re
 import shlex
-import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,6 +19,10 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
+import acw_state
+import acw_daemon
+import acw_probe
+import acw_ui
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
 from auto_continue_logwatch import CodexLogEvent as _LogwatchCodexLogEvent
@@ -198,45 +200,24 @@ def watch_log_for_key(key: str) -> str:
 
 
 def state_file_for_thread(thread_id: str) -> str:
-    return os.path.join(STATE_DIR, f"acw_session.{thread_id}.json")
+    return acw_state.session_state_ref(thread_id)
+
+
+def state_db_file() -> str:
+    return acw_state.state_db_path(STATE_DIR)
 
 
 def _read_session_state(thread_id: str) -> dict:
-    path = state_file_for_thread(thread_id)
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = acw_state.read_session_state(thread_id, state_dir=STATE_DIR)
+    return {str(key): value for key, value in data.items()} if data else {}
 
 
 def _write_session_state(thread_id: str, data: dict) -> None:
-    path = state_file_for_thread(thread_id)
-    existing = _read_session_state(thread_id)
-    existing.update(data)
-    try:
-        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            json.dump(existing, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+    acw_state.write_session_state(thread_id, data, state_dir=STATE_DIR)
 
 
 def _remove_session_state(thread_id: str) -> bool:
-    if not is_thread_id(thread_id):
-        return False
-    path = Path(state_file_for_thread(thread_id.lower()))
-    if not path.exists():
-        return False
-    try:
-        path.unlink()
-        return True
-    except OSError:
-        return False
+    return acw_state.remove_session_state(thread_id, state_dir=STATE_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -336,83 +317,40 @@ def daemon_log_file_for_scope(socket_path: str | None = None) -> str:
 
 
 def daemon_runtime_file_for_thread(thread_id: str, socket_path: str | None = None) -> str:
+    scope = _tmux_scope_key(socket_path)
     token = _tmux_scope_token(socket_path)
-    return os.path.join(STATE_DIR, f"acw_runtime.{token}.{thread_id.lower()}.json")
+    return f"{state_db_file()}#runtime:{token}:{scope}:{thread_id.lower()}"
 
 
 def daemon_runtime_glob_for_scope(socket_path: str | None = None) -> str:
+    scope = _tmux_scope_key(socket_path)
     token = _tmux_scope_token(socket_path)
-    return os.path.join(STATE_DIR, f"acw_runtime.{token}.*.json")
+    return f"{state_db_file()}#runtime:{token}:{scope}:*"
 
 
 def _write_runtime_state(thread_id: str, data: dict, socket_path: str | None = None) -> None:
-    if not is_thread_id(thread_id):
-        return
-    path = Path(daemon_runtime_file_for_thread(thread_id, socket_path))
-    existing: dict[str, object] = {}
-    try:
-        with path.open() as f:
-            loaded = json.load(f)
-        if isinstance(loaded, dict):
-            existing = loaded
-    except (OSError, json.JSONDecodeError):
-        existing = {}
-    existing.update(data)
-    existing["thread"] = thread_id.lower()
-    existing["tmux_socket"] = _tmux_scope_key(socket_path)
-    try:
-        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            json.dump(existing, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+    acw_state.write_runtime_state(
+        thread_id,
+        data,
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(socket_path),
+    )
 
 
 def _remove_runtime_state(thread_id: str, socket_path: str | None = None) -> None:
-    if not is_thread_id(thread_id):
-        return
-    Path(daemon_runtime_file_for_thread(thread_id, socket_path)).unlink(missing_ok=True)
+    acw_state.remove_runtime_state(
+        thread_id,
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(socket_path),
+    )
 
 
 def _read_runtime_rows(socket_path: str | None = None) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for path_str in glob.glob(daemon_runtime_glob_for_scope(socket_path)):
-        try:
-            with open(path_str) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        thread_id = str(data.get("thread", "")).lower()
-        daemon_pid = str(data.get("daemon_pid", "")).strip()
-        if daemon_pid and daemon_pid.isdigit():
-            try:
-                os.kill(int(daemon_pid), 0)
-            except OSError:
-                Path(path_str).unlink(missing_ok=True)
-                continue
-        row = {
-            "pid": str(data.get("pid", "")).strip() or daemon_pid,
-            "pane": str(data.get("pane", "")).strip(),
-            "thread": thread_id,
-            "state": str(data.get("state", "")).strip(),
-            "watch": str(data.get("watch", "")).strip(),
-            "cwd": str(data.get("cwd", "")).strip(),
-            "msg_inline": str(data.get("msg_inline", "")).strip(),
-            "tmux_socket": str(data.get("tmux_socket", "")).strip(),
-            "paused": "1" if data.get("paused") else "",
-            "runtime_status": str(data.get("runtime_status", "")).strip(),
-            "runtime_detail": str(data.get("runtime_detail", "")).strip(),
-            "generation": str(data.get("generation", "")).strip(),
-            "worker_label": str(data.get("worker_label", "")).strip(),
-        }
-        rows.append(row)
-    return rows
+    rows = acw_state.read_runtime_rows(
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(socket_path),
+    )
+    return [{str(key): value for key, value in row.items()} for row in rows]
 
 
 def _tmux_client_env_healthy() -> bool:
@@ -933,42 +871,8 @@ def thread_from_running_watcher_for_pane(pane: str) -> str | None:
 # Daemon runtime
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class _DaemonCodexLogTail:
-    log_path: Path
-    handle: io.TextIOWrapper | None = None
-
-    def close(self) -> None:
-        if self.handle is None:
-            return
-        self.handle.close()
-        self.handle = None
-
-
-@dataclass
-class _DaemonSessionRuntime:
-    thread_id: str
-    pane: str
-    message: str
-    tmux_socket: str
-    generation: int
-    runtime_id: str
-    state_file: str
-    watch_log: str
-    cwd: str
-    paused: bool = False
-    runtime_status: str = "starting"
-    runtime_detail: str = ""
-    last_handled_turn: str = ""
-    last_handled_thread: str = ""
-    last_send_time: float = 0.0
-    health: str = "ok"
-    health_detail: str = ""
-    last_health_check: float = 0.0
-    watcher_start: float = 0.0
-    interrupt_skip_armed: bool = False
-    pending_startup_event: _LogwatchCodexLogEvent | None = None
+_DaemonCodexLogTail = acw_daemon.CodexLogTail
+_DaemonSessionRuntime = acw_daemon.SessionRuntime
 
 
 def _daemon_scope_env(socket_path: str) -> dict[str, str]:
@@ -1131,57 +1035,16 @@ def _load_scoped_session_records(socket_path: str | None = None) -> list[SavedSe
 
 
 def _daemon_runtime_payload(runtime: _DaemonSessionRuntime) -> dict:
-    return {
-        "pid": runtime.runtime_id,
-        "daemon_pid": str(os.getpid()),
-        "pane": runtime.pane,
-        "state": runtime.state_file,
-        "watch": runtime.watch_log,
-        "cwd": runtime.cwd,
-        "msg_inline": runtime.message,
-        "paused": runtime.paused,
-        "runtime_status": "paused" if runtime.paused else (runtime.runtime_status or "running"),
-        "runtime_detail": runtime.runtime_detail,
-        "generation": runtime.generation,
-        "worker_label": runtime.runtime_id,
-        "heartbeat_ts": _watch_now_ts(),
-    }
+    return acw_daemon.daemon_runtime_payload(runtime, now_ts=_watch_now_ts)
 
 
 def _drain_daemon_codex_log_events(tail: _DaemonCodexLogTail) -> list[_LogwatchCodexLogEvent]:
-    events: list[_LogwatchCodexLogEvent] = []
-    if tail.handle is None:
-        if not tail.log_path.exists():
-            return events
-        tail.log_path.parent.mkdir(parents=True, exist_ok=True)
-        tail.handle = tail.log_path.open("r", encoding="utf-8", errors="ignore")
-        tail.handle.seek(0, os.SEEK_END)
-        return events
-
-    while True:
-        line = tail.handle.readline()
-        if not line:
-            break
-        interrupt_thread = _parse_codex_log_interrupt(line)
-        if interrupt_thread:
-            events.append(
-                _LogwatchCodexLogEvent(
-                    "interrupt",
-                    interrupt_thread,
-                    detail="Conversation interrupted",
-                )
-            )
-            continue
-        parsed = _parse_codex_log_event(line)
-        if parsed:
-            events.append(_LogwatchCodexLogEvent("completion", *parsed))
-
-    try:
-        if tail.handle.tell() > tail.log_path.stat().st_size:
-            tail.close()
-    except FileNotFoundError:
-        tail.close()
-    return events
+    return acw_daemon.drain_codex_log_events(
+        tail,
+        parse_interrupt=_parse_codex_log_interrupt,
+        parse_event=_parse_codex_log_event,
+        event_cls=_LogwatchCodexLogEvent,
+    )
 
 
 def _daemon_session_runtime(
@@ -1191,61 +1054,24 @@ def _daemon_session_runtime(
 ) -> _DaemonSessionRuntime:
     state_file = session.state_file or state_file_for_thread(session.thread_id)
     watch_log = watch_log_for_key(key_from_pane(session.pane or session.thread_id))
-    state = _read_session_state(session.thread_id)
-    runtime = _DaemonSessionRuntime(
-        thread_id=session.thread_id,
-        pane=session.pane,
-        message=_message_text(session.message),
-        tmux_socket=session.tmux_socket,
-        generation=session.generation,
-        runtime_id=_next_daemon_runtime_id(),
+    return acw_daemon.daemon_session_runtime(
+        session,
+        codex_log_path=codex_log_path,
         state_file=state_file,
         watch_log=watch_log,
-        cwd=PROJECT_CWD,
-        paused=session.paused,
-        runtime_status="paused" if session.paused else "running",
-        runtime_detail=session.health_detail if session.paused else "",
-        last_handled_turn=str(state.get("last_handled_turn", state.get("last_sent_turn", ""))),
-        last_handled_thread=str(
-            state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
-        ),
-        watcher_start=time.time(),
+        project_cwd=PROJECT_CWD,
+        message_text=_message_text,
+        read_session_state=_read_session_state,
+        write_session_state=_write_session_state,
+        append_log=_watch_append_log,
+        check_pending=_check_codex_log_tail_for_pending,
+        event_cls=_LogwatchCodexLogEvent,
+        next_runtime_id=_next_daemon_runtime_id,
     )
-    _write_session_state(
-        session.thread_id,
-        {
-            "thread_id": session.thread_id,
-            "pane": session.pane,
-            "name": session.name,
-            "message": runtime.message,
-            "paused": session.paused,
-            "generation": session.generation,
-            "tmux_socket": session.tmux_socket,
-        },
-    )
-    _watch_append_log(Path(runtime.watch_log), f"watch: pane={runtime.pane} thread_id={runtime.thread_id}")
-    pending = _check_codex_log_tail_for_pending(
-        codex_log_path,
-        runtime.thread_id,
-        runtime.last_handled_turn,
-        runtime.last_handled_thread,
-        Path(runtime.watch_log),
-    )
-    if pending:
-        runtime.pending_startup_event = _LogwatchCodexLogEvent("completion", *pending)
-    return runtime
 
 
 def _daemon_mark_handled(runtime: _DaemonSessionRuntime, turn_id: str, thread_id: str) -> None:
-    runtime.last_handled_turn = turn_id
-    runtime.last_handled_thread = thread_id
-    _write_session_state(
-        runtime.thread_id,
-        {
-            "last_handled_turn": turn_id,
-            "last_handled_thread": thread_id,
-        },
-    )
+    acw_daemon.daemon_mark_handled(runtime, turn_id, thread_id, write_session_state=_write_session_state)
 
 
 def _daemon_skip_interrupted_turn(
@@ -1254,128 +1080,44 @@ def _daemon_skip_interrupted_turn(
     thread_id: str,
     reason: str,
 ) -> None:
-    runtime.interrupt_skip_armed = False
-    _daemon_mark_handled(runtime, turn_id, thread_id)
-    _watch_append_log(
-        Path(runtime.watch_log),
-        f"skip: interrupted turn={turn_id} thread={thread_id} reason={reason}",
+    acw_daemon.daemon_skip_interrupted_turn(
+        runtime,
+        turn_id,
+        thread_id,
+        reason,
+        write_session_state=_write_session_state,
+        append_log=_watch_append_log,
     )
 
 
 def _daemon_pause_session(runtime: _DaemonSessionRuntime, reason: str) -> None:
-    now = _watch_now_ts()
-    runtime.paused = True
-    runtime.runtime_status = "paused"
-    runtime.runtime_detail = reason
-    runtime.health_detail = f"auto-paused: {reason}"
-    _write_session_state(
-        runtime.thread_id,
-        {
-            "paused": True,
-            "health_detail": runtime.health_detail,
-            "health_ts": now,
-        },
+    acw_daemon.daemon_pause_session(
+        runtime,
+        reason,
+        write_session_state=_write_session_state,
+        append_log=_watch_append_log,
+        now_ts=_watch_now_ts,
     )
-    _watch_append_log(Path(runtime.watch_log), f"pause: auto-pausing watcher ({reason})")
 
 
 def _daemon_process_session_events(
     runtime: _DaemonSessionRuntime,
     events: list[_LogwatchCodexLogEvent],
 ) -> None:
-    if runtime.paused:
-        runtime.runtime_status = "paused"
-        return
-
-    runtime.runtime_status = "running"
-    runtime.runtime_detail = ""
-    watch_log = Path(runtime.watch_log)
-
-    for event in events:
-        if runtime.paused:
-            break
-        if event.thread_id != runtime.thread_id:
-            continue
-
-        if event.kind == "interrupt":
-            if not runtime.interrupt_skip_armed:
-                runtime.interrupt_skip_armed = True
-                _watch_append_log(watch_log, f"skip: armed after interrupt thread={event.thread_id}")
-            continue
-
-        if event.detail != "false":
-            continue
-        if event.turn_id == runtime.last_handled_turn and event.thread_id == runtime.last_handled_thread:
-            continue
-
-        if runtime.interrupt_skip_armed:
-            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, "Conversation interrupted")
-            continue
-
-        pane_interrupt = _check_pane_for_interrupt(runtime.pane)
-        if pane_interrupt:
-            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, pane_interrupt)
-            continue
-
-        pane_error = _check_pane_for_errors(runtime.pane)
-        if pane_error:
-            _daemon_pause_session(runtime, pane_error)
-            continue
-
-        if time.time() - runtime.last_send_time < 1.0:
-            _watch_append_log(watch_log, f"skip: cooldown turn={event.turn_id}")
-            continue
-
-        if float(SEND_DELAY_SECS) > 0.0:
-            time.sleep(float(SEND_DELAY_SECS))
-
-        pane_interrupt = _check_pane_for_interrupt(runtime.pane)
-        if pane_interrupt:
-            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, pane_interrupt)
-            continue
-
-        pane_error = _check_pane_for_errors(runtime.pane)
-        if pane_error:
-            _daemon_pause_session(runtime, pane_error)
-            continue
-
-        send_result = _watch_tmux_send(
-            runtime.pane,
-            runtime.message,
-            max(0.0, float(ENTER_DELAY_SECS)),
-            interrupt_checker=lambda: _check_pane_for_interrupt(runtime.pane),
-        )
-        if send_result.status == "ok":
-            runtime.last_send_time = time.time()
-            _daemon_mark_handled(runtime, event.turn_id, event.thread_id)
-            now = _watch_now_ts()
-            _write_session_state(
-                runtime.thread_id,
-                {
-                    "thread_id": runtime.thread_id,
-                    "last_continue_at": now,
-                    "health": runtime.health,
-                    "health_detail": runtime.health_detail,
-                },
-            )
-            _watch_append_log(watch_log, f"continue: sent turn={event.turn_id} thread={event.thread_id}")
-            continue
-        if send_result.status == "interrupted":
-            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, send_result.detail)
-            continue
-        if send_result.detail:
-            _watch_append_log(
-                watch_log,
-                (
-                    "error: tmux send failed "
-                    f"turn={event.turn_id} thread={event.thread_id} detail={send_result.detail}"
-                ),
-            )
-        else:
-            _watch_append_log(
-                watch_log,
-                f"error: tmux send failed turn={event.turn_id} thread={event.thread_id}",
-            )
+    acw_daemon.daemon_process_session_events(
+        runtime,
+        events,
+        check_pane_for_interrupt=_check_pane_for_interrupt,
+        check_pane_for_errors=_check_pane_for_errors,
+        tmux_send=_watch_tmux_send,
+        compute_watch_health=_compute_watch_health,
+        now_ts=_watch_now_ts,
+        append_log=_watch_append_log,
+        write_session_state=_write_session_state,
+        send_delay_secs=SEND_DELAY_SECS,
+        enter_delay_secs=ENTER_DELAY_SECS,
+        time_module=time,
+    )
 
 
 def _daemon_refresh_session_health(
@@ -1384,26 +1126,14 @@ def _daemon_refresh_session_health(
     codex_log_exists: bool,
     now: float,
 ) -> None:
-    new_health, new_detail = _compute_watch_health(
-        watched_thread=runtime.thread_id,
-        watcher_start=runtime.watcher_start,
-        now=now,
+    acw_daemon.daemon_refresh_session_health(
+        runtime,
         codex_log_exists=codex_log_exists,
-    )
-    if new_health != runtime.health or new_detail != runtime.health_detail:
-        if new_detail:
-            _watch_append_log(Path(runtime.watch_log), f"health: {new_health} - {new_detail}")
-        else:
-            _watch_append_log(Path(runtime.watch_log), f"health: {new_health}")
-    runtime.health = new_health
-    runtime.health_detail = new_detail
-    _write_session_state(
-        runtime.thread_id,
-        {
-            "health": runtime.health,
-            "health_detail": runtime.health_detail,
-            "health_ts": _watch_now_ts(),
-        },
+        now=now,
+        compute_watch_health=_compute_watch_health,
+        append_log=_watch_append_log,
+        write_session_state=_write_session_state,
+        now_ts=_watch_now_ts,
     )
 
 
@@ -1411,23 +1141,7 @@ def _daemon_runtime_events(
     runtime: _DaemonSessionRuntime,
     events_by_thread: dict[str, list[_LogwatchCodexLogEvent]],
 ) -> list[_LogwatchCodexLogEvent]:
-    if runtime.paused:
-        return []
-    combined: list[_LogwatchCodexLogEvent] = []
-    pending = runtime.pending_startup_event
-    if pending is not None:
-        combined.append(pending)
-        runtime.pending_startup_event = None
-    for event in events_by_thread.get(runtime.thread_id, ()):
-        if (
-            pending is not None
-            and event.kind == "completion"
-            and event.thread_id == pending.thread_id
-            and event.turn_id == pending.turn_id
-        ):
-            continue
-        combined.append(event)
-    return combined
+    return acw_daemon.daemon_runtime_events(runtime, events_by_thread)
 
 
 def _daemon_main(argv: list[str]) -> None:
@@ -1570,8 +1284,8 @@ def _validate_existing_pane_watcher(
     if len(watchers) != 1:
         joined = " ".join(sorted(w.pid or "?" for w in watchers))
         return (
-            f"error: multiple watchers already running for pane={pane}: {joined}",
-            f"hint: run 'acw stop {pane}' to stop all pane watchers, then start once",
+            f"error: multiple watcher runtimes already running for pane={pane}: {joined}",
+            f"hint: run 'acw repair {pane} --dry-run' to inspect the fix plan, or 'acw stop {pane}' to stop all pane watchers first",
         )
 
     row = watchers[0]
@@ -1580,7 +1294,7 @@ def _validate_existing_pane_watcher(
         return (
             f"error: existing watcher for pane={pane} is using thread {thread_id[:8]}…, "
             f"not requested thread {requested_thread[:8]}…",
-            f"hint: stop it first with 'acw stop {pane}' if you want to start a different session there",
+            f"hint: inspect 'acw repair {pane} --dry-run' or stop it first with 'acw stop {pane}' if you want to start a different session there",
         )
 
     anomalies = _watcher_anomalies(model, row)
@@ -1588,8 +1302,8 @@ def _validate_existing_pane_watcher(
     if other:
         return (
             f"error: existing watcher for pane={pane} is duplicated; pane={other['pane']} "
-            f"pid={other['pid']} is already watching thread {thread_id[:8]}…",
-            f"hint: stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
+            f"runtime={other.get('runtime_id') or other.get('pid', '?')} is already watching thread {thread_id[:8]}…",
+            f"hint: inspect 'acw repair {pane} --dry-run' or stop the duplicate watchers with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
         )
     if anomalies:
         detail = "; ".join(anomalies)
@@ -1659,12 +1373,12 @@ def cmd_start(argv: list[str]) -> None:
     other = _other_watcher_for_thread(pane, thread_id)
     if other:
         print(
-            f"error: another watcher (pid={other['pid']} pane={other['pane']}) "
+            f"error: another watcher (runtime={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
             f"is already watching thread {thread_id[:8]}…",
             file=sys.stderr,
         )
         print(
-            f"hint: stop it first with 'acw stop {other['pane']}' to avoid duplicates",
+            f"hint: inspect 'acw repair {pane} --dry-run' or stop it first with 'acw stop {other['pane']}' to avoid duplicates",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -2229,7 +1943,7 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
         resolved_thread,
         lambda item: bool(item)
         and item.get("pane", "") == pane
-        and item.get("generation", "") == str(next_generation)
+        and _current_session_generation(item) == next_generation
         and item.get("runtime_status", "") in {"running", "paused"},
     )
     if not row:
@@ -2385,6 +2099,17 @@ def _print_repair_plan(steps: list[RepairStep], *, dry_run: bool) -> None:
     for step in steps:
         prefix = "AUTO" if step.auto_apply else "MANUAL"
         print(f"{prefix}: {step.summary}")
+        command = _repair_command_hint(step)
+        if command:
+            print(f"run: {command}")
+
+
+def _repair_command_hint(step: RepairStep) -> str:
+    if step.kind == "cleanup_dead_sessions":
+        return "acw cleanup"
+    if step.target:
+        return f"acw repair {shlex.quote(step.target)}"
+    return ""
 
 
 def _apply_repair_step(step: RepairStep) -> None:
@@ -2485,111 +2210,42 @@ def cmd_repair(argv: list[str]) -> None:
 
 
 def _build_pane_window_map() -> dict[str, str]:
-    listing = run_tmux("list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}")
-    mapping: dict[str, str] = {}
-    if listing:
-        for line in listing.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 4 and parts[3]:
-                mapping[parts[3]] = f"{parts[0]}:{parts[1]}:{parts[2]}"
-    return mapping
+    return acw_probe.build_pane_window_map(run_tmux)
 
 
 def _load_process_graph() -> tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str]]:
-    """Return a process-tree snapshot as ``(children_by_parent, command_by_pid, parent_by_pid)``."""
-    try:
-        output = subprocess.check_output(
-            ["ps", "-eo", "pid=", "-o", "ppid=", "-o", "comm="],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {}, {}, {}
-
-    children_by_parent: dict[str, list[str]] = defaultdict(list)
-    command_by_pid: dict[str, str] = {}
-    parent_by_pid: dict[str, str] = {}
-    for line in output.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3:
-            continue
-        pid, ppid, command = parts
-        if not pid.isdigit() or not ppid.isdigit():
-            continue
-        children_by_parent[ppid].append(pid)
-        command_by_pid[pid] = command.strip()
-        parent_by_pid[pid] = ppid
-
-    return _freeze_multimap(children_by_parent), command_by_pid, parent_by_pid  # type: ignore[arg-type]
+    return acw_probe.load_process_graph(subprocess.check_output)
 
 
 def _load_process_snapshot() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
-    """Return a process-tree snapshot as ``(children_by_parent, command_by_pid)``."""
-    children_by_parent, command_by_pid, _parent_by_pid = _load_process_graph()
-    return children_by_parent, command_by_pid
+    return acw_probe.load_process_snapshot(subprocess.check_output)
 
 
 def _codex_pids_in_process_tree(
     shell_pid: str,
     process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
 ) -> list[str]:
-    """Return Codex process ids found below ``shell_pid`` in one process snapshot."""
-    if not shell_pid.isdigit():
-        return []
     if process_snapshot is None:
         process_snapshot = _load_process_snapshot()
-
-    children_by_parent, command_by_pid = process_snapshot
-    codex_pids: list[str] = []
-    stack = list(children_by_parent.get(shell_pid, ()))
-    seen: set[str] = set()
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        if command_by_pid.get(pid, "") == "codex":
-            codex_pids.append(pid)
-        stack.extend(children_by_parent.get(pid, ()))
-    return codex_pids
+    return acw_probe.codex_pids_in_process_tree(shell_pid, process_snapshot)
 
 
 def _threads_from_process_tree(
     shell_pid: str,
     process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
 ) -> list[str]:
-    """Walk a process tree and return thread_ids from any Codex processes found."""
     if process_snapshot is None:
         process_snapshot = _load_process_snapshot()
-    threads: list[str] = []
-    for pid in _codex_pids_in_process_tree(shell_pid, process_snapshot):
-        tid = _thread_from_codex_pid(pid)
-        if tid:
-            threads.append(tid)
-            break  # one codex per tree is enough
-    return threads
+    return acw_probe.threads_from_process_tree(shell_pid, process_snapshot, _thread_from_codex_pid)
 
 
 def _codex_top_level_descendants(
     shell_pid: str,
     process_graph: tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str]] | None = None,
 ) -> list[str]:
-    if not shell_pid.isdigit():
-        return []
     if process_graph is None:
         process_graph = _load_process_graph()
-    children_by_parent, command_by_pid, parent_by_pid = process_graph
-    codex_pids = _codex_pids_in_process_tree(shell_pid, (children_by_parent, command_by_pid))
-    top_level: set[str] = set()
-    for codex_pid in codex_pids:
-        candidate = codex_pid
-        while True:
-            parent = parent_by_pid.get(candidate, "")
-            if not parent or parent == shell_pid:
-                break
-            candidate = parent
-        top_level.add(candidate)
-    return sorted(top_level)
+    return acw_probe.codex_top_level_descendants(shell_pid, process_graph)
 
 
 def _pane_thread_probe(
@@ -2597,181 +2253,46 @@ def _pane_thread_probe(
     shell_pid: str,
     process_snapshot: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
 ) -> tuple[str, str, str, bool]:
-    """Return ``(thread_id, source, detail, has_codex_process)`` for a pane."""
-    if not shell_pid.isdigit():
-        return "", "", "", False
-
-    # Prefer direct pid->thread mapping; this is strong evidence.
-    tids = _threads_from_process_tree(shell_pid, process_snapshot)
-    if tids:
-        return tids[0].lower(), "pid", "", True
-
-    codex_pids = _codex_pids_in_process_tree(shell_pid, process_snapshot)
-    if not codex_pids:
-        return "", "", "", False
-    return "", "", f"could not determine thread_id for pane={pane_id} from the live Codex process", True
+    if process_snapshot is None:
+        process_snapshot = _load_process_snapshot()
+    return acw_probe.pane_thread_probe(pane_id, shell_pid, process_snapshot, _thread_from_codex_pid)
 
 
 def _thread_provenance_text(source: str) -> str:
-    if not source:
-        return ""
-    if source == "pid":
-        return "live Codex process-owned evidence"
-    return source.replace("_", " ")
+    return acw_probe.thread_provenance_text(source)
 
 
 def _build_thread_pane_map() -> dict[str, str]:
-    """Map thread_id -> current tmux pane_id by scanning pane process trees."""
-    listing = run_tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}")
-    mapping: dict[str, str] = {}
-    process_snapshot = _load_process_snapshot()
-    if listing:
-        for line in listing.splitlines():
-            parts = line.strip().split("\t")
-            if len(parts) < 2:
-                continue
-            pane_id, shell_pid = parts[0], parts[1]
-            if not pane_id or not shell_pid.isdigit():
-                continue
-            tids = _threads_from_process_tree(shell_pid, process_snapshot)
-            for tid in tids:
-                mapping[tid] = pane_id
-    return mapping
+    return acw_probe.build_thread_pane_map(run_tmux, subprocess.check_output, _thread_from_codex_pid)
 
 
 def _thread_times(thread_id: str, compact: bool = False) -> tuple[str, str]:
-    """Return (started, last_message) for a thread from local Codex SQLite state."""
-    started_at, last_activity_at = thread_times_from_state_db(thread_id)
-    started = _format_age(started_at, compact=compact) if started_at else "-"
-    last_msg = _format_age(last_activity_at, compact=compact) if last_activity_at else "-"
-    return started, last_msg
+    return acw_probe.thread_times(
+        thread_id,
+        compact=compact,
+        thread_times_from_state_db=thread_times_from_state_db,
+        format_age_fn=_format_age,
+    )
 
 
 def _thread_title(thread_id: str) -> str:
-    """Return a stable thread summary from local Codex SQLite state."""
-    if not is_thread_id(thread_id):
-        return ""
-    state_dir = Path(STATE_DIR)
-    if not state_dir.is_dir():
-        return ""
-    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        except sqlite3.Error:
-            continue
-        try:
-            row = conn.execute(
-                "select title, first_user_message from threads where id = ?",
-                (thread_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            row = None
-        finally:
-            conn.close()
-        if not row:
-            continue
-        for value in row:
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return ""
+    return acw_probe.thread_title(thread_id, state_dir=STATE_DIR)
 
 
 def _format_age(epoch: float, compact: bool = False) -> str:
-    """Format an epoch as a human-friendly relative age string."""
-    delta = time.time() - epoch
-    if delta < 0:
-        delta = 0
-    suffix = "" if compact else " ago"
-    if delta < 60:
-        return f"{int(delta)}s{suffix}"
-    if delta < 3600:
-        return f"{int(delta // 60)}m{suffix}"
-    if delta < 86400:
-        h = int(delta // 3600)
-        m = int((delta % 3600) // 60)
-        return f"{h}h{m:02d}m{suffix}"
-    d = int(delta // 86400)
-    h = int((delta % 86400) // 3600)
-    return f"{d}d{h}h{suffix}"
-
-
-_PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
-_SHELL_PROMPT_RE = re.compile(r"^\[[^\]]+\]\$\s*$")
+    return acw_probe.format_age(epoch, compact=compact)
 
 
 def _clean_pane_line_candidate(line: str) -> tuple[str, bool]:
-    """Return ``(candidate, preferred)`` for a pane line, or ``('', False)``."""
-    raw = line.rstrip()
-    stripped = raw.strip()
-    if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
-        return "", False
-
-    lowered = stripped.lower()
-    if stripped.startswith("› "):
-        return "", False
-    if "working (" in lowered and "esc to interrupt" in lowered:
-        return "", False
-    if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
-        return "", False
-    if stripped.startswith(("1. Yes", "2. No", "> You are in ")):
-        return "", False
-    if "do you trust the contents of this directory?" in lowered:
-        return "", False
-    if "? for shortcuts" in stripped:
-        return "", False
-    if "context left" in stripped and "gpt-" in stripped:
-        return "", False
-    if _SHELL_PROMPT_RE.match(stripped):
-        return "", False
-
-    preferred = False
-    candidate = stripped
-    if candidate.startswith("• "):
-        candidate = candidate[2:].strip()
-        preferred = True
-    elif candidate.startswith("◦ "):
-        candidate = candidate[2:].strip()
-    elif candidate.startswith("└ "):
-        candidate = candidate[2:].strip()
-    elif candidate.startswith("│ "):
-        candidate = candidate[2:].strip()
-
-    if not candidate or candidate.startswith("OpenAI Codex"):
-        return "", False
-    return candidate, preferred
+    return acw_probe.clean_pane_line_candidate(line)
 
 
 def _extract_last_agent_snippet(text: str) -> str:
-    """Extract a compact recent assistant-visible snippet from captured pane text."""
-    if not text:
-        return ""
-    lines = text.splitlines()
-    cutoff = len(lines)
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].lstrip().startswith("› "):
-            cutoff = i
-            break
-    search = lines[:cutoff] if cutoff < len(lines) else lines
-    fallback = ""
-    for line in reversed(search):
-        candidate, preferred = _clean_pane_line_candidate(line)
-        if not candidate:
-            continue
-        if preferred:
-            return candidate
-        if not fallback:
-            fallback = candidate
-    return fallback
+    return acw_probe.extract_last_agent_snippet(text)
 
 
 def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
-    """Return a recent assistant snippet for a live pane, with thread-title fallback."""
-    if pane:
-        text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-40") or ""
-        snippet = _extract_last_agent_snippet(text)
-        if snippet:
-            return snippet
-    return _thread_title(thread_id)
+    return acw_probe.last_agent_snippet_for_pane(pane, thread_id, run_tmux, STATE_DIR)
 
 
 @dataclass(frozen=True)
@@ -3023,8 +2544,8 @@ def _strict_thread_for_pane(model: RuntimeModel, pane: str) -> tuple[str, str]:
     watcher_thread = ""
     if watchers:
         if not is_thread_id(watchers[0].thread_id):
-            pid = watchers[0].pid or "?"
-            return "", f"pane {pane} watcher entry pid={pid} has an invalid thread id"
+            runtime_id = watchers[0].pid or "?"
+            return "", f"pane {pane} watcher runtime={runtime_id} has an invalid thread id"
         watcher_thread = watchers[0].thread_id.lower()
 
     if watcher_thread and watcher_thread != live_thread:
@@ -3144,6 +2665,7 @@ def _build_status_entries_from_snapshot(
         entries.append((
             {
                 "entity_kind": "watcher",
+                "runtime_id": watcher.pid,
                 "pid": watcher.pid,
                 "pane": watcher.pane,
                 "thread": watcher.thread_id,
@@ -3178,6 +2700,7 @@ def _build_status_entries_from_snapshot(
         entries.append((
             {
                 "entity_kind": "unwatched_pane",
+                "runtime_id": "",
                 "pid": "",
                 "pane": pane.pane_id,
                 "thread": pane.detected_thread,
@@ -3201,6 +2724,7 @@ def _build_status_entries_from_snapshot(
         entries.append((
             {
                 "entity_kind": "dead_session",
+                "runtime_id": "",
                 "pid": "",
                 "pane": "",
                 "thread": session.thread_id,
@@ -3220,16 +2744,24 @@ def _build_status_entries_from_snapshot(
 
 
 def _read_state_json(state_path: str) -> dict[str, str]:
-    """Read health fields from state JSON file."""
+    """Read persisted session health fields from a DB ref or legacy JSON path."""
     result: dict[str, str] = {}
-    if not state_path or not os.path.isfile(state_path):
+    if not state_path:
+        return result
+    if state_path.startswith(acw_state.SESSION_REF_PREFIX):
+        data = acw_state.read_state_ref(state_path, state_dir=STATE_DIR)
+        for key in ("health", "health_detail", "health_ts", "last_continue_at", "thread_id"):
+            if key in data:
+                result[key] = str(data[key])
+        return result
+    if not os.path.isfile(state_path):
         return result
     try:
         with open(state_path) as f:
             data = json.load(f)
-        for k in ("health", "health_detail", "health_ts", "last_continue_at", "window_name", "thread_id"):
-            if k in data:
-                result[k] = str(data[k])
+        for key in ("health", "health_detail", "health_ts", "last_continue_at", "window_name", "thread_id"):
+            if key in data:
+                result[key] = str(data[key])
     except (OSError, json.JSONDecodeError):
         pass
     return result
@@ -3280,11 +2812,11 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
         return "running"
     if runtime_status == "stopping":
         return "warn"
-    pid = r.get("pid", "")
-    if pid and pid.isdigit() and _is_pid_stopped(int(pid)):
+    runtime_id = r.get("runtime_id", "") or r.get("pid", "")
+    if runtime_id and runtime_id.isdigit() and _is_pid_stopped(int(runtime_id)):
         return "paused"
     # No live watcher runtime.
-    if not pid:
+    if not runtime_id:
         return "dead"
     h = sj.get("health", "")
     if h == "stale":
@@ -3336,75 +2868,23 @@ _STATUS_SECTION_EVERY = 3
 
 
 def _clamp_visual_lines(text: str, max_lines: int, col_width: int) -> str:
-    """Truncate *text* so it fits in *max_lines* visual lines at *col_width*."""
-    if col_width < 10:
-        col_width = 40
-    lines = text.split("\n")
-    visual = 0
-    kept: list[str] = []
-    for line in lines:
-        vl = max(1, (len(line) + col_width - 1) // col_width) if line else 1
-        if visual + vl > max_lines:
-            remaining = max_lines - visual
-            if remaining > 0:
-                kept.append(line[: remaining * col_width])
-            result = "\n".join(kept)
-            if len(result) < len(text):
-                result = result.rstrip() + "…"
-            return result
-        kept.append(line)
-        visual += vl
-    return text
+    return acw_ui.clamp_visual_lines(text, max_lines, col_width)
 
 
 def _strip_rich_markup(text: str) -> str:
-    return re.sub(r"\[/?[^\]]*\]", "", text)
+    return acw_ui.strip_rich_markup(text)
 
 
 def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, pid: str) -> str:
-    line1 = f"{window_label}/{current_pane}" if current_pane else window_label
-    lines = [line1]
-    if is_thread_id(thread_id):
-        lines.append(f"[dim]{_short_thread_id(thread_id)}[/dim]")
-    if pid:
-        lines.append(f"[dim]pid={pid}[/dim]")
-    return "\n".join(lines)
+    return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, pid)
 
 
 def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
-    fixed_total = sum(fixed_col_widths)
-    # Rich table overhead: borders (7 │) + padding (2 per col × 6 = 12) = 19
-    flex_total = max(48, term_w - fixed_total - 19)
-    msg_col_w = max(20, min(32, flex_total // 3))
-    last_agent_col_w = max(32, min(72, flex_total - msg_col_w))
-    return last_agent_col_w, msg_col_w
+    return acw_ui.status_flex_widths(term_w, fixed_col_widths)
 
 
 def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
-    plain_rows: list[tuple[str, str, str, str, str, str]] = []
-    for row in rows_data:
-        plain_rows.append(
-            tuple(_strip_rich_markup(cell).replace("\n", " / ") for cell in row)
-        )
-
-    widths = [len(header) for header in headers]
-    for row in plain_rows:
-        for i, cell in enumerate(row):
-            widths[i] = min(max(widths[i], len(cell)), 60)
-
-    def _fmt(cell: str, width: int) -> str:
-        if len(cell) > width:
-            return cell[: width - 1] + "…"
-        return cell.ljust(width)
-
-    print("  ".join(_fmt(header, widths[i]) for i, header in enumerate(headers)))
-    print("  ".join("-" * widths[i] for i in range(len(headers))))
-    separator = "  ".join("-" * widths[i] for i in range(len(headers)))
-    for idx, row in enumerate(plain_rows, 1):
-        print("  ".join(_fmt(cell, widths[i]) for i, cell in enumerate(row)))
-        if idx % _STATUS_SECTION_EVERY == 0 and idx != len(plain_rows):
-            print(separator)
+    acw_ui.status_table_plain(rows_data, section_every=_STATUS_SECTION_EVERY)
 
 
 def _status_target_for_row(row: dict[str, str], current_pane: str, window_label: str) -> str:
@@ -3513,8 +2993,8 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
     for pane, rows in sorted(watchers_by_pane.items()):
         if len(rows) <= 1:
             continue
-        pids = ", ".join(sorted(row.get("pid", "?") for row in rows))
-        msg = f"Invariant error: pane {pane} has {len(rows)} watcher entries ({pids}). Clean up: acw stop {pane}"
+        runtime_ids = ", ".join(sorted((row.get("runtime_id") or row.get("pid", "?")) for row in rows))
+        msg = f"Invariant error: pane {pane} has {len(rows)} watcher runtimes ({runtime_ids}). Fix: acw repair {pane}"
         if msg not in seen:
             seen.add(msg)
             messages.append(msg)
@@ -3549,7 +3029,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         pane = current_pane or row.get("pane", "")
         msg = (
             f"Invariant error: live Codex pane {pane} has thread {_short_thread_id(row.get('thread', ''))} "
-            f"but no watcher. Clean up: acw start {pane}"
+            f"but no watcher. Fix: acw repair {pane}"
         )
         if msg not in seen:
             seen.add(msg)
@@ -3569,35 +3049,35 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
     for row, current_pane in watcher_rows:
         anomalies = set(row.get("anomalies", ()))
         pane = current_pane or row.get("pane", "")
-        pid = row.get("pid", "?")
+        runtime_id = row.get("runtime_id") or row.get("pid", "?")
         if "no saved session" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher entry pid={pid} has no saved session. "
-                f"Clean up: acw stop {pane}; then start it again."
+                f"Invariant error: pane {pane} watcher runtime={runtime_id} has no saved session. "
+                f"Fix: acw repair {pane}"
             )
             if msg not in seen:
                 seen.add(msg)
                 messages.append(msg)
         if "no live Codex agent detected in pane" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher entry pid={pid} has no live Codex agent in the pane. "
-                f"Clean up: acw stop {pane}; restart Codex there, then start once."
+                f"Invariant error: pane {pane} watcher runtime={runtime_id} has no live Codex agent in the pane. "
+                f"Fix: acw repair {pane}"
             )
             if msg not in seen:
                 seen.add(msg)
                 messages.append(msg)
         if any(detail.startswith("could not determine thread_id") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher entry pid={pid} has a live Codex process but its thread id "
-                f"could not be detected. Clean up: acw stop {pane}; restart Codex there, then start once."
+                f"Invariant error: pane {pane} watcher runtime={runtime_id} has a live Codex process but its thread id "
+                f"could not be detected. Fix: acw repair {pane} --dry-run"
             )
             if msg not in seen:
                 seen.add(msg)
                 messages.append(msg)
         if any(detail.startswith("pane agent thread is ") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher entry pid={pid} is bound to the wrong thread. "
-                f"Clean up: acw stop {pane}; then start it again against the live pane thread."
+                f"Invariant error: pane {pane} watcher runtime={runtime_id} is bound to the wrong thread. "
+                f"Fix: acw repair {pane}"
             )
             if msg not in seen:
                 seen.add(msg)
@@ -3627,8 +3107,6 @@ def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    import shutil
-
     # Precompute row data to estimate column widths.
     # (window_pane, state, started, last_acw, last_agent, msg_raw)
     rows_data: list[tuple[str, str, str, str, str, str]] = []
@@ -3652,7 +3130,7 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
             window_label,
             current_pane,
             r["thread"],
-            r.get("pid", ""),
+            r.get("runtime_id") or r.get("pid", ""),
         )
         rows_data.append((
             window_pane,
@@ -3663,44 +3141,11 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
             msg_raw,
         ))
 
-    try:
-        from rich.console import Console
-        from rich.table import Table
-    except ModuleNotFoundError:
-        _status_table_plain(rows_data)
-        return
-
-    # Estimate MESSAGE column width from terminal width and other columns.
-    term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
-    col_widths = [len(h) for h in headers]
-    for row in rows_data:
-        for i in range(4):
-            # Measure first line only, strip rich markup tags.
-            text = row[i].split("\n")[0]
-            text = re.sub(r"\[/?[^\]]*\]", "", text)
-            col_widths[i] = max(col_widths[i], len(text))
-    last_agent_col_w, msg_col_w = _status_flex_widths(term_w, col_widths)
-
-    table = Table(show_lines=False, expand=True)
-    table.add_column("WINDOW/PANE", no_wrap=True)
-    table.add_column("STATE", no_wrap=True)
-    table.add_column("STARTED", no_wrap=True)
-    table.add_column("LAST_ACW", no_wrap=True)
-    table.add_column("LAST_AGENT", ratio=2, max_width=last_agent_col_w)
-    table.add_column("MESSAGE", ratio=1, max_width=msg_col_w)
-
-    for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
-        last_agent_summary = _clamp_visual_lines(last_agent, _MAX_MSG_LINES, last_agent_col_w)
-        msg_summary = _clamp_visual_lines(msg_raw, _MAX_MSG_LINES, msg_col_w)
-        table.add_row(
-            window_pane, state_value,
-            started, last_acw, last_agent_summary, msg_summary,
-        )
-        if idx % _STATUS_SECTION_EVERY == 0 and idx != len(rows_data):
-            table.add_section()
-
-    Console().print(table)
+    acw_ui.render_status_table(
+        rows_data,
+        section_every=_STATUS_SECTION_EVERY,
+        max_msg_lines=_MAX_MSG_LINES,
+    )
 
 
 def _status_details(
@@ -3744,7 +3189,8 @@ def _status_details(
         print(f"=== Entry {idx}/{total} ===")
         print(f"  {'WINDOW:':<16} {window_label}")
         print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
-        print(f"  {'PID:':<16} {r['pid']}")
+        runtime_id = r.get("runtime_id") or r.get("pid", "")
+        print(f"  {'RUNTIME_ID:':<16} {runtime_id or '-'}")
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
         pane_record = model.panes_by_id.get(current_pane) if current_pane else None
         provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
@@ -3766,40 +3212,14 @@ def _status_details(
         if r["watch"]:
             print(f"  {'WATCH_LOG:':<16} {r['watch']}")
         if r["state"]:
-            print(f"  {'STATE_FILE:':<16} {r['state']}")
+            print(f"  {'STATE_REF:':<16} {r['state']}")
     _print_status_recommendations(resolved)
 
 
 def _load_sessions(socket_path: str | None = None) -> list[dict[str, str]]:
-    """Load all session state files for one tmux socket scope."""
-    candidates: list[dict[str, str]] = []
-    scope = _tmux_scope_key(socket_path)
-    for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
-        try:
-            with open(sf) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        thread_id = data.get("thread_id", "")
-        if not thread_id or not is_thread_id(thread_id):
-            continue
-        if _tmux_scope_key(str(data.get("tmux_socket", "")).strip()) != scope:
-            continue
-        candidates.append({
-            "thread_id": thread_id,
-            "name": data.get("name", ""),
-            "message": data.get("message", ""),
-            "pane": data.get("pane", ""),
-            "tmux_socket": _tmux_scope_key(str(data.get("tmux_socket", "")).strip()),
-            "paused": bool(data.get("paused", False)),
-            "generation": int(data.get("generation", 0) or 0),
-            "state_file": sf,
-            "health": data.get("health", ""),
-            "health_detail": data.get("health_detail", ""),
-            "health_ts": data.get("health_ts", ""),
-            "last_continue_at": data.get("last_continue_at", ""),
-        })
-    return candidates
+    """Load all saved manager sessions for one tmux socket scope."""
+    rows = acw_state.load_sessions(state_dir=STATE_DIR, scope=_tmux_scope_key(socket_path))
+    return [{str(key): value for key, value in row.items()} for row in rows]
 
 
 def _saved_session_panes_for_target(target: str, model: RuntimeModel | None = None) -> list[str]:
@@ -4370,13 +3790,13 @@ def _doctor_report(target: str = "") -> DoctorReport:
     ]
     command_target = _doctor_recommendation_target(target, pane, ps_rows)
     if len(rows) > 1:
-        pids = ", ".join(sorted(watcher.pid or "?" for watcher in rows))
-        checks.append(("error", f"multiple watchers running on pane {pane}: {pids}"))
+        runtime_ids = ", ".join(sorted(watcher.pid or "?" for watcher in rows))
+        checks.append(("error", f"multiple watcher runtimes running on pane {pane}: {runtime_ids}"))
         errors += 1
         recommendations.append(f"acw stop {shlex.quote(pane)}")
     elif rows:
         watcher = rows[0]
-        checks.append(("ok", f"watcher running: pane={pane} pid={watcher.pid}"))
+        checks.append(("ok", f"watcher running: pane={pane} runtime={watcher.pid}"))
         anomalies = _watcher_anomalies(model, watcher)
         if anomalies:
             detail = "; ".join(anomalies)
@@ -4439,55 +3859,20 @@ def _doctor_report(target: str = "") -> DoctorReport:
     )
 
 def _print_doctor_plain(report: DoctorReport) -> None:
-    print("Doctor")
-    print(f"  state_dir: {STATE_DIR}")
-    sock = _preferred_tmux_socket() or "(default)"
-    print(f"  tmux_socket: {sock}")
-    for level, message in report.checks:
-        print(f"[{level}] {message}")
-    if report.recommendations:
-        print()
-        for cmd in report.recommendations:
-            print(f"Recommendation: run {cmd}")
-    print(f"RESULT: {report.result}")
+    acw_ui.print_doctor_plain(
+        report,
+        state_dir=STATE_DIR,
+        tmux_socket=_preferred_tmux_socket() or "(default)",
+    )
 
 
 def _print_doctor_rich(report: DoctorReport) -> None:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
-
-    console = Console()
-    console.print(
-        Panel.fit(
-            f"state_dir: {STATE_DIR}\n"
-            f"tmux_socket: {_preferred_tmux_socket() or '(default)'}",
-            title="Doctor",
-            border_style="cyan",
-        )
+    acw_ui.print_doctor_rich(
+        report,
+        state_dir=STATE_DIR,
+        tmux_socket=_preferred_tmux_socket() or "(default)",
+        result_styles=_DOCTOR_RESULT_STYLES,
     )
-
-    table = Table(show_header=False, box=None, expand=True, pad_edge=False)
-    table.add_column("level", no_wrap=True)
-    table.add_column("message")
-    for level, message in report.checks:
-        style = _DOCTOR_RESULT_STYLES.get(level, "dim") if level != "info" else "dim"
-        table.add_row(f"[{style}]{level.upper()}[/{style}]", message)
-    console.print(table)
-
-    if report.recommendations:
-        body = "\n".join(f"[bold cyan]{cmd}[/bold cyan]" for cmd in report.recommendations)
-        console.print(
-            Panel.fit(
-                body,
-                title="Recommended Command",
-                border_style="yellow",
-            )
-        )
-
-    style = _DOCTOR_RESULT_STYLES.get(report.result, "")
-    result_text = f"[{style}]RESULT: {report.result}[/{style}]" if style else f"RESULT: {report.result}"
-    console.print(result_text)
 
 
 def cmd_doctor(argv: list[str]) -> None:
@@ -4522,24 +3907,10 @@ def cmd_cleanup(argv: list[str]) -> None:
 
 
 def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
-    """Remove files for watchers that are no longer running."""
+    """Remove files and DB rows for managed runtimes that are no longer live."""
     daemon_pid_file = daemon_pid_file_for_scope()
     if daemon_pid_file and os.path.exists(daemon_pid_file) and not _daemon_pid_alive(daemon_pid_file):
         Path(daemon_pid_file).unlink(missing_ok=True)
-
-    for runtime_path in glob.glob(daemon_runtime_glob_for_scope()):
-        try:
-            with open(runtime_path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            Path(runtime_path).unlink(missing_ok=True)
-            continue
-        daemon_pid = str(data.get("daemon_pid", "")).strip() or str(data.get("pid", "")).strip()
-        if daemon_pid and daemon_pid.isdigit():
-            try:
-                os.kill(int(daemon_pid), 0)
-            except OSError:
-                Path(runtime_path).unlink(missing_ok=True)
 
     # Build set of live watcher keys for watch logs.
     live_keys: set[str] = set()
@@ -4566,24 +3937,23 @@ def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
 
     model = _build_runtime_model()
     live_thread_panes = {tid.lower() for tid in model.panes_by_thread}
-    scope = _tmux_scope_key()
+    active_threads = live_runtime_threads | live_thread_panes
 
-    # Session files for threads without a running watcher or live Codex pane.
-    for sf in glob.glob(os.path.join(STATE_DIR, "acw_session.*.json")):
+    def _daemon_pid_is_alive(pid_str: str) -> bool:
+        if not pid_str.isdigit():
+            return False
         try:
-            with open(sf) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            Path(sf).unlink(missing_ok=True)
-            continue
-        tid = str(data.get("thread_id", "")).lower()
-        if not is_thread_id(tid):
-            Path(sf).unlink(missing_ok=True)
-            continue
-        if _tmux_scope_key(str(data.get("tmux_socket", "")).strip()) != scope:
-            continue
-        if tid not in live_runtime_threads and tid not in live_thread_panes:
-            Path(sf).unlink(missing_ok=True)
+            os.kill(int(pid_str), 0)
+            return True
+        except OSError:
+            return False
+
+    acw_state.cleanup_rows(
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(),
+        active_threads=active_threads,
+        daemon_pid_alive=_daemon_pid_is_alive,
+    )
 
 
 # ---------------------------------------------------------------------------

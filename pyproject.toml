@@ -38,4 +38,11 @@ acw = "auto_continue_watchd:main"
 
 [tool.setuptools]
 package-dir = {"" = "bin"}
-py-modules = ["auto_continue_watchd", "auto_continue_logwatch"]
+py-modules = [
+  "auto_continue_watchd",
+  "auto_continue_logwatch",
+  "acw_daemon",
+  "acw_probe",
+  "acw_state",
+  "acw_ui",
+]

@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -348,26 +349,45 @@ class RealCodexHarness:
         scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
         return self.codex_dir / f"acw_daemon.{scope_token}.pid"
 
-    def manager_runtime_file(self, thread_id: str) -> Path:
-        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
-        return self.codex_dir / f"acw_runtime.{scope_token}.{thread_id}.json"
+    @property
+    def manager_state_db(self) -> Path:
+        return self.codex_dir / "acw_state.sqlite"
+
+    def _manager_db_query(self, query: str, params: tuple[object, ...]) -> list[dict[str, object]]:
+        if not self.manager_state_db.is_file():
+            return []
+        conn = sqlite3.connect(self.manager_state_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def manager_runtime_rows(self) -> list[dict[str, object]]:
-        scope_token = re.sub(r"[^a-zA-Z0-9._-]", "_", str(self.tmux_socket))
-        rows: list[dict[str, object]] = []
-        for path in sorted(self.codex_dir.glob(f"acw_runtime.{scope_token}.*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(data, dict):
-                continue
-            data["_path"] = str(path)
-            rows.append(data)
+        rows = self._manager_db_query(
+            """
+            SELECT thread_id, runtime_id, daemon_pid, pane, state_ref, watch_log, cwd,
+                   message_inline, tmux_socket, paused, runtime_status, runtime_detail,
+                   generation, worker_label, heartbeat_ts
+            FROM runtimes
+            WHERE tmux_socket = ?
+            ORDER BY pane, thread_id
+            """,
+            (str(self.tmux_socket),),
+        )
+        for row in rows:
+            row["pid"] = str(row.get("runtime_id", ""))
         return rows
 
     def manager_runtime_row_for_pane(self, pane_id: str) -> Optional[dict[str, object]]:
         rows = [row for row in self.manager_runtime_rows() if str(row.get("pane", "")) == pane_id]
+        if len(rows) != 1:
+            return None
+        return rows[0]
+
+    def manager_runtime_row(self, thread_id: str) -> Optional[dict[str, object]]:
+        rows = [row for row in self.manager_runtime_rows() if str(row.get("thread_id", "")) == thread_id]
         if len(rows) != 1:
             return None
         return rows[0]
@@ -554,20 +574,22 @@ class RealCodexHarness:
         timeout: float = 15.0,
     ) -> None:
         log_path = self.manager_watch_log_for_pane(pane_id)
-        self._wait_for(
-            lambda: (
-                (runtime := self.manager_runtime_file(thread_id)).is_file()
-                and '"pane": "{pane}"'.format(pane=pane_id)
-                in runtime.read_text(encoding="utf-8", errors="ignore")
-                and '"runtime_status": "running"'
-                in runtime.read_text(encoding="utf-8", errors="ignore")
-                and log_path.is_file()
-                and f"watch: pane={pane_id} thread_id={thread_id}"
-                in log_path.read_text(encoding="utf-8", errors="ignore")
-            ),
-            timeout=timeout,
-            description="manager watcher startup",
-        )
+        def _started() -> bool:
+            row = self.manager_runtime_row(thread_id)
+            if not row:
+                return False
+            if str(row.get("pane", "")) != pane_id:
+                return False
+            if str(row.get("runtime_status", "")) != "running":
+                return False
+            if not log_path.is_file():
+                return False
+            return f"watch: pane={pane_id} thread_id={thread_id}" in log_path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+
+        self._wait_for(_started, timeout=timeout, description="manager watcher startup")
 
     def wait_for_continue_sent(self, timeout: float = 90.0) -> str:
         def _ready() -> bool:
@@ -669,15 +691,29 @@ class RealCodexHarness:
         return "\n".join(content[-lines:])
 
     def manager_state_file(self, thread_id: str) -> Path:
-        return self.codex_dir / f"acw_session.{thread_id}.json"
+        return self.manager_state_db
+
+    def manager_session_row(self, thread_id: str) -> Optional[dict[str, object]]:
+        rows = self._manager_db_query(
+            """
+            SELECT thread_id, pane, name, message, tmux_socket, paused, generation,
+                   health, health_detail, health_ts, last_continue_at,
+                   last_handled_turn, last_handled_thread
+            FROM sessions
+            WHERE thread_id = ?
+            """,
+            (thread_id,),
+        )
+        if len(rows) != 1:
+            return None
+        return rows[0]
 
     def wait_for_manager_state_contains(self, thread_id: str, needle: str, timeout: float = 15.0) -> str:
-        path = self.manager_state_file(thread_id)
-
         def _probe() -> Optional[str]:
-            if not path.is_file():
+            row = self.manager_session_row(thread_id)
+            if row is None:
                 return None
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = json.dumps(row, sort_keys=True)
             if needle in text:
                 return text
             return None
@@ -732,7 +768,7 @@ class RealCodexHarness:
         state_dump = dst / "state"
         state_dump.mkdir(exist_ok=True)
         state_dump.chmod(0o700)
-        for pattern in ("acw_session.*.json", "acw_runtime.*.json", "acw_daemon.*", "auto_continue_logwatch*.log"):
+        for pattern in ("acw_state.sqlite*", "acw_daemon.*", "auto_continue_logwatch*.log"):
             for src in self.codex_dir.glob(pattern):
                 shutil.copy2(src, state_dump / src.name)
         return dst

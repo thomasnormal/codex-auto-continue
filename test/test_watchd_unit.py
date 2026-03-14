@@ -116,7 +116,7 @@ class WatchdUnitTests(unittest.TestCase):
                         "thread": thread_id,
                         "pane": f"%{pane_index}",
                         "runtime_status": "running",
-                        "generation": str(generation),
+                        "generation": generation,
                         "paused": "",
                     }
                     if predicate(candidate):
@@ -125,7 +125,7 @@ class WatchdUnitTests(unittest.TestCase):
                         "thread": thread_id,
                         "pane": f"%{pane_index}",
                         "runtime_status": "paused",
-                        "generation": str(generation),
+                        "generation": generation,
                         "paused": "1",
                     }
                     if predicate(paused_candidate):
@@ -179,9 +179,9 @@ class WatchdUnitTests(unittest.TestCase):
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
 
-    def test_status_window_pane_cell_splits_thread_and_pid_lines(self):
+    def test_status_window_pane_cell_splits_thread_and_runtime_lines(self):
         self.assertEqual(
-            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]pid=1843260[/dim]",
+            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]runtime=1843260[/dim]",
             acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "1843260"),
         )
 
@@ -374,6 +374,24 @@ class WatchdUnitTests(unittest.TestCase):
                                 acw.cmd_status([])
         self.assertIn("Hint: run acw cleanup to remove dead sessions.", out.getvalue())
 
+    def test_status_summary_prefers_repair_for_pane_local_invariant_errors(self):
+        snapshot = _snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            watchers=(_watcher_record("%7", OTHER_THREAD, pid="707"),),
+            sessions=(_session_record(OTHER_THREAD, name="formal"),),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("Invariant error: pane %7 watcher runtime=707 is bound to the wrong thread.", text)
+        self.assertIn("Fix: acw repair %7", text)
+
     def test_status_summary_falls_back_without_rich(self):
         snapshot = _snapshot(
             panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
@@ -477,7 +495,7 @@ class WatchdUnitTests(unittest.TestCase):
                             with self.assertRaises(SystemExit) as ctx:
                                 acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
-        self.assertIn("another watcher (pid=1234 pane=%6) is already watching thread", err.getvalue())
+        self.assertIn("another watcher (runtime=1234 pane=%6) is already watching thread", err.getvalue())
 
     def test_start_rejects_existing_pane_watcher_when_thread_is_duplicated_elsewhere(self):
         err = io.StringIO()
@@ -532,7 +550,7 @@ class WatchdUnitTests(unittest.TestCase):
                     out = io.StringIO()
                     with redirect_stdout(out):
                         acw.cmd_stop(["acw"])
-                self.assertFalse(Path(acw.state_file_for_thread(THREAD)).exists())
+                self.assertEqual({}, acw._read_session_state(THREAD))
         text = out.getvalue()
         self.assertIn(f"stopped: pane=%9 thread_id={THREAD}", text)
 
@@ -564,25 +582,47 @@ class WatchdUnitTests(unittest.TestCase):
                 rows = acw.watcher_rows()
         self.assertEqual(runtime_rows, rows)
 
-    def test_read_runtime_rows_uses_worker_id_and_daemon_pid_liveness(self):
-        runtime_file = "/state/acw_runtime.scope.11111111-1111-1111-1111-111111111111.json"
-        payload = {
-            "thread": THREAD,
-            "pane": "%7",
-            "pid": "4321",
-            "daemon_pid": "9999",
-            "runtime_status": "running",
-            "tmux_socket": "/tmp/current.sock",
-        }
+    def test_session_state_round_trips_through_sqlite_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(
+                    THREAD,
+                    {
+                        "thread_id": THREAD,
+                        "name": "formal",
+                        "message": "continue by docs/FORMAL_PLAN.md",
+                        "paused": True,
+                        "generation": 3,
+                    },
+                )
 
-        with patch.object(acw.glob, "glob", return_value=[runtime_file]):
-            with patch("builtins.open", mock_open(read_data=json.dumps(payload))):
+                state = acw._read_session_state(THREAD)
+
+        self.assertEqual("formal", state["name"])
+        self.assertEqual("continue by docs/FORMAL_PLAN.md", state["message"])
+        self.assertTrue(state["paused"])
+        self.assertEqual(3, state["generation"])
+
+    def test_read_runtime_rows_uses_runtime_id_and_daemon_pid_liveness_from_sqlite_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_runtime_state(
+                    THREAD,
+                    {
+                        "runtime_id": "4321",
+                        "daemon_pid": "9999",
+                        "pane": "%7",
+                        "runtime_status": "running",
+                        "tmux_socket": "/tmp/current.sock",
+                    },
+                    "/tmp/current.sock",
+                )
                 with patch.object(acw.os, "kill") as kill:
                     rows = ORIGINAL_READ_RUNTIME_ROWS("/tmp/current.sock")
 
         kill.assert_called_once_with(9999, 0)
         self.assertEqual(1, len(rows))
-        self.assertEqual("4321", rows[0]["pid"])
+        self.assertEqual("4321", rows[0]["runtime_id"])
         self.assertEqual("%7", rows[0]["pane"])
         self.assertEqual("running", rows[0]["runtime_status"])
 
@@ -636,13 +676,10 @@ class WatchdUnitTests(unittest.TestCase):
     def test_daemon_process_session_events_updates_saved_state_after_send(self):
         with tempfile.TemporaryDirectory() as td:
             with patch.object(acw, "STATE_DIR", td):
-                state_file = Path(acw.state_file_for_thread(THREAD))
-                state_file.write_text(
-                    json.dumps({"thread_id": THREAD, "message": "continue"}),
-                    encoding="utf-8",
-                )
+                state_file = acw.state_file_for_thread(THREAD)
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "message": "continue"})
                 runtime = acw._daemon_session_runtime(
-                    _session_record(THREAD, name="formal", message="continue", state_file=str(state_file)),
+                    _session_record(THREAD, name="formal", message="continue", state_file=state_file),
                     codex_log_path=Path(td) / "codex-tui.log",
                 )
                 event = acw._LogwatchCodexLogEvent("completion", THREAD, "turn-1", "false")
@@ -668,13 +705,10 @@ class WatchdUnitTests(unittest.TestCase):
     def test_daemon_process_session_events_auto_pauses_on_pane_error(self):
         with tempfile.TemporaryDirectory() as td:
             with patch.object(acw, "STATE_DIR", td):
-                state_file = Path(acw.state_file_for_thread(THREAD))
-                state_file.write_text(
-                    json.dumps({"thread_id": THREAD, "message": "continue"}),
-                    encoding="utf-8",
-                )
+                state_file = acw.state_file_for_thread(THREAD)
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "message": "continue"})
                 runtime = acw._daemon_session_runtime(
-                    _session_record(THREAD, name="formal", message="continue", state_file=str(state_file)),
+                    _session_record(THREAD, name="formal", message="continue", state_file=state_file),
                     codex_log_path=Path(td) / "codex-tui.log",
                 )
                 event = acw._LogwatchCodexLogEvent("completion", THREAD, "turn-1", "false")
@@ -736,6 +770,30 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual(["cleanup_dead_sessions"], [step.kind for step in steps])
         self.assertFalse(steps[0].auto_apply)
         self.assertIn("acw cleanup", steps[0].summary)
+
+    def test_print_repair_plan_shows_command_hints(self):
+        steps = [
+            acw.RepairStep(
+                kind="restart_watcher",
+                target="%7",
+                summary="restart watcher on pane %7",
+                auto_apply=True,
+                thread_id=THREAD,
+            ),
+            acw.RepairStep(
+                kind="cleanup_dead_sessions",
+                target="",
+                summary="run acw cleanup to remove 1 dead saved session(s)",
+                auto_apply=False,
+            ),
+        ]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            acw._print_repair_plan(steps, dry_run=True)
+        text = out.getvalue()
+        self.assertIn("AUTO: restart watcher on pane %7", text)
+        self.assertIn("run: acw repair %7", text)
+        self.assertIn("run: acw cleanup", text)
 
     def test_repair_plan_ignores_unmanaged_live_panes_by_default(self):
         model = acw._build_runtime_model(_snapshot(
@@ -857,25 +915,26 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("error:could not resolve target '.'", rendered)
 
     def test_load_sessions_reads_thread_keyed_state(self):
-        session_file = f"/state/acw_session.{THREAD}.json"
-        with patch.object(acw.glob, "glob", return_value=[session_file]):
-            with patch("builtins.open", mock_open(read_data=json.dumps({
-                "thread_id": THREAD,
-                "name": "aot",
-                "message": "continue",
-            }))):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(
+                    THREAD,
+                    {
+                        "thread_id": THREAD,
+                        "name": "aot",
+                        "message": "continue",
+                    },
+                )
                 sessions = acw._load_sessions()
         self.assertEqual(1, len(sessions))
         self.assertEqual("aot", sessions[0]["name"])
         self.assertEqual("continue", sessions[0]["message"])
-        self.assertEqual(session_file, sessions[0]["state_file"])
+        self.assertEqual(acw.state_file_for_thread(THREAD), sessions[0]["state_file"])
 
     def test_load_sessions_ignores_invalid_thread_ids(self):
-        with patch.object(acw.glob, "glob", return_value=["/state/acw_session.bad.json"]):
-            with patch("builtins.open", mock_open(read_data=json.dumps({
-                "thread_id": "bad",
-                "name": "oops",
-            }))):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state("bad", {"thread_id": "bad", "name": "oops"})
                 sessions = acw._load_sessions()
         self.assertEqual([], sessions)
 
@@ -898,71 +957,33 @@ class WatchdUnitTests(unittest.TestCase):
                 acw.cmd_cleanup(["aot"])
 
     def test_cleanup_stale_files_default_keeps_session_state(self):
-        session_file = f"/state/acw_session.{THREAD}.json"
-
-        def fake_glob(pattern):
-            if pattern.endswith("auto_continue_logwatch.*.pid"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.log"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.runner.log"):
-                return []
-            if pattern.endswith("acw_session.*.json"):
-                return [session_file]
-            return []
-
-        with patch.object(acw.glob, "glob", side_effect=fake_glob):
-            with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw.Path, "unlink") as unlink:
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "name": "formal", "message": "continue"})
+                with patch.object(acw, "watcher_rows", return_value=[]):
                     acw.cleanup_stale_files()
-        self.assertEqual([], unlink.call_args_list)
+                self.assertEqual(1, len(acw._load_sessions()))
 
     def test_cleanup_stale_files_removes_dead_session_state_without_live_pane(self):
-        session_file = f"/state/acw_session.{THREAD}.json"
-
-        def fake_glob(pattern):
-            if pattern.endswith("auto_continue_logwatch.*.pid"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.log"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.runner.log"):
-                return []
-            if pattern.endswith("acw_session.*.json"):
-                return [session_file]
-            return []
-
-        with patch.object(acw.glob, "glob", side_effect=fake_glob):
-            with patch.object(acw, "watcher_rows", return_value=[]):
-                with patch.object(acw, "_build_runtime_model", return_value=acw._build_runtime_model(_snapshot())):
-                    with patch("builtins.open", mock_open(read_data=json.dumps({"thread_id": THREAD}))):
-                        with patch.object(acw.Path, "unlink") as unlink:
-                            acw.cleanup_stale_files(remove_dead_sessions=True)
-        unlink.assert_called_once_with(missing_ok=True)
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "name": "formal", "message": "continue"})
+                with patch.object(acw, "watcher_rows", return_value=[]):
+                    with patch.object(acw, "_build_runtime_model", return_value=acw._build_runtime_model(_snapshot())):
+                        acw.cleanup_stale_files(remove_dead_sessions=True)
+                self.assertEqual([], acw._load_sessions())
 
     def test_cleanup_stale_files_keeps_dead_session_state_with_live_pane(self):
-        session_file = f"/state/acw_session.{THREAD}.json"
-
-        def fake_glob(pattern):
-            if pattern.endswith("auto_continue_logwatch.*.pid"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.log"):
-                return []
-            if pattern.endswith("auto_continue_logwatch*.runner.log"):
-                return []
-            if pattern.endswith("acw_session.*.json"):
-                return [session_file]
-            return []
-
-        with patch.object(acw.glob, "glob", side_effect=fake_glob):
-            with patch.object(acw, "watcher_rows", return_value=[]):
-                live_model = acw._build_runtime_model(_snapshot(
-                    panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
-                ))
-                with patch.object(acw, "_build_runtime_model", return_value=live_model):
-                    with patch("builtins.open", mock_open(read_data=json.dumps({"thread_id": THREAD}))):
-                        with patch.object(acw.Path, "unlink") as unlink:
-                            acw.cleanup_stale_files(remove_dead_sessions=True)
-        unlink.assert_not_called()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                acw._write_session_state(THREAD, {"thread_id": THREAD, "name": "formal", "message": "continue"})
+                with patch.object(acw, "watcher_rows", return_value=[]):
+                    live_model = acw._build_runtime_model(_snapshot(
+                        panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+                    ))
+                    with patch.object(acw, "_build_runtime_model", return_value=live_model):
+                        acw.cleanup_stale_files(remove_dead_sessions=True)
+                self.assertEqual(1, len(acw._load_sessions()))
 
     def test_build_thread_pane_map_uses_tmux_process_tree(self):
         def fake_tmux(*args):
@@ -1111,7 +1132,7 @@ class WatchdUnitTests(unittest.TestCase):
                             acw.cmd_status(["--details"])
         text = out.getvalue()
         self.assertIn("PANE:            %7", text)
-        self.assertIn("PID:             1234", text)
+        self.assertIn("RUNTIME_ID:      1234", text)
         self.assertIn("STATE:           error", text)
         self.assertIn("ANOMALY:         tmux pane %7 is missing", text)
         self.assertIn("WINDOW:          formal", text)

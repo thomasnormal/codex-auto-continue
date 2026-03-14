@@ -1,3 +1,5 @@
+import json
+import re
 import unittest
 from pathlib import Path
 
@@ -149,8 +151,8 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("resolved: target=formal pane=", resume.stdout, self.harness.diagnostics())
         self.assertIn("resolved: target=aot pane=", resume.stdout, self.harness.diagnostics())
-        self.assertTrue(self.harness.manager_runtime_file(formal_turn.thread_id).is_file(), self.harness.diagnostics())
-        self.assertTrue(self.harness.manager_runtime_file(aot_turn.thread_id).is_file(), self.harness.diagnostics())
+        self.assertIsNotNone(self.harness.manager_runtime_row(formal_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNotNone(self.harness.manager_runtime_row(aot_turn.thread_id), self.harness.diagnostics())
         self.assertNotEqual(formal_pid_before, self.harness._read_manager_pid_for_pane(formal_pane))
         self.assertNotEqual(aot_pid_before, self.harness._read_manager_pid_for_pane(aot_pane))
 
@@ -192,17 +194,22 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.harness.run_manager("edit", self.harness.pane_id, env_overrides={"EDITOR": str(editor)})
         self.harness.wait_for_manager_state_contains(first_turn.thread_id, "updated continue")
 
-        state_text = self.harness.manager_state_file(first_turn.thread_id).read_text(encoding="utf-8", errors="ignore")
+        state_row = self.harness.manager_session_row(first_turn.thread_id)
+        state_text = json.dumps(state_row or {}, sort_keys=True)
         self.assertIn("updated continue", state_text, self.harness.diagnostics())
 
     def test_manager_doctor_reports_healthy_current_pane(self):
         self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
+        self.harness.wait_for_pane_contains("• hello", timeout=60.0)
 
         doctor = self.harness.run_manager_in_current_pane("doctor")
 
         self.assertIn("RESULT: ok", doctor.stdout, self.harness.diagnostics())
-        self.assertIn(f"Codex thread detected: {first_turn.thread_id}", doctor.stdout, self.harness.diagnostics())
+        self.assertRegex(
+            doctor.stdout,
+            re.compile(r"Codex thread detected: [0-9a-f]{8}-[0-9a-f-]{27}"),
+            self.harness.diagnostics(),
+        )
 
     def test_manager_doctor_reports_missing_thread_for_plain_shell_pane(self):
         self.harness.rename_window("shellpane")

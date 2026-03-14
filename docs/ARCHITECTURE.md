@@ -4,18 +4,21 @@
 
 `acw` is a tmux-side automation layer for Codex sessions.
 
-The current runtime model has three pieces:
+The current runtime model has five code-level pieces:
 
 - `bin/auto_continue_watchd.py`
-  - the CLI and control plane
-  - resolves panes, threads, and saved sessions
-  - starts or updates managed sessions
-  - reports status, doctor output, repairs, and cleanup
-- a hidden shared daemon (`auto_continue_watchd.py _daemon`)
-  - one daemon per tmux socket scope
-  - owns all managed live session runtimes for that tmux server
-  - reconciles desired session state with live runtime state
-  - tails `~/.codex/log/codex-tui.log` once per tmux socket
+  - the CLI and command/control plane
+  - wires the probe, state, daemon, repair, and UI modules together
+- `bin/acw_probe.py`
+  - strict tmux/process/Codex thread discovery
+  - pane snippet extraction and thread provenance helpers
+- `bin/acw_state.py`
+  - the SQLite-backed manager state store
+  - desired session rows plus observed runtime rows
+- `bin/acw_daemon.py`
+  - daemon-owned per-session runtime state and shared event-loop helpers
+- `bin/acw_ui.py`
+  - status-table and doctor rendering helpers
 - `bin/auto_continue_logwatch.py`
   - shared low-level Codex-log, pane, and tmux-send helpers
   - still usable as a direct single-session CLI for debugging/tests
@@ -73,10 +76,10 @@ This lets:
 Durable desired state lives in:
 
 ```text
-~/.codex/acw_session.<thread-id>.json
+~/.codex/acw_state.sqlite
 ```
 
-These files hold manager-owned intent for one managed session:
+The `sessions` table holds manager-owned intent for one managed session:
 
 - `thread_id`
 - `pane`
@@ -93,20 +96,20 @@ They also carry durable health metadata written by the worker:
 - `health_ts`
 - `last_continue_at`
 
-The session file is the desired state for the daemon.
+The session row is the desired state for the daemon.
 
 ### 2. Runtime state
 
 Observed managed-worker state lives in:
 
 ```text
-~/.codex/acw_runtime.<scope>.<thread-id>.json
+~/.codex/acw_state.sqlite
 ```
 
-These files are written by the daemon and describe the currently attached live
-session runtime for one managed session:
+The `runtimes` table is written by the daemon and describes the currently
+attached live session runtime for one managed session:
 
-- daemon-assigned runtime id (`pid` in the UI today; it identifies one live
+- daemon-assigned runtime id (`runtime=` in the UI; it identifies one live
   managed session runtime and is not an OS pid)
 - daemon pid
 - pane
@@ -117,7 +120,7 @@ session runtime for one managed session:
 - watch log path
 - heartbeat timestamp
 
-The runtime file is the daemon-owned observed state.
+The runtime row is the daemon-owned observed state.
 
 ### 3. Live tmux and process state
 
@@ -189,20 +192,20 @@ The hidden `_daemon` subcommand is started on demand by the CLI.
 At a high level the loop does this:
 
 1. Drain new Codex events from one shared `codex-tui.log` tail.
-2. Load all session files for the current tmux socket scope.
+2. Load all session rows for the current tmux socket scope.
 3. Reconcile them against the in-memory per-session runtime map.
 4. Create missing runtimes.
 5. Drop runtimes whose session was deleted.
 6. Reinitialize runtimes whose `(pane, message, generation)` signature changed.
 7. Route the drained events to the matching session runtime by `thread_id`.
-8. Refresh session health and write one runtime JSON file per live managed session.
+8. Refresh session health and upsert one runtime row per live managed session.
 9. Exit automatically after a short idle period when the scope has no sessions.
 
 That means normal commands are cheap:
 
 - they edit desired state
 - they ensure the daemon exists
-- they wait for the runtime file to reflect the new state
+- they wait for the runtime row to reflect the new state
 
 They do not spawn or discover per-pane manager processes anymore.
 
@@ -252,7 +255,7 @@ per-pane OS processes around.
 2. Prove the live Codex thread.
 3. Resolve or edit the continue message.
 4. Reject conflicting pane/thread/session state.
-5. Write the thread-keyed session JSON for that pane.
+5. Upsert the thread-keyed session row for that pane.
 6. Ensure the shared daemon is running.
 7. Wait for the matching runtime row.
 
@@ -260,13 +263,13 @@ per-pane OS processes around.
 
 `stop` is destructive manager intent:
 
-- remove the saved session file
+- remove the saved session row
 - let the daemon tear down the runtime row
 - forget the session from `acw status`
 
 ### `pause`
 
-`pause` sets `paused=true` in the saved session file and waits for the daemon
+`pause` sets `paused=true` in the saved session row and waits for the daemon
 runtime row to reflect that state.
 
 ### `resume`
@@ -316,7 +319,7 @@ The Codex relaunch path is still explicit and strict:
 
 - live panes
 - live managed runtime rows
-- saved session files
+- saved session rows
 
 It does not collapse ambiguity away.
 If there are duplicate or missing entities, the table shows them as invariant
@@ -355,12 +358,15 @@ multi-thread corruption.
 It only removes stale artifacts, such as:
 
 - dead runtime rows from a vanished daemon
-- dead session files whose thread has neither a live pane nor a live worker
+- dead session rows whose thread has neither a live pane nor a live worker
 
 
 ## Runtime Snapshot Types
 
-The manager's in-memory model lives in `bin/auto_continue_watchd.py`.
+The command-layer runtime model lives in `bin/auto_continue_watchd.py`, while
+the probing, persistence, daemon-session, and UI helpers now live in
+`bin/acw_probe.py`, `bin/acw_state.py`, `bin/acw_daemon.py`, and
+`bin/acw_ui.py`.
 
 The main record types are:
 
@@ -412,16 +418,15 @@ rename is naturally visible to later `status`, `doctor`, and `edit` calls even
 without trusting the hook alone.
 
 
-## State Files
+## State Store
 
 All manager-owned state lives under `~/.codex/`.
 
 Important files:
 
-- `acw_session.<thread>.json`
-  - desired state for one managed session
-- `acw_runtime.<scope>.<thread>.json`
-  - observed daemon runtime state for one live managed session
+- `acw_state.sqlite`
+  - `sessions` table: desired state for one managed session
+  - `runtimes` table: observed daemon runtime state for one live managed session
 - `acw_daemon.<scope>.pid`
   - daemon pid for one tmux socket scope
 - `acw_daemon.<scope>.log`

@@ -112,7 +112,7 @@ acw restart [target] Restart one managed session or all managed sessions
 acw edit <target>    Edit the stored continue prompt, then restart
 acw repair [target]  Inspect or apply safe live-state repairs
 acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
-acw cleanup          Remove dead saved sessions and stale daemon/runtime files
+acw cleanup          Remove dead saved sessions and stale daemon/runtime rows
 ```
 
 For all-watcher operations, use the no-target forms:
@@ -128,7 +128,7 @@ instead of thawing an old reader in place. That avoids replaying buffered
 Codex log history after a long pause.
 
 `stop` is the destructive "stop managing this session" operation. It removes
-the saved `acw_session.<thread>.json` state so the row disappears from `acw`
+the saved session row from `~/.codex/acw_state.sqlite` so the row disappears from `acw`
 status immediately. Use `pause` if you plan to resume the same watcher later.
 
 `acw status` only shows managed sessions now. A random live Codex pane with no
@@ -155,7 +155,7 @@ without touching anything. Use `acw repair <target>` for one managed pane, or
 `acw repair --all` to apply the safe repairs across all managed panes.
 
 `cleanup` is intentionally separate from `repair`: it only removes dead saved
-session files and stale daemon/runtime artifacts. It does not
+session rows and stale daemon/runtime artifacts. It does not
 try to fix live pane/session/thread mismatches.
 
 ## Continue Message
@@ -194,7 +194,7 @@ Use:
 acw status --details
 ```
 
-to see `HEALTH_DETAIL`, state file paths, watch logs, and the last recorded
+to see `HEALTH_DETAIL`, state references, watch logs, and the last recorded
 event for each managed session.
 
 When the summary table shows a degraded watcher, `acw` prints a follow-up
@@ -321,12 +321,13 @@ guess from cwd, timing, or unrelated global activity.
 Canonical watcher/session state is stored under:
 
 ```text
-~/.codex/acw_session.<thread-id>.json
+~/.codex/acw_state.sqlite
 ```
 
-Watcher processes also record the tmux socket they are using, which avoids pane
-id collisions between your real tmux server and the isolated real-Codex test
-harness.
+The `sessions` table holds desired manager state, and the `runtimes` table
+holds the daemon-owned observed runtime rows for the current tmux scope. The
+daemon still writes `acw_daemon.<scope>.pid`, `acw_daemon.<scope>.log`, and
+per-pane watch logs under `~/.codex/`.
 
 ## Development And Tests
 
