@@ -110,6 +110,7 @@ acw pause [target]   Pause one managed session or all managed sessions
 acw resume [target]  Resume one or more paused managed sessions, or all paused managed sessions
 acw restart [target] Restart one managed session or all managed sessions
 acw edit <target>    Edit the stored continue prompt, then restart
+acw migrate          Import running legacy per-pane watchers into the daemon-backed model
 acw repair [target]  Inspect or apply safe live-state repairs
 acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
 acw cleanup          Remove dead saved sessions and stale daemon/runtime rows
@@ -148,6 +149,12 @@ Codex process, not just a fresh watcher.
 `acw restart` with no target now also recovers dead watchers whose Codex panes
 are still live. It restarts from the saved thread/message state instead of
 requiring a fresh `acw start`.
+
+`migrate` is the one-shot upgrade path from the old per-pane watcher model. It
+scans the current tmux scope for running `auto_continue_logwatch.py`
+processes, stops them, imports their saved session state into
+`~/.codex/acw_state.sqlite`, starts the shared daemon, and waits for the new
+runtime rows to come up on the same panes/threads/messages.
 
 `repair` is the live-state recovery workflow. With no target, `acw repair`
 defaults to a dry run and shows safe automatic repairs plus manual blockers

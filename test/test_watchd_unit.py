@@ -106,6 +106,27 @@ def _snapshot(
     )
 
 
+def _legacy_record(
+    *,
+    pid: str = "4242",
+    pane: str = "%7",
+    thread_id: str = THREAD,
+    tmux_socket: str = "/tmp/tmux-1000/default",
+    state_file: str = "/state/acw_session.1111.json",
+    watch_log: str = "/state/auto_continue_logwatch._7.log",
+    paused: bool = False,
+) -> acw.LegacyWatcherRecord:
+    return acw.LegacyWatcherRecord(
+        pid=pid,
+        pane=pane,
+        thread_id=thread_id.lower(),
+        tmux_socket=tmux_socket,
+        state_file=state_file,
+        watch_log=watch_log,
+        paused=paused,
+    )
+
+
 class WatchdUnitTests(unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -224,6 +245,89 @@ class WatchdUnitTests(unittest.TestCase):
         }
         with patch.object(acw, "_read_session_state", return_value={"message": "continue by docs/DDR3_PLAN.md"}):
             self.assertEqual("continue by docs/DDR3_PLAN.md", acw._message_summary_for_row(row))
+
+    def test_parse_legacy_watcher_argv_extracts_required_fields(self):
+        argv = [
+            "python3",
+            "/repo/bin/auto_continue_logwatch.py",
+            "--pane",
+            "%6",
+            "--thread-id",
+            THREAD,
+            "--tmux-socket",
+            "/tmp/tmux-1000/default",
+            "--state-file",
+            "/tmp/acw_session.json",
+            "--watch-log",
+            "/tmp/auto_continue_logwatch._6.log",
+        ]
+
+        record = acw._parse_legacy_watcher_argv(argv, pid="4242", process_state="T")
+
+        self.assertEqual(
+            _legacy_record(
+                pid="4242",
+                pane="%6",
+                thread_id=THREAD,
+                tmux_socket="/tmp/tmux-1000/default",
+                state_file="/tmp/acw_session.json",
+                watch_log="/tmp/auto_continue_logwatch._6.log",
+                paused=True,
+            ),
+            record,
+        )
+
+    def test_cmd_migrate_imports_legacy_watcher_into_sqlite_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "acw_session.legacy.json"
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "thread_id": THREAD,
+                        "pane": "%7",
+                        "name": "formal",
+                        "message": "continue by plan",
+                        "generation": 2,
+                        "last_handled_turn": "turn-7",
+                        "last_handled_thread": THREAD,
+                        "last_continue_at": "2026-03-14 12:00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            record = _legacy_record(
+                pid="4242",
+                pane="%7",
+                thread_id=THREAD,
+                state_file=str(state_file),
+                tmux_socket="/tmp/tmux-1000/default",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            with patch.object(acw, "STATE_DIR", td):
+                with patch.object(acw, "_list_legacy_watchers", return_value=[record]):
+                    with patch.object(acw, "_terminate_legacy_watcher", return_value=(True, "")) as terminate:
+                        with patch.object(acw, "run_tmux", return_value="formal\n"):
+                            with patch.object(acw, "cleanup_stale_files") as cleanup:
+                                with redirect_stdout(out), redirect_stderr(err):
+                                    acw.cmd_migrate([])
+                state = acw._read_session_state(THREAD)
+                self.assertEqual("%7", state["pane"])
+                self.assertEqual("formal", state["name"])
+                self.assertEqual("continue by plan", state["message"])
+                self.assertEqual("turn-7", state["last_handled_turn"])
+                self.assertFalse(state_file.exists())
+                terminate.assert_called_once_with("4242")
+                cleanup.assert_called_once_with(remove_dead_sessions=True)
+            self.assertIn("migrated: pane=%7", out.getvalue())
+            self.assertEqual("", err.getvalue())
+
+    def test_print_status_recommendations_shows_migrate_hint_for_legacy_watchers(self):
+        out = io.StringIO()
+        with patch.object(acw, "_list_legacy_watchers", return_value=[_legacy_record()]):
+            with redirect_stdout(out):
+                acw._print_status_recommendations([])
+        self.assertIn("Hint: run acw migrate to import 1 legacy per-pane watcher.", out.getvalue())
 
     def test_edit_prefers_persisted_session_message_over_stale_inline_message(self):
         model = acw._build_runtime_model(_snapshot(
