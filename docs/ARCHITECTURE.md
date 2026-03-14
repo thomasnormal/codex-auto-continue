@@ -4,7 +4,7 @@
 
 `acw` is a tmux-side automation layer for Codex sessions.
 
-The current runtime model has five code-level pieces:
+The current runtime model has seven code-level pieces:
 
 - `bin/auto_continue_watchd.py`
   - the CLI and command/control plane
@@ -17,6 +17,8 @@ The current runtime model has five code-level pieces:
   - desired session rows plus observed runtime rows
 - `bin/acw_daemon.py`
   - daemon-owned per-session runtime state and shared event-loop helpers
+- `bin/acw_rpc.py`
+  - Unix-socket request/response transport between the CLI and the daemon
 - `bin/acw_ui.py`
   - status-table and doctor rendering helpers
 - `bin/auto_continue_logwatch.py`
@@ -203,11 +205,41 @@ At a high level the loop does this:
 
 That means normal commands are cheap:
 
-- they edit desired state
 - they ensure the daemon exists
-- they wait for the runtime row to reflect the new state
+- they send one local Unix-socket RPC to the daemon
+- the daemon persists desired state and waits for runtime convergence
+- progress lines stream back over the same socket
 
 They do not spawn or discover per-pane manager processes anymore.
+
+
+## Daemon Control Socket
+
+Each tmux scope now has one daemon control socket:
+
+- `~/.codex/acw_daemon.<scope>.sock`
+
+The CLI uses it for mutating commands like:
+
+- `start`
+- `stop`
+- `pause`
+- `resume`
+- `restart`
+- `edit`
+- `migrate`
+
+The transport is intentionally small:
+
+- local Unix domain socket only
+- one JSON request per connection
+- streamed `progress` messages
+- one final `result` or `error`
+
+SQLite remains the durable source of truth, but the socket is the fast control
+path. That removes the old manager-side "write state, then poll the database"
+behavior from normal mutations and gives `restart --restart-codex` and similar
+flows a place to surface step-by-step daemon progress.
 
 
 ## Session Runtime Model
@@ -429,6 +461,8 @@ Important files:
   - `runtimes` table: observed daemon runtime state for one live managed session
 - `acw_daemon.<scope>.pid`
   - daemon pid for one tmux socket scope
+- `acw_daemon.<scope>.sock`
+  - daemon control socket for one tmux socket scope
 - `acw_daemon.<scope>.log`
   - daemon stdout/stderr log
 - `auto_continue_logwatch.<pane>.log`

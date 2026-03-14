@@ -2,7 +2,9 @@ import io
 import json
 import os
 import tempfile
+import threading
 import subprocess
+import time
 import unittest
 import builtins
 from contextlib import redirect_stderr
@@ -16,6 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
+import acw_rpc  # noqa: E402
 import auto_continue_watchd as acw  # noqa: E402
 
 
@@ -130,33 +133,70 @@ def _legacy_record(
 class WatchdUnitTests(unittest.TestCase):
     def setUp(self):
         super().setUp()
-        def _runtime_wait_stub(thread_id, predicate, timeout_secs=5.0):
-            for pane_index in range(0, 40):
-                for generation in range(0, 5):
-                    candidate = {
-                        "thread": thread_id,
-                        "pane": f"%{pane_index}",
-                        "runtime_status": "running",
-                        "generation": generation,
-                        "paused": "",
-                    }
-                    if predicate(candidate):
-                        return candidate
-                    paused_candidate = {
-                        "thread": thread_id,
-                        "pane": f"%{pane_index}",
-                        "runtime_status": "paused",
-                        "generation": generation,
-                        "paused": "1",
-                    }
-                    if predicate(paused_candidate):
-                        return paused_candidate
+        def _daemon_upsert_stub(
+            thread_id,
+            *,
+            pane,
+            name,
+            message,
+            paused,
+            generation,
+            extra_session=None,
+            timeout_secs=5.0,
+        ):
+            payload = {
+                "thread_id": thread_id,
+                "pane": pane,
+                "name": name,
+                "message": message,
+                "paused": paused,
+                "generation": generation,
+            }
+            if extra_session:
+                payload.update(extra_session)
+            acw._write_session_state(thread_id, payload)
+            return {
+                "thread": thread_id,
+                "pane": pane,
+                "runtime_status": "paused" if paused else "running",
+                "generation": str(generation),
+                "paused": "1" if paused else "",
+                "runtime_id": "runtime-9999",
+                "daemon_pid": "9999",
+            }
+
+        def _daemon_patch_stub(thread_id, changes, *, wait=None, timeout_secs=5.0):
+            acw._write_session_state(thread_id, changes)
+            state = acw._read_session_state(thread_id)
+            if isinstance(wait, dict) and wait.get("kind") == "absent":
+                return {}
+            pane = str(state.get("pane", changes.get("pane", "%0"))).strip() or "%0"
+            paused = bool(state.get("paused", changes.get("paused", False)))
+            generation = int(state.get("generation", changes.get("generation", 0)) or 0)
+            statuses = wait.get("statuses", []) if isinstance(wait, dict) else []
+            runtime_status = str(statuses[0]).strip() if statuses else ("paused" if paused else "running")
+            return {
+                "thread": thread_id,
+                "pane": pane,
+                "runtime_status": runtime_status,
+                "generation": str(generation),
+                "paused": "1" if paused else "",
+                "runtime_id": "runtime-9999",
+                "daemon_pid": "9999",
+            }
+
+        def _daemon_remove_stub(thread_id, *, timeout_secs=2.0):
+            acw._remove_session_state(thread_id)
+
+        def _daemon_restart_codex_stub(pane, thread_id, *, timeout_secs=10.0):
             return None
 
         self._patchers = [
             patch.object(acw, "_read_runtime_rows", return_value=[]),
-            patch.object(acw, "_ensure_daemon_running", return_value="9999"),
-            patch.object(acw, "_wait_for_runtime_row", side_effect=_runtime_wait_stub),
+            patch.object(acw, "_daemon_rpc_upsert_session", side_effect=_daemon_upsert_stub),
+            patch.object(acw, "_daemon_rpc_patch_session", side_effect=_daemon_patch_stub),
+            patch.object(acw, "_daemon_rpc_remove_session", side_effect=_daemon_remove_stub),
+            patch.object(acw, "_daemon_rpc_restart_codex", side_effect=_daemon_restart_codex_stub),
         ]
         for patcher in self._patchers:
             patcher.start()
@@ -196,6 +236,84 @@ class WatchdUnitTests(unittest.TestCase):
                 acw.parse_thread_and_message_args(["--message-file", "/tmp/msg.txt"])
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("unknown option '--message-file'", err.getvalue())
+
+    def test_daemon_rpc_transport_streams_progress_and_returns_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = os.path.join(td, "acw.sock")
+            server = acw_rpc.listen(socket_path)
+            self.addCleanup(server.close)
+
+            def serve_once():
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    handled = acw_rpc.serve_pending(
+                        server,
+                        handle_request=lambda request, send_progress: (
+                            send_progress(f"progress:{request['command']}") or {"ok": True}
+                        ),
+                    )
+                    if handled:
+                        return
+                    time.sleep(0.01)
+
+            worker = threading.Thread(target=serve_once)
+            worker.start()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                payload = acw_rpc.call(
+                    socket_path,
+                    {"command": "ping", "params": {}},
+                    on_progress=acw._print_progress,
+                    timeout_secs=2.0,
+                )
+            worker.join(timeout=2.0)
+
+        self.assertEqual({"ok": True}, payload)
+        self.assertIn("progress:ping", out.getvalue())
+
+    def test_daemon_handle_upsert_session_request_reconciles_runtime(self):
+        with tempfile.TemporaryDirectory() as td:
+            log_tail = acw._DaemonCodexLogTail(log_path=Path(td) / "codex-tui.log")
+            try:
+                with patch.object(acw, "STATE_DIR", td):
+                    with patch.object(acw, "_compute_watch_health", return_value=("ok", "")):
+                        payload = acw._daemon_handle_rpc_request(
+                            {
+                                "command": "upsert_session",
+                                "params": {
+                                    "thread_id": THREAD,
+                                    "session": {
+                                        "thread_id": THREAD,
+                                        "pane": "%7",
+                                        "name": "formal",
+                                        "message": "continue",
+                                        "paused": False,
+                                        "generation": 3,
+                                        "tmux_socket": "",
+                                    },
+                                    "wait": {
+                                        "kind": "runtime",
+                                        "pane": "%7",
+                                        "generation": 3,
+                                        "paused": False,
+                                        "statuses": ["running", "paused"],
+                                    },
+                                    "timeout_secs": 1.0,
+                                },
+                            },
+                            scope="",
+                            log_tail=log_tail,
+                            runtimes={},
+                            send_progress=lambda _message: None,
+                        )
+                    state = acw._read_session_state(THREAD)
+            finally:
+                log_tail.close()
+
+        self.assertEqual("%7", payload["row"]["pane"])
+        self.assertEqual("running", payload["row"]["runtime_status"])
+        self.assertEqual("%7", state["pane"])
+        self.assertEqual("formal", state["name"])
 
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
@@ -600,6 +718,40 @@ class WatchdUnitTests(unittest.TestCase):
                                 acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("another watcher (runtime=1234 pane=%6) is already watching thread", err.getvalue())
+
+    def test_start_uses_daemon_rpc_upsert_session(self):
+        out = io.StringIO()
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%8", THREAD, window_label="0:8:aot2", window_name="aot2"),),
+        ))
+        with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
+            with patch.object(acw, "ensure_tmux_window_rename_hook"):
+                with patch.object(acw, "_build_runtime_model", return_value=model):
+                    with patch.object(acw, "watcher_rows", return_value=[]):
+                        with patch.object(acw, "resolve_thread_id", return_value=THREAD):
+                            with patch.object(acw, "run_tmux", return_value="aot2\n"):
+                                with patch.object(
+                                    acw,
+                                    "_daemon_rpc_upsert_session",
+                                    return_value={
+                                        "thread": THREAD,
+                                        "pane": "%8",
+                                        "runtime_status": "running",
+                                        "runtime_id": "runtime-321",
+                                        "daemon_pid": "9999",
+                                    },
+                                ) as upsert:
+                                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                        acw.cmd_start(["aot2", THREAD, "--message", "continue"])
+        upsert.assert_called_once_with(
+            THREAD,
+            pane="%8",
+            name="aot2",
+            message="continue",
+            paused=False,
+            generation=0,
+        )
+        self.assertIn("started: pane=%8 thread_id=11111111-1111-1111-1111-111111111111 daemon_pid=9999", out.getvalue())
 
     def test_start_rejects_existing_pane_watcher_when_thread_is_duplicated_elsewhere(self):
         err = io.StringIO()
@@ -1303,15 +1455,37 @@ class WatchdUnitTests(unittest.TestCase):
             {"pane": "%2", "pid": "202", "thread": OTHER_THREAD, "runtime_status": "running"},
         ]
         with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "_set_session_paused") as set_paused:
+            with patch.object(acw, "_daemon_rpc_patch_session") as patch_session:
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     acw.cmd_pause([])
         self.assertEqual(
             [
-                ((THREAD, True),),
-                ((OTHER_THREAD, True),),
+                (
+                    (THREAD, {"paused": True}),
+                    {
+                        "wait": {
+                            "kind": "runtime",
+                            "pane": "%1",
+                            "paused": True,
+                            "statuses": ["paused"],
+                        },
+                        "timeout_secs": 2.0,
+                    },
+                ),
+                (
+                    (OTHER_THREAD, {"paused": True}),
+                    {
+                        "wait": {
+                            "kind": "runtime",
+                            "pane": "%2",
+                            "paused": True,
+                            "statuses": ["paused"],
+                        },
+                        "timeout_secs": 2.0,
+                    },
+                ),
             ],
-            set_paused.call_args_list,
+            [(call.args, call.kwargs) for call in patch_session.call_args_list],
         )
 
     def test_pause_rejects_star_selector(self):
@@ -1504,11 +1678,21 @@ class WatchdUnitTests(unittest.TestCase):
             sessions=(_session_record(THREAD, name="bugs", message="continue"),),
         ))
         with patch.object(acw, "_build_runtime_model", return_value=model):
-            with patch.object(acw, "_restart_codex_in_pane") as restart_codex:
-                with patch.object(acw, "_write_managed_session") as write_session:
+            with patch.object(acw, "_daemon_rpc_restart_codex") as restart_codex:
+                with patch.object(
+                    acw,
+                    "_daemon_rpc_upsert_session",
+                    return_value={
+                        "thread": THREAD,
+                        "pane": "%7",
+                        "runtime_status": "running",
+                        "runtime_id": "runtime-9999",
+                        "daemon_pid": "9999",
+                    },
+                ) as upsert:
                     acw._restart_one("bugs", "%7", ["--restart-codex"])
         restart_codex.assert_called_once_with("%7", THREAD)
-        write_session.assert_called_once()
+        upsert.assert_called_once()
 
     def test_restart_target_fails_when_watcher_thread_and_live_pane_disagree(self):
         model = acw._build_runtime_model(_snapshot(
@@ -1534,7 +1718,17 @@ class WatchdUnitTests(unittest.TestCase):
             sessions=(_session_record(THREAD, name="bugs", message="continue"),),
         ))
         with patch.object(acw, "_build_runtime_model", return_value=model):
-            with patch.object(acw, "_write_managed_session"):
+            with patch.object(
+                acw,
+                "_daemon_rpc_upsert_session",
+                return_value={
+                    "thread": THREAD,
+                    "pane": "%7",
+                    "runtime_status": "running",
+                    "runtime_id": "runtime-9999",
+                    "daemon_pid": "9999",
+                },
+            ):
                 out = io.StringIO()
                 with redirect_stdout(out), redirect_stderr(io.StringIO()):
                     acw._restart_one("bugs", "%7", [])

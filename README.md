@@ -12,7 +12,10 @@ recover from tmux problems without losing control of the pane.
 
 Internally, `acw` now uses one shared daemon per tmux socket plus thread-keyed
 managed session state, and that daemon tails `codex-tui.log` once for the
-whole tmux socket instead of running one log reader per pane.
+whole tmux socket instead of running one log reader per pane. Mutating
+commands talk to that daemon over a local Unix socket, so `start`/`pause`/
+`resume`/`restart`/`edit` stream daemon progress directly instead of polling
+SQLite for convergence.
 
 ![acw status dashboard](docs/assets/acw-status-screenshot.svg)
 
@@ -333,8 +336,8 @@ Canonical watcher/session state is stored under:
 
 The `sessions` table holds desired manager state, and the `runtimes` table
 holds the daemon-owned observed runtime rows for the current tmux scope. The
-daemon still writes `acw_daemon.<scope>.pid`, `acw_daemon.<scope>.log`, and
-per-pane watch logs under `~/.codex/`.
+daemon also writes `acw_daemon.<scope>.pid`, `acw_daemon.<scope>.sock`,
+`acw_daemon.<scope>.log`, and per-pane watch logs under `~/.codex/`.
 
 ## Development And Tests
 

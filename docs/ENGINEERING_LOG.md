@@ -2,6 +2,10 @@
 
 ## 2026-03-14
 
+- Change: added a first-class daemon control socket at `~/.codex/acw_daemon.<scope>.sock`. Mutating commands now send one local JSON RPC to the shared daemon instead of writing SQLite state directly and polling for convergence from the CLI.
+- Change: the daemon now owns the convergence wait and progress stream for `start`/`stop`/`pause`/`resume`/`restart`/`edit`/`migrate`. That makes restart-codex progress and daemon-side failures visible immediately while keeping SQLite as the durable source of truth.
+- Realization: once the daemon became the only runtime, the remaining CLI-side "write state, then spin on the DB" path was just accidental complexity. The Unix-socket RPC path is simpler because the daemon already owns the in-memory runtime map and can reconcile immediately after each mutation.
+- Change: added `bin/acw_rpc.py` as the small transport layer for the new control path, and updated `pyproject.toml` so installed `acw` includes that module.
 - Change: split `watchd` along real module boundaries instead of keeping every concern inline. The CLI/control plane stays in `bin/auto_continue_watchd.py`, while strict pane/thread probing moved to `bin/acw_probe.py`, SQLite-backed persistence moved to `bin/acw_state.py`, daemon session-loop helpers moved to `bin/acw_daemon.py`, and status/doctor rendering moved to `bin/acw_ui.py`.
 - Change: replaced the manager's JSON session/runtime files with one SQLite state store at `~/.codex/acw_state.sqlite`. The `sessions` table now holds desired manager state, the `runtimes` table holds daemon-observed live runtime rows, and the real-Codex harness now inspects that database directly.
 - Change: added a dedicated `acw migrate` upgrade path for live user tmux servers. It scans the current scope for legacy `auto_continue_logwatch.py` processes, reads their exact argv from `/proc/<pid>/cmdline`, imports the saved thread/message/health state into SQLite, stops the old per-pane process, and waits for the shared daemon runtime row to replace it on the same pane.
