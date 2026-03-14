@@ -2563,6 +2563,16 @@ def _strip_rich_markup(text: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", text)
 
 
+def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, pid: str) -> str:
+    line1 = f"{window_label}/{current_pane}" if current_pane else window_label
+    lines = [line1]
+    if is_thread_id(thread_id):
+        lines.append(f"[dim]{_short_thread_id(thread_id)}[/dim]")
+    if pid:
+        lines.append(f"[dim]pid={pid}[/dim]")
+    return "\n".join(lines)
+
+
 def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) -> None:
     headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
     plain_rows: list[tuple[str, str, str, str, str, str]] = []
@@ -2823,13 +2833,12 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
             last_acw = "-"
         last_agent = _last_agent_snippet_for_pane(current_pane, r["thread"]) or "-"
         msg_raw = _message_summary_for_row(r)
-        line1 = f"{window_label}/{current_pane}" if current_pane else window_label
-        tid = r["thread"] if is_thread_id(r["thread"]) else ""
-        short_tid = _short_thread_id(tid) if tid else ""
-        pid = r.get("pid", "")
-        meta_bits = [bit for bit in (short_tid, f"pid={pid}" if pid else "") if bit]
-        meta = " ".join(meta_bits)
-        window_pane = f"{line1}\n[dim]{meta}[/dim]" if meta else line1
+        window_pane = _status_window_pane_cell(
+            window_label,
+            current_pane,
+            r["thread"],
+            r.get("pid", ""),
+        )
         rows_data.append((
             window_pane,
             _state_summary(state_value, {"health_detail": state_detail}),

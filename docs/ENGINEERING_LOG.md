@@ -1,5 +1,9 @@
 # Engineering Log
 
+## 2026-03-14
+
+- Change: split the status table `WINDOW/PANE` metadata over separate lines for the thread id and watcher pid. This keeps the rich table easier to scan when invariant-heavy sessions need both identifiers at once.
+
 ## 2026-03-13
 
 - Change: rewrote `docs/ARCHITECTURE.md` from a short component note into a detailed design document. It now describes the runtime identity model, sources of truth, strict thread discovery, manager command flows, watcher loop, rename handling, status/doctor/cleanup behavior, and why `acw` rebuilds live state on every command instead of relying on a resident manager daemon.

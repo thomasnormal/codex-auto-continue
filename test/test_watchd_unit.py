@@ -140,6 +140,12 @@ class WatchdUnitTests(unittest.TestCase):
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
 
+    def test_status_window_pane_cell_splits_thread_and_pid_lines(self):
+        self.assertEqual(
+            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]pid=1843260[/dim]",
+            acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "1843260"),
+        )
+
     def test_compute_state_shows_dead_without_live_pid_even_if_health_was_ok(self):
         self.assertEqual("dead", acw._compute_state({"pid": ""}, {"health": "ok"}))
 
