@@ -17,18 +17,22 @@ import subprocess
 import sys
 import tempfile
 import time
-import threading
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
-from auto_continue_logwatch import SessionWatchConfig as LogwatchSessionWatchConfig
-from auto_continue_logwatch import watch_session as _watch_session
+from auto_continue_logwatch import CodexLogEvent as _LogwatchCodexLogEvent
 from auto_continue_logwatch import append_log as _watch_append_log
+from auto_continue_logwatch import check_codex_log_tail_for_pending as _check_codex_log_tail_for_pending
+from auto_continue_logwatch import check_pane_for_errors as _check_pane_for_errors
+from auto_continue_logwatch import check_pane_for_interrupt as _check_pane_for_interrupt
+from auto_continue_logwatch import compute_health as _compute_watch_health
 from auto_continue_logwatch import now_ts as _watch_now_ts
-from auto_continue_logwatch import write_state as _watch_write_state
+from auto_continue_logwatch import parse_codex_log_event as _parse_codex_log_event
+from auto_continue_logwatch import parse_codex_log_interrupt as _parse_codex_log_interrupt
+from auto_continue_logwatch import tmux_send as _watch_tmux_send
 
 # ---------------------------------------------------------------------------
 # Constants & path resolution
@@ -38,11 +42,16 @@ THREAD_ID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-SCRIPT = SCRIPT_DIR / "auto_continue_logwatch.py"
 DAEMON_POLL_INTERVAL_SECS = 0.2
 DAEMON_IDLE_EXIT_SECS = 2.0
+DAEMON_CODEX_LOG_PATH = Path.home() / ".codex" / "log" / "codex-tui.log"
+_DAEMON_RUNTIME_ID_SEQ = 0
+
+
+def _next_daemon_runtime_id() -> str:
+    global _DAEMON_RUNTIME_ID_SEQ
+    _DAEMON_RUNTIME_ID_SEQ += 1
+    return f"{os.getpid()}{_DAEMON_RUNTIME_ID_SEQ:06d}"
 
 
 def resolve_project_cwd() -> str:
@@ -116,12 +125,12 @@ Commands:
   status    Show watcher state. Default command when no subcommand is given.
   start     Start a watcher for a live tmux target. Auto-detects the Codex thread unless you pass one explicitly.
   stop      Stop one watcher, one pane's watchers, or all watchers, and forget their saved sessions.
-  pause     Send SIGSTOP to one watcher, or all watchers when no target is given.
+  pause     Pause one managed session, or all managed sessions when no target is given.
   resume    Restart one or more paused watchers, or all paused watchers, from current state.
   restart   Restart one watcher or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running watcher, then restart it.
   repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.
-  cleanup   Remove dead saved sessions and stale watcher files.
+  cleanup   Remove dead saved sessions and stale daemon/runtime files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
 Targets:
@@ -182,14 +191,6 @@ def _read_pid_file(path: str) -> str | None:
 
 def is_thread_id(s: str) -> bool:
     return bool(THREAD_ID_RE.fullmatch(s))
-
-
-def pid_file_for_key(key: str) -> str:
-    return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.pid")
-
-
-def run_log_for_key(key: str) -> str:
-    return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.runner.log")
 
 
 def watch_log_for_key(key: str) -> str:
@@ -843,116 +844,13 @@ def cmd_window_renamed(argv: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process management
+# Runtime row access
 # ---------------------------------------------------------------------------
 
 
-def _parse_logwatch_args(tokens: list[str]) -> dict[str, str]:
-    """Parse logwatch.py command-line tokens into an info dict."""
-    info: dict[str, str] = {
-        "pane": "", "thread": "", "state": "",
-        "watch": "", "cwd": "", "msg_inline": "", "tmux_socket": "",
-    }
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if tok == "--pane":
-            info["pane"] = nxt
-            i += 2
-        elif tok == "--thread-id":
-            info["thread"] = nxt
-            i += 2
-        elif tok == "--state-file":
-            info["state"] = nxt
-            i += 2
-        elif tok == "--watch-log":
-            info["watch"] = nxt
-            i += 2
-        elif tok == "--cwd":
-            info["cwd"] = nxt
-            i += 2
-        elif tok == "--message":
-            info["msg_inline"] = nxt
-            i += 2
-        elif tok == "--tmux-socket":
-            info["tmux_socket"] = nxt
-            i += 2
-        else:
-            i += 1
-    return info
-
-
-def _pane_exists_on_socket(pane: str, socket_path: str) -> bool:
-    if not pane or not socket_path:
-        return False
-    try:
-        out = subprocess.check_output(
-            ["tmux", "-S", socket_path, "display-message", "-p", "-t", pane, "#{pane_id}"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-    return out == pane
-
-
-def _legacy_watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
-    """Find legacy per-pane logwatch.py instances via ps."""
-    try:
-        ps_out = subprocess.check_output(
-            ["ps", "-ww", "-eo", "pid=,args="], stderr=subprocess.DEVNULL, text=True
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-
-    results: list[dict[str, str]] = []
-    current_socket = _preferred_tmux_socket()
-    explicit_socket = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
-    for line in ps_out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        pid_str, argstr = parts
-        if not pid_str.isdigit():
-            continue
-        # ps output loses null-delimited argv boundaries; use shell-like
-        # splitting and rely on state files for canonical message data.
-        try:
-            tokens = shlex.split(argstr)
-        except ValueError:
-            tokens = argstr.split()
-        has_python = any(re.search(r"(^|/)python([0-9.]+)?$", t) for t in tokens)
-        has_script = any(t.endswith("auto_continue_logwatch.py") for t in tokens)
-        if not has_python or not has_script:
-            continue
-
-        info = _parse_logwatch_args(tokens)
-        info["pid"] = pid_str
-
-        if not info["pane"]:
-            continue
-        row_socket = info.get("tmux_socket", "")
-        if current_socket:
-            if row_socket and row_socket != current_socket:
-                continue
-            if explicit_socket and not row_socket:
-                continue
-            if not row_socket and not _pane_exists_on_socket(info["pane"], current_socket):
-                continue
-        if pane_filter and info["pane"] != pane_filter:
-            continue
-        results.append(info)
-    return results
-
-
 def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
-    """Return managed watcher runtime rows for the current tmux socket scope."""
+    """Return daemon-managed runtime rows for the current tmux socket scope."""
     rows = _read_runtime_rows()
-    rows.extend(_legacy_watcher_rows())
     if pane_filter:
         rows = [row for row in rows if row.get("pane", "") == pane_filter]
     deduped: list[dict[str, str]] = []
@@ -1021,17 +919,6 @@ def _is_pid_stopped(pid: int) -> bool:
     return False
 
 
-def is_running_pid_file(pid_file: str) -> bool:
-    pid_str = _read_pid_file(pid_file)
-    if not pid_str:
-        return False
-    try:
-        os.kill(int(pid_str), 0)
-        return True
-    except OSError:
-        return False
-
-
 def thread_from_running_watcher_for_pane(pane: str) -> str | None:
     rows = watcher_rows(pane)
     if len(rows) != 1:
@@ -1048,20 +935,40 @@ def thread_from_running_watcher_for_pane(pane: str) -> str | None:
 
 
 @dataclass
-class _DaemonWorker:
+class _DaemonCodexLogTail:
+    log_path: Path
+    handle: io.TextIOWrapper | None = None
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        self.handle.close()
+        self.handle = None
+
+
+@dataclass
+class _DaemonSessionRuntime:
     thread_id: str
     pane: str
     message: str
     tmux_socket: str
     generation: int
+    runtime_id: str
     state_file: str
     watch_log: str
     cwd: str
-    stop_event: threading.Event
-    pause_event: threading.Event
-    thread: threading.Thread
+    paused: bool = False
     runtime_status: str = "starting"
     runtime_detail: str = ""
+    last_handled_turn: str = ""
+    last_handled_thread: str = ""
+    last_send_time: float = 0.0
+    health: str = "ok"
+    health_detail: str = ""
+    last_health_check: float = 0.0
+    watcher_start: float = 0.0
+    interrupt_skip_armed: bool = False
+    pending_startup_event: _LogwatchCodexLogEvent | None = None
 
 
 def _daemon_scope_env(socket_path: str) -> dict[str, str]:
@@ -1197,19 +1104,7 @@ def _wait_for_runtime_row(
     return row if predicate(row) else None
 
 
-def _stop_legacy_watcher_pid(pid_str: str) -> None:
-    if not pid_str.isdigit():
-        return
-    pid = int(pid_str)
-    try:
-        if _is_pid_stopped(pid):
-            os.kill(pid, signal.SIGCONT)
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
-
-
-def _worker_signature(session: SavedSessionRecord) -> tuple[str, str, int]:
+def _session_signature(session: SavedSessionRecord) -> tuple[str, str, int]:
     return (session.pane, session.message, session.generation)
 
 
@@ -1235,136 +1130,304 @@ def _load_scoped_session_records(socket_path: str | None = None) -> list[SavedSe
     return records
 
 
-def _daemon_runtime_payload(worker: _DaemonWorker) -> dict:
-    if worker.stop_event.is_set() and worker.thread.is_alive():
-        runtime_status = "stopping"
-    elif worker.pause_event.is_set():
-        runtime_status = "paused"
-    elif worker.thread.is_alive():
-        runtime_status = "running"
-    else:
-        runtime_status = worker.runtime_status or "stopped"
-
+def _daemon_runtime_payload(runtime: _DaemonSessionRuntime) -> dict:
     return {
-        "pid": str(worker.thread.native_id or worker.thread.ident or ""),
+        "pid": runtime.runtime_id,
         "daemon_pid": str(os.getpid()),
-        "pane": worker.pane,
-        "state": worker.state_file,
-        "watch": worker.watch_log,
-        "cwd": worker.cwd,
-        "msg_inline": worker.message,
-        "paused": worker.pause_event.is_set(),
-        "runtime_status": runtime_status,
-        "runtime_detail": worker.runtime_detail,
-        "generation": worker.generation,
-        "worker_label": str(worker.thread.native_id or worker.thread.ident or ""),
+        "pane": runtime.pane,
+        "state": runtime.state_file,
+        "watch": runtime.watch_log,
+        "cwd": runtime.cwd,
+        "msg_inline": runtime.message,
+        "paused": runtime.paused,
+        "runtime_status": "paused" if runtime.paused else (runtime.runtime_status or "running"),
+        "runtime_detail": runtime.runtime_detail,
+        "generation": runtime.generation,
+        "worker_label": runtime.runtime_id,
         "heartbeat_ts": _watch_now_ts(),
     }
 
 
-def _daemon_worker_entry(worker: _DaemonWorker) -> None:
-    watch_log = Path(worker.watch_log)
-    state_file = Path(worker.state_file)
+def _drain_daemon_codex_log_events(tail: _DaemonCodexLogTail) -> list[_LogwatchCodexLogEvent]:
+    events: list[_LogwatchCodexLogEvent] = []
+    if tail.handle is None:
+        if not tail.log_path.exists():
+            return events
+        tail.log_path.parent.mkdir(parents=True, exist_ok=True)
+        tail.handle = tail.log_path.open("r", encoding="utf-8", errors="ignore")
+        tail.handle.seek(0, os.SEEK_END)
+        return events
 
-    def _auto_pause(reason: str, _watch_log: Path, _state_file: Path, state: dict) -> None:
-        now = _watch_now_ts()
-        next_state = dict(state)
-        next_state["paused"] = True
-        next_state["health_detail"] = f"auto-paused: {reason}"
-        next_state["health_ts"] = now
-        _watch_write_state(state_file, next_state)
-        _watch_append_log(watch_log, f"pause: auto-pausing watcher ({reason})")
-        worker.pause_event.set()
-        _write_session_state(
-            worker.thread_id,
-            {
-                "paused": True,
-                "health_detail": f"auto-paused: {reason}",
-                "health_ts": now,
-            },
-        )
+    while True:
+        line = tail.handle.readline()
+        if not line:
+            break
+        interrupt_thread = _parse_codex_log_interrupt(line)
+        if interrupt_thread:
+            events.append(
+                _LogwatchCodexLogEvent(
+                    "interrupt",
+                    interrupt_thread,
+                    detail="Conversation interrupted",
+                )
+            )
+            continue
+        parsed = _parse_codex_log_event(line)
+        if parsed:
+            events.append(_LogwatchCodexLogEvent("completion", *parsed))
 
     try:
-        worker.runtime_status = "running"
-        rc = _watch_session(
-            LogwatchSessionWatchConfig(
-                pane=worker.pane,
-                thread_id=worker.thread_id,
-                tmux_socket=worker.tmux_socket,
-                message=worker.message,
-                cwd=worker.cwd,
-                cooldown_secs=1.0,
-                send_delay_secs=float(SEND_DELAY_SECS),
-                enter_delay_secs=float(ENTER_DELAY_SECS),
-                state_file=worker.state_file,
-                watch_log=worker.watch_log,
-                enable_watchdog=False,
-            ),
-            stop_event=worker.stop_event,
-            pause_event=worker.pause_event,
-            auto_pause_handler=_auto_pause,
-        )
-        if worker.stop_event.is_set():
-            worker.runtime_status = "stopped"
-        elif rc == 0:
-            worker.runtime_status = "stopped"
-        else:
-            worker.runtime_status = "error"
-            worker.runtime_detail = f"worker exited with code {rc}"
-            _watch_append_log(watch_log, worker.runtime_detail)
-    except Exception as exc:
-        worker.runtime_status = "error"
-        worker.runtime_detail = str(exc)
-        _watch_append_log(
-            watch_log,
-            f"error: daemon worker crashed: {exc}\n{traceback.format_exc()}",
-        )
+        if tail.handle.tell() > tail.log_path.stat().st_size:
+            tail.close()
+    except FileNotFoundError:
+        tail.close()
+    return events
 
 
-def _start_daemon_worker(session: SavedSessionRecord) -> _DaemonWorker:
-    stop_event = threading.Event()
-    pause_event = threading.Event()
-    if session.paused:
-        pause_event.set()
+def _daemon_session_runtime(
+    session: SavedSessionRecord,
+    *,
+    codex_log_path: Path,
+) -> _DaemonSessionRuntime:
     state_file = session.state_file or state_file_for_thread(session.thread_id)
     watch_log = watch_log_for_key(key_from_pane(session.pane or session.thread_id))
-    worker = _DaemonWorker(
+    state = _read_session_state(session.thread_id)
+    runtime = _DaemonSessionRuntime(
         thread_id=session.thread_id,
         pane=session.pane,
-        message=session.message,
+        message=_message_text(session.message),
         tmux_socket=session.tmux_socket,
         generation=session.generation,
+        runtime_id=_next_daemon_runtime_id(),
         state_file=state_file,
         watch_log=watch_log,
         cwd=PROJECT_CWD,
-        stop_event=stop_event,
-        pause_event=pause_event,
-        thread=threading.Thread(target=lambda: None),
+        paused=session.paused,
+        runtime_status="paused" if session.paused else "running",
+        runtime_detail=session.health_detail if session.paused else "",
+        last_handled_turn=str(state.get("last_handled_turn", state.get("last_sent_turn", ""))),
+        last_handled_thread=str(
+            state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
+        ),
+        watcher_start=time.time(),
     )
-    thread = threading.Thread(
-        target=_daemon_worker_entry,
-        args=(worker,),
-        name=f"acw:{session.thread_id[:8]}",
-        daemon=True,
+    _write_session_state(
+        session.thread_id,
+        {
+            "thread_id": session.thread_id,
+            "pane": session.pane,
+            "name": session.name,
+            "message": runtime.message,
+            "paused": session.paused,
+            "generation": session.generation,
+            "tmux_socket": session.tmux_socket,
+        },
     )
-    worker.thread = thread
-    thread.start()
-    return worker
+    _watch_append_log(Path(runtime.watch_log), f"watch: pane={runtime.pane} thread_id={runtime.thread_id}")
+    pending = _check_codex_log_tail_for_pending(
+        codex_log_path,
+        runtime.thread_id,
+        runtime.last_handled_turn,
+        runtime.last_handled_thread,
+        Path(runtime.watch_log),
+    )
+    if pending:
+        runtime.pending_startup_event = _LogwatchCodexLogEvent("completion", *pending)
+    return runtime
 
 
-def _stop_daemon_worker(worker: _DaemonWorker) -> None:
-    worker.stop_event.set()
-    worker.pause_event.clear()
+def _daemon_mark_handled(runtime: _DaemonSessionRuntime, turn_id: str, thread_id: str) -> None:
+    runtime.last_handled_turn = turn_id
+    runtime.last_handled_thread = thread_id
+    _write_session_state(
+        runtime.thread_id,
+        {
+            "last_handled_turn": turn_id,
+            "last_handled_thread": thread_id,
+        },
+    )
 
 
-def _reap_daemon_worker(thread_id: str, worker: _DaemonWorker, socket_path: str) -> bool:
-    if worker.thread.is_alive():
-        worker.thread.join(timeout=0.05)
-    if worker.thread.is_alive():
-        _write_runtime_state(thread_id, _daemon_runtime_payload(worker), socket_path)
-        return False
-    _remove_runtime_state(thread_id, socket_path)
-    return True
+def _daemon_skip_interrupted_turn(
+    runtime: _DaemonSessionRuntime,
+    turn_id: str,
+    thread_id: str,
+    reason: str,
+) -> None:
+    runtime.interrupt_skip_armed = False
+    _daemon_mark_handled(runtime, turn_id, thread_id)
+    _watch_append_log(
+        Path(runtime.watch_log),
+        f"skip: interrupted turn={turn_id} thread={thread_id} reason={reason}",
+    )
+
+
+def _daemon_pause_session(runtime: _DaemonSessionRuntime, reason: str) -> None:
+    now = _watch_now_ts()
+    runtime.paused = True
+    runtime.runtime_status = "paused"
+    runtime.runtime_detail = reason
+    runtime.health_detail = f"auto-paused: {reason}"
+    _write_session_state(
+        runtime.thread_id,
+        {
+            "paused": True,
+            "health_detail": runtime.health_detail,
+            "health_ts": now,
+        },
+    )
+    _watch_append_log(Path(runtime.watch_log), f"pause: auto-pausing watcher ({reason})")
+
+
+def _daemon_process_session_events(
+    runtime: _DaemonSessionRuntime,
+    events: list[_LogwatchCodexLogEvent],
+) -> None:
+    if runtime.paused:
+        runtime.runtime_status = "paused"
+        return
+
+    runtime.runtime_status = "running"
+    runtime.runtime_detail = ""
+    watch_log = Path(runtime.watch_log)
+
+    for event in events:
+        if runtime.paused:
+            break
+        if event.thread_id != runtime.thread_id:
+            continue
+
+        if event.kind == "interrupt":
+            if not runtime.interrupt_skip_armed:
+                runtime.interrupt_skip_armed = True
+                _watch_append_log(watch_log, f"skip: armed after interrupt thread={event.thread_id}")
+            continue
+
+        if event.detail != "false":
+            continue
+        if event.turn_id == runtime.last_handled_turn and event.thread_id == runtime.last_handled_thread:
+            continue
+
+        if runtime.interrupt_skip_armed:
+            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, "Conversation interrupted")
+            continue
+
+        pane_interrupt = _check_pane_for_interrupt(runtime.pane)
+        if pane_interrupt:
+            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, pane_interrupt)
+            continue
+
+        pane_error = _check_pane_for_errors(runtime.pane)
+        if pane_error:
+            _daemon_pause_session(runtime, pane_error)
+            continue
+
+        if time.time() - runtime.last_send_time < 1.0:
+            _watch_append_log(watch_log, f"skip: cooldown turn={event.turn_id}")
+            continue
+
+        if float(SEND_DELAY_SECS) > 0.0:
+            time.sleep(float(SEND_DELAY_SECS))
+
+        pane_interrupt = _check_pane_for_interrupt(runtime.pane)
+        if pane_interrupt:
+            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, pane_interrupt)
+            continue
+
+        pane_error = _check_pane_for_errors(runtime.pane)
+        if pane_error:
+            _daemon_pause_session(runtime, pane_error)
+            continue
+
+        send_result = _watch_tmux_send(
+            runtime.pane,
+            runtime.message,
+            max(0.0, float(ENTER_DELAY_SECS)),
+            interrupt_checker=lambda: _check_pane_for_interrupt(runtime.pane),
+        )
+        if send_result.status == "ok":
+            runtime.last_send_time = time.time()
+            _daemon_mark_handled(runtime, event.turn_id, event.thread_id)
+            now = _watch_now_ts()
+            _write_session_state(
+                runtime.thread_id,
+                {
+                    "thread_id": runtime.thread_id,
+                    "last_continue_at": now,
+                    "health": runtime.health,
+                    "health_detail": runtime.health_detail,
+                },
+            )
+            _watch_append_log(watch_log, f"continue: sent turn={event.turn_id} thread={event.thread_id}")
+            continue
+        if send_result.status == "interrupted":
+            _daemon_skip_interrupted_turn(runtime, event.turn_id, event.thread_id, send_result.detail)
+            continue
+        if send_result.detail:
+            _watch_append_log(
+                watch_log,
+                (
+                    "error: tmux send failed "
+                    f"turn={event.turn_id} thread={event.thread_id} detail={send_result.detail}"
+                ),
+            )
+        else:
+            _watch_append_log(
+                watch_log,
+                f"error: tmux send failed turn={event.turn_id} thread={event.thread_id}",
+            )
+
+
+def _daemon_refresh_session_health(
+    runtime: _DaemonSessionRuntime,
+    *,
+    codex_log_exists: bool,
+    now: float,
+) -> None:
+    new_health, new_detail = _compute_watch_health(
+        watched_thread=runtime.thread_id,
+        watcher_start=runtime.watcher_start,
+        now=now,
+        codex_log_exists=codex_log_exists,
+    )
+    if new_health != runtime.health or new_detail != runtime.health_detail:
+        if new_detail:
+            _watch_append_log(Path(runtime.watch_log), f"health: {new_health} - {new_detail}")
+        else:
+            _watch_append_log(Path(runtime.watch_log), f"health: {new_health}")
+    runtime.health = new_health
+    runtime.health_detail = new_detail
+    _write_session_state(
+        runtime.thread_id,
+        {
+            "health": runtime.health,
+            "health_detail": runtime.health_detail,
+            "health_ts": _watch_now_ts(),
+        },
+    )
+
+
+def _daemon_runtime_events(
+    runtime: _DaemonSessionRuntime,
+    events_by_thread: dict[str, list[_LogwatchCodexLogEvent]],
+) -> list[_LogwatchCodexLogEvent]:
+    if runtime.paused:
+        return []
+    combined: list[_LogwatchCodexLogEvent] = []
+    pending = runtime.pending_startup_event
+    if pending is not None:
+        combined.append(pending)
+        runtime.pending_startup_event = None
+    for event in events_by_thread.get(runtime.thread_id, ()):
+        if (
+            pending is not None
+            and event.kind == "completion"
+            and event.thread_id == pending.thread_id
+            and event.turn_id == pending.turn_id
+        ):
+            continue
+        combined.append(event)
+    return combined
 
 
 def _daemon_main(argv: list[str]) -> None:
@@ -1390,50 +1453,70 @@ def _daemon_main(argv: list[str]) -> None:
     pid_file = Path(daemon_pid_file_for_scope(scope))
     pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
     idle_since = 0.0
-    workers: dict[str, _DaemonWorker] = {}
+    log_tail = _DaemonCodexLogTail(log_path=DAEMON_CODEX_LOG_PATH)
+    runtimes: dict[str, _DaemonSessionRuntime] = {}
 
     try:
         while True:
+            drained_events = _drain_daemon_codex_log_events(log_tail)
+            events_by_thread: dict[str, list[_LogwatchCodexLogEvent]] = defaultdict(list)
+            for event in drained_events:
+                events_by_thread[event.thread_id.lower()].append(event)
+
             desired_sessions = {
                 session.thread_id: session
                 for session in _load_scoped_session_records(scope)
                 if session.pane and is_thread_id(session.thread_id)
             }
 
-            for thread_id, worker in list(workers.items()):
-                desired = desired_sessions.get(thread_id)
-                if desired is None:
-                    _stop_daemon_worker(worker)
-                    if _reap_daemon_worker(thread_id, worker, scope):
-                        del workers[thread_id]
-                    continue
-
-                if desired.paused:
-                    worker.pause_event.set()
-                else:
-                    worker.pause_event.clear()
-
-                desired_sig = _worker_signature(desired)
-                current_sig = (worker.pane, worker.message, worker.generation)
-                if desired_sig != current_sig:
-                    _stop_daemon_worker(worker)
-                    if _reap_daemon_worker(thread_id, worker, scope):
-                        workers[thread_id] = _start_daemon_worker(desired)
-                    continue
-
-                if worker.thread.is_alive():
-                    _write_runtime_state(thread_id, _daemon_runtime_payload(worker), scope)
-                    continue
-
-                _write_runtime_state(thread_id, _daemon_runtime_payload(worker), scope)
+            for thread_id in sorted(set(runtimes) - set(desired_sessions)):
+                _remove_runtime_state(thread_id, scope)
+                del runtimes[thread_id]
 
             for thread_id, desired in desired_sessions.items():
-                if thread_id in workers:
-                    continue
-                workers[thread_id] = _start_daemon_worker(desired)
-                _write_runtime_state(thread_id, _daemon_runtime_payload(workers[thread_id]), scope)
+                current = runtimes.get(thread_id)
+                if current is None or _session_signature(desired) != (
+                    current.pane,
+                    current.message,
+                    current.generation,
+                ):
+                    runtimes[thread_id] = _daemon_session_runtime(
+                        desired,
+                        codex_log_path=DAEMON_CODEX_LOG_PATH,
+                    )
+                    current = runtimes[thread_id]
+                current.paused = desired.paused
+                current.pane = desired.pane
+                current.message = _message_text(desired.message)
+                current.tmux_socket = desired.tmux_socket
+                current.generation = desired.generation
+                if current.paused:
+                    current.runtime_status = "paused"
+                elif current.runtime_status != "error":
+                    current.runtime_status = "running"
+                    current.runtime_detail = ""
 
-            if not desired_sessions and not workers:
+            now = time.time()
+            for thread_id, runtime in runtimes.items():
+                try:
+                    _daemon_process_session_events(runtime, _daemon_runtime_events(runtime, events_by_thread))
+                    if not runtime.paused and now - runtime.last_health_check > 30.0:
+                        runtime.last_health_check = now
+                        _daemon_refresh_session_health(
+                            runtime,
+                            codex_log_exists=DAEMON_CODEX_LOG_PATH.exists(),
+                            now=now,
+                        )
+                except Exception as exc:
+                    runtime.runtime_status = "error"
+                    runtime.runtime_detail = str(exc)
+                    _watch_append_log(
+                        Path(runtime.watch_log),
+                        f"error: daemon session crashed: {exc}\n{traceback.format_exc()}",
+                    )
+                _write_runtime_state(thread_id, _daemon_runtime_payload(runtime), scope)
+
+            if not desired_sessions and not runtimes:
                 if idle_since == 0.0:
                     idle_since = time.time()
                 elif time.time() - idle_since >= DAEMON_IDLE_EXIT_SECS:
@@ -1443,15 +1526,10 @@ def _daemon_main(argv: list[str]) -> None:
 
             time.sleep(DAEMON_POLL_INTERVAL_SECS)
     finally:
-        for thread_id, worker in list(workers.items()):
-            _stop_daemon_worker(worker)
-            _reap_daemon_worker(thread_id, worker, scope)
+        log_tail.close()
+        for thread_id in list(runtimes):
+            _remove_runtime_state(thread_id, scope)
         pid_file.unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Logwatch command builder
-# ---------------------------------------------------------------------------
 
 
 def _edit_message_interactive(initial: str = "") -> str | None:
@@ -1477,30 +1555,6 @@ def _edit_message_interactive(initial: str = "") -> str | None:
         return new_value
     finally:
         Path(tmp).unlink(missing_ok=True)
-
-
-def _logwatch_cmd(pane: str, thread_id: str, message_args: list[str], key: str) -> list[str]:
-    tmux_socket = _preferred_tmux_socket()
-    return [
-        "python3",
-        str(SCRIPT),
-        "--cwd", PROJECT_CWD,
-        "--pane", pane,
-        "--thread-id", thread_id,
-        *(["--tmux-socket", tmux_socket] if tmux_socket else []),
-        *message_args,
-        "--cooldown-secs", "1.0",
-        "--send-delay-secs", SEND_DELAY_SECS,
-        "--enter-delay-secs", ENTER_DELAY_SECS,
-        "--state-file", state_file_for_thread(thread_id),
-        "--watch-log", watch_log_for_key(key),
-    ]
-
-
-def _message_args(value: str) -> list[str]:
-    return ["--message", value]
-
-
 def _validate_existing_pane_watcher(
     pane: str,
     requested_thread: str = "",
@@ -1590,14 +1644,10 @@ def cmd_start(argv: list[str]) -> None:
             print(validation[1], file=sys.stderr)
             sys.exit(1)
         existing = existing_rows[0]
-        if existing.get("runtime_status", ""):
-            print(
-                f"already running: pane={pane} thread_id={existing.get('thread', '')}",
-            )
-            return
-        _print_progress(f"start: migrating legacy watcher for pane={pane}")
-        for row in existing_rows:
-            _stop_legacy_watcher_pid(row.get("pid", ""))
+        print(
+            f"already running: pane={pane} thread_id={existing.get('thread', '')}",
+        )
+        return
 
     if thread_arg and thread_arg != "auto":
         _print_progress(f"start: using explicit thread_id for pane={pane}")
@@ -1669,21 +1719,6 @@ def cmd_start(argv: list[str]) -> None:
     _print_progress(f"started: pane={pane} thread_id={thread_id} daemon_pid={daemon_pid}")
 
 
-def stop_pid_file(pid_file: str) -> None:
-    pid_str = _read_pid_file(pid_file)
-    if pid_str is None:
-        return
-    pid = int(pid_str)
-    try:
-        if _is_pid_stopped(pid):
-            os.kill(pid, signal.SIGCONT)
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
-    Path(pid_file).unlink(missing_ok=True)
-    print(f"stopped: pid={pid_str}")
-
-
 def stop_pane_watchers(pane: str) -> None:
     model = _build_runtime_model()
     session_threads: set[str] = set()
@@ -1702,32 +1737,15 @@ def stop_pane_watchers(pane: str) -> None:
         if row.get("runtime_status", "")
         and is_thread_id(row.get("thread", ""))
     }
-    legacy_rows = [row for row in rows if not row.get("runtime_status", "")]
 
-    if not rows and not session_threads:
-        removed_any = False
-        for thread_id in sorted(session_threads):
-            if _remove_session_state(thread_id):
-                removed_any = True
-                print(f"forgot session: pane={pane} thread_id={thread_id}")
-        if not removed_any:
-            print(f"not running: pane={pane}")
+    if not managed_threads and not session_threads:
+        print(f"not running: pane={pane}")
         return
 
     for thread_id in sorted(managed_threads | session_threads):
-        if _remove_session_state(thread_id):
-            print(f"stopped: pane={pane} thread_id={thread_id}")
-            _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
-
-    for row in legacy_rows:
-        _stop_legacy_watcher_pid(row.get("pid", ""))
-        print(f"stopped: pane={pane} pid={row.get('pid', '')}")
-
-    for thread_id in sorted(session_threads):
-        if thread_id in managed_threads:
-            continue
-        if _remove_session_state(thread_id):
-            print(f"forgot session: pane={pane} thread_id={thread_id}")
+        _remove_session_state(thread_id)
+        _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
+        print(f"stopped: pane={pane} thread_id={thread_id}")
 
 
 def _stop_pane_watchers_keep_session(pane: str) -> None:
@@ -1738,21 +1756,19 @@ def _stop_pane_watchers_keep_session(pane: str) -> None:
 
     for row in rows:
         thread_id = row.get("thread", "").lower()
-        if row.get("runtime_status", "") and is_thread_id(thread_id):
-            existing = _read_session_state(thread_id)
-            _write_session_state(
-                thread_id,
-                {
-                    "pane": "",
-                    "paused": True,
-                    "generation": _current_session_generation(existing) + 1,
-                },
-            )
-            _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
-            print(f"stopped: pane={pane} thread_id={thread_id}")
+        if not row.get("runtime_status", "") or not is_thread_id(thread_id):
             continue
-        _stop_legacy_watcher_pid(row.get("pid", ""))
-        print(f"stopped: pane={pane} pid={row.get('pid', '')}")
+        existing = _read_session_state(thread_id)
+        _write_session_state(
+            thread_id,
+            {
+                "pane": "",
+                "paused": True,
+                "generation": _current_session_generation(existing) + 1,
+            },
+        )
+        _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
+        print(f"stopped: pane={pane} thread_id={thread_id}")
 
 
 def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
@@ -1769,26 +1785,15 @@ def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
 
 
 def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
-    """Stop managed watcher sessions or legacy watcher processes."""
+    """Stop managed watcher sessions."""
     forgotten_threads: set[str] = set()
     for r in rows:
         thread_id = r.get("thread", "").lower()
-        if r.get("runtime_status", "") and is_thread_id(thread_id):
-            if thread_id not in forgotten_threads:
-                forgotten_threads.add(thread_id)
-                if _remove_session_state(thread_id):
-                    print(f"stopped: pane={r['pane']} thread_id={thread_id}")
-                    _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
-            continue
-
-        pid_str = r["pid"]
-        _stop_legacy_watcher_pid(pid_str)
-        print(f"stopped: pane={r['pane']} pid={pid_str}")
-        if thread_id in forgotten_threads:
-            continue
-        forgotten_threads.add(thread_id)
-        if _remove_session_state(thread_id):
-            print(f"forgot session: pane={r['pane']} thread_id={thread_id}")
+        if r.get("runtime_status", "") and is_thread_id(thread_id) and thread_id not in forgotten_threads:
+            forgotten_threads.add(thread_id)
+            _remove_session_state(thread_id)
+            print(f"stopped: pane={r['pane']} thread_id={thread_id}")
+            _wait_for_runtime_row(thread_id, lambda item: not item, timeout_secs=2.0)
 
 
 def cmd_stop(argv: list[str]) -> None:
@@ -1800,9 +1805,9 @@ def cmd_stop(argv: list[str]) -> None:
             stop_pane_watchers(target)
             return
 
-        # Match running watchers by state file window_name first — this
-        # finds the actual watcher process even if the tmux window has
-        # been reassigned to a different pane.
+        # Match managed runtime rows by saved session name first — this
+        # still finds the intended session even if the tmux window name
+        # was reused elsewhere.
         matches = _find_watchers_by_window_name(target)
         if matches:
             _stop_watcher_rows(matches)
@@ -1854,37 +1859,10 @@ def cmd_pause(argv: list[str]) -> None:
             return
         for row in rows:
             thread_id = row.get("thread", "").lower()
-            if row.get("runtime_status", "") and is_thread_id(thread_id):
-                if row.get("paused", "") == "1":
-                    print(f"already paused: pane={pane} thread_id={thread_id}")
-                    continue
-                _set_session_paused(thread_id, True)
-                _wait_for_runtime_row(
-                    thread_id,
-                    lambda item: bool(item) and item.get("paused", "") == "1",
-                    timeout_secs=2.0,
-                )
-                print(f"paused: pane={pane} thread_id={thread_id}")
+            if not row.get("runtime_status", "") or not is_thread_id(thread_id):
                 continue
-
-            pid_str = row.get("pid", "")
-            if pid_str.isdigit() and _is_pid_stopped(int(pid_str)):
-                print(f"already paused: pane={pane} pid={pid_str}")
-                continue
-            try:
-                os.kill(int(pid_str), signal.SIGSTOP)
-                print(f"paused: pane={pane} pid={pid_str}")
-            except OSError as e:
-                print(f"error: could not pause pid={pid_str}: {e}", file=sys.stderr)
-        return
-
-    had_any = False
-    for r in watcher_rows():
-        had_any = True
-        thread_id = r.get("thread", "").lower()
-        if r.get("runtime_status", "") and is_thread_id(thread_id):
-            if r.get("paused", "") == "1":
-                print(f"already paused: pane={r['pane']} thread_id={thread_id}")
+            if row.get("paused", "") == "1":
+                print(f"already paused: pane={pane} thread_id={thread_id}")
                 continue
             _set_session_paused(thread_id, True)
             _wait_for_runtime_row(
@@ -1892,21 +1870,25 @@ def cmd_pause(argv: list[str]) -> None:
                 lambda item: bool(item) and item.get("paused", "") == "1",
                 timeout_secs=2.0,
             )
-            print(f"paused: pane={r['pane']} thread_id={thread_id}")
-            continue
+            print(f"paused: pane={pane} thread_id={thread_id}")
+        return
 
-        pid_str = r["pid"]
-        if not pid_str.isdigit():
+    had_any = False
+    for r in watcher_rows():
+        had_any = True
+        thread_id = r.get("thread", "").lower()
+        if not r.get("runtime_status", "") or not is_thread_id(thread_id):
             continue
-        pid = int(pid_str)
-        if _is_pid_stopped(pid):
-            print(f"already paused: pane={r['pane']} pid={pid_str}")
+        if r.get("paused", "") == "1":
+            print(f"already paused: pane={r['pane']} thread_id={thread_id}")
             continue
-        try:
-            os.kill(pid, signal.SIGSTOP)
-            print(f"paused: pane={r['pane']} pid={pid_str}")
-        except OSError as e:
-            print(f"error: could not pause pid={pid_str}: {e}", file=sys.stderr)
+        _set_session_paused(thread_id, True)
+        _wait_for_runtime_row(
+            thread_id,
+            lambda item: bool(item) and item.get("paused", "") == "1",
+            timeout_secs=2.0,
+        )
+        print(f"paused: pane={r['pane']} thread_id={thread_id}")
 
     if not had_any:
         print("not running")
@@ -1926,52 +1908,25 @@ def cmd_resume(argv: list[str]) -> None:
                 continue
             seen_panes.add(pane)
             rows = watcher_rows(pane)
-            managed_rows = [row for row in rows if row.get("runtime_status", "")]
-            if managed_rows:
-                rows = managed_rows
-            else:
-                legacy_pids = watcher_pids_for_pane(pane)
-                if not legacy_pids:
-                    print(f"not running: pane={pane}")
-                    continue
-                rows = [{"pane": pane, "pid": pid_str} for pid_str in legacy_pids]
             if not rows:
+                print(f"not running: pane={pane}")
                 continue
             for row in rows:
                 thread_id = row.get("thread", "").lower()
-                if row.get("runtime_status", "") and is_thread_id(thread_id):
-                    if row.get("paused", "") != "1":
-                        print(f"not paused: pane={pane} thread_id={thread_id}")
-                        continue
-                    print(f"resuming paused watcher via restart: pane={pane} thread_id={thread_id}")
-                    _restart_one(pane_arg, pane, [])
-                    break
-
-                pid_str = row.get("pid", "")
-                if not pid_str.isdigit():
+                if not row.get("runtime_status", "") or not is_thread_id(thread_id):
                     continue
-                pid = int(pid_str)
-                if not _is_pid_stopped(pid):
-                    print(f"not paused: pane={pane} pid={pid_str}")
-                else:
-                    print(f"resuming paused watcher via restart: pane={pane} pid={pid_str}")
-                    _restart_one(pane_arg, pane, [])
-                    break
+                if row.get("paused", "") != "1":
+                    print(f"not paused: pane={pane} thread_id={thread_id}")
+                    continue
+                print(f"resuming paused watcher via restart: pane={pane} thread_id={thread_id}")
+                _restart_one(pane_arg, pane, [])
+                break
         return
 
     paused_panes: list[str] = []
     for r in watcher_rows():
         thread_id = r.get("thread", "").lower()
-        if r.get("runtime_status", "") and is_thread_id(thread_id):
-            if r.get("paused", "") == "1" and r["pane"]:
-                paused_panes.append(r["pane"])
-            continue
-
-        pid_str = r["pid"]
-        if not pid_str.isdigit():
-            continue
-        pid = int(pid_str)
-        if _is_pid_stopped(pid) and r["pane"]:
+        if r.get("runtime_status", "") and is_thread_id(thread_id) and r.get("paused", "") == "1" and r["pane"]:
             paused_panes.append(r["pane"])
 
     if not paused_panes:
@@ -2239,8 +2194,6 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
 
     existing_session = _read_session_state(resolved_thread) if is_thread_id(resolved_thread) else {}
     next_generation = _current_session_generation(existing_session) + 1
-    existing_rows = watcher_rows(pane)
-    legacy_rows = [row for row in existing_rows if not row.get("runtime_status", "")]
 
     if restart_codex and is_thread_id(resolved_thread):
         _write_session_state(
@@ -2259,11 +2212,6 @@ def _restart_one(target: str, pane: str, rest: list[str]) -> None:
     if restart_codex:
         _print_progress(f"restarting codex: pane={pane} thread_id={resolved_thread}")
         _restart_codex_in_pane(pane, resolved_thread)
-
-    if legacy_rows:
-        _print_progress(f"restart: stopping legacy watcher for pane={pane}")
-        for row in legacy_rows:
-            _stop_legacy_watcher_pid(row.get("pid", ""))
 
     _print_progress(f"restart: starting watcher for pane={pane}")
     window_name = (run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or "").strip()
@@ -2452,7 +2400,7 @@ def _apply_repair_step(step: RepairStep) -> None:
         return
 
     if step.kind == "stop_watchers_keep_session":
-        _print_progress(f"repair: stopping watcher processes on pane={step.target} while keeping saved session state")
+        _print_progress(f"repair: stopping watcher entries on pane={step.target} while keeping saved session state")
         _stop_pane_watchers_keep_session(step.target)
         return
 
@@ -3060,7 +3008,7 @@ def _strict_thread_for_pane(model: RuntimeModel, pane: str) -> tuple[str, str]:
 
     if len(watchers) > 1:
         pids = ", ".join(sorted(w.pid or "?" for w in watchers))
-        return "", f"pane {pane} has {len(watchers)} watcher processes ({pids})"
+        return "", f"pane {pane} has {len(watchers)} watcher entries ({pids})"
 
     if not pane_record:
         return "", f"tmux pane {pane} is missing"
@@ -3076,7 +3024,7 @@ def _strict_thread_for_pane(model: RuntimeModel, pane: str) -> tuple[str, str]:
     if watchers:
         if not is_thread_id(watchers[0].thread_id):
             pid = watchers[0].pid or "?"
-            return "", f"pane {pane} watcher pid={pid} has an invalid thread id"
+            return "", f"pane {pane} watcher entry pid={pid} has an invalid thread id"
         watcher_thread = watchers[0].thread_id.lower()
 
     if watcher_thread and watcher_thread != live_thread:
@@ -3335,7 +3283,7 @@ def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
     pid = r.get("pid", "")
     if pid and pid.isdigit() and _is_pid_stopped(int(pid)):
         return "paused"
-    # No running watcher process.
+    # No live watcher runtime.
     if not pid:
         return "dead"
     h = sj.get("health", "")
@@ -3566,7 +3514,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         if len(rows) <= 1:
             continue
         pids = ", ".join(sorted(row.get("pid", "?") for row in rows))
-        msg = f"Invariant error: pane {pane} has {len(rows)} watcher processes ({pids}). Clean up: acw stop {pane}"
+        msg = f"Invariant error: pane {pane} has {len(rows)} watcher entries ({pids}). Clean up: acw stop {pane}"
         if msg not in seen:
             seen.add(msg)
             messages.append(msg)
@@ -3624,7 +3572,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         pid = row.get("pid", "?")
         if "no saved session" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher pid={pid} has no saved session. "
+                f"Invariant error: pane {pane} watcher entry pid={pid} has no saved session. "
                 f"Clean up: acw stop {pane}; then start it again."
             )
             if msg not in seen:
@@ -3632,7 +3580,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if "no live Codex agent detected in pane" in anomalies:
             msg = (
-                f"Invariant error: pane {pane} watcher pid={pid} has no live Codex agent in the pane. "
+                f"Invariant error: pane {pane} watcher entry pid={pid} has no live Codex agent in the pane. "
                 f"Clean up: acw stop {pane}; restart Codex there, then start once."
             )
             if msg not in seen:
@@ -3640,7 +3588,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("could not determine thread_id") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher pid={pid} has a live Codex process but its thread id "
+                f"Invariant error: pane {pane} watcher entry pid={pid} has a live Codex process but its thread id "
                 f"could not be detected. Clean up: acw stop {pane}; restart Codex there, then start once."
             )
             if msg not in seen:
@@ -3648,7 +3596,7 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
                 messages.append(msg)
         if any(detail.startswith("pane agent thread is ") for detail in anomalies):
             msg = (
-                f"Invariant error: pane {pane} watcher pid={pid} is bound to the wrong thread. "
+                f"Invariant error: pane {pane} watcher entry pid={pid} is bound to the wrong thread. "
                 f"Clean up: acw stop {pane}; then start it again against the live pane thread."
             )
             if msg not in seen:
@@ -4076,7 +4024,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                 RepairStep(
                     kind="stop_watchers_keep_session",
                     target=pane,
-                    summary=f"pane {pane} is missing from tmux; stop its watcher processes but keep any saved session",
+                    summary=f"pane {pane} is missing from tmux; stop its watcher entries but keep any saved session",
                     auto_apply=True,
                 )
             ]
@@ -4088,7 +4036,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                 RepairStep(
                     kind="stop_watchers_keep_session",
                     target=pane,
-                    summary=f"pane {pane} has no live Codex agent; stop its watcher processes but keep any saved session",
+                    summary=f"pane {pane} has no live Codex agent; stop its watcher entries but keep any saved session",
                     auto_apply=True,
                 )
             ]
@@ -4204,7 +4152,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
                     kind="manual",
                     target=pane,
                     summary=(
-                        f"pane {pane} has duplicate watcher processes but no saved continue message for thread "
+                        f"pane {pane} has duplicate watcher entries but no saved continue message for thread "
                         f"{_short_thread_id(live_thread)}; repair it manually"
                     ),
                     auto_apply=False,
@@ -4215,7 +4163,7 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
             RepairStep(
                 kind="restart_watcher",
                 target=pane,
-                summary=f"replace duplicate watcher processes on pane {pane} with one watcher for thread {_short_thread_id(live_thread)}",
+                summary=f"replace duplicate watcher entries on pane {pane} with one watcher for thread {_short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
@@ -4575,11 +4523,6 @@ def cmd_cleanup(argv: list[str]) -> None:
 
 def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
     """Remove files for watchers that are no longer running."""
-    # PID files for dead processes.
-    for pf in glob.glob(os.path.join(STATE_DIR, "auto_continue_logwatch.*.pid")):
-        if not is_running_pid_file(pf):
-            Path(pf).unlink(missing_ok=True)
-
     daemon_pid_file = daemon_pid_file_for_scope()
     if daemon_pid_file and os.path.exists(daemon_pid_file) and not _daemon_pid_alive(daemon_pid_file):
         Path(daemon_pid_file).unlink(missing_ok=True)
@@ -4591,33 +4534,29 @@ def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
         except (OSError, json.JSONDecodeError):
             Path(runtime_path).unlink(missing_ok=True)
             continue
-        daemon_pid = str(data.get("pid", "")).strip()
+        daemon_pid = str(data.get("daemon_pid", "")).strip() or str(data.get("pid", "")).strip()
         if daemon_pid and daemon_pid.isdigit():
             try:
                 os.kill(int(daemon_pid), 0)
             except OSError:
                 Path(runtime_path).unlink(missing_ok=True)
 
-    # Build set of live watcher keys/threads (single ps scan).
+    # Build set of live watcher keys for watch logs.
     live_keys: set[str] = set()
-    live_threads: set[str] = set()
+    live_runtime_threads: set[str] = set()
     for r in watcher_rows():
         k = key_from_pane(r["pane"])
         if k:
             live_keys.add(k)
         tid = r.get("thread", "")
-        if tid:
-            live_threads.add(tid.lower())
+        if is_thread_id(tid):
+            live_runtime_threads.add(tid.lower())
 
-    # Log files for dead watchers.
+    # Watch logs for dead sessions.
     keep_logs: set[str] = set()
     for k in live_keys:
         keep_logs.add(watch_log_for_key(k))
-        keep_logs.add(run_log_for_key(k))
-    for pat in (
-        os.path.join(STATE_DIR, "auto_continue_logwatch*.log"),
-        os.path.join(STATE_DIR, "auto_continue_logwatch*.runner.log"),
-    ):
+    for pat in (os.path.join(STATE_DIR, "auto_continue_logwatch*.log"),):
         for lf in glob.glob(pat):
             if lf not in keep_logs:
                 Path(lf).unlink(missing_ok=True)
@@ -4643,7 +4582,7 @@ def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
             continue
         if _tmux_scope_key(str(data.get("tmux_socket", "")).strip()) != scope:
             continue
-        if tid not in live_threads and tid not in live_thread_panes:
+        if tid not in live_runtime_threads and tid not in live_thread_panes:
             Path(sf).unlink(missing_ok=True)
 
 

@@ -11,7 +11,8 @@ It is designed for long-running Codex sessions where you want a stable
 recover from tmux problems without losing control of the pane.
 
 Internally, `acw` now uses one shared daemon per tmux socket plus thread-keyed
-managed session state, instead of one manager-owned watcher process per pane.
+managed session state, and that daemon tails `codex-tui.log` once for the
+whole tmux socket instead of running one log reader per pane.
 
 ![acw status dashboard](docs/assets/acw-status-screenshot.svg)
 
@@ -102,16 +103,16 @@ acw start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
 
 ```text
 acw                  Show status
-acw status --details Show full watcher details
-acw start <target>   Start a watcher
-acw stop [target]    Stop one watcher or all watchers, and forget saved session state
-acw pause [target]   Pause one watcher or all watchers
-acw resume [target]  Resume one or more paused watchers, or all paused watchers
-acw restart [target] Restart one watcher or all watchers
+acw status --details Show full managed-session details
+acw start <target>   Start managing a pane
+acw stop [target]    Stop one managed session or all managed sessions, and forget saved session state
+acw pause [target]   Pause one managed session or all managed sessions
+acw resume [target]  Resume one or more paused managed sessions, or all paused managed sessions
+acw restart [target] Restart one managed session or all managed sessions
 acw edit <target>    Edit the stored continue prompt, then restart
 acw repair [target]  Inspect or apply safe live-state repairs
 acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
-acw cleanup          Remove dead saved sessions and stale watcher files
+acw cleanup          Remove dead saved sessions and stale daemon/runtime files
 ```
 
 For all-watcher operations, use the no-target forms:
@@ -122,7 +123,7 @@ acw resume
 acw restart
 ```
 
-`resume` restarts paused managed workers from the current pane/thread state
+`resume` restarts paused managed sessions from the current pane/thread state
 instead of thawing an old reader in place. That avoids replaying buffered
 Codex log history after a long pause.
 
@@ -154,7 +155,7 @@ without touching anything. Use `acw repair <target>` for one managed pane, or
 `acw repair --all` to apply the safe repairs across all managed panes.
 
 `cleanup` is intentionally separate from `repair`: it only removes dead saved
-session files and stale daemon/runtime or legacy watcher artifacts. It does not
+session files and stale daemon/runtime artifacts. It does not
 try to fix live pane/session/thread mismatches.
 
 ## Continue Message
@@ -177,13 +178,13 @@ acw edit tests
 `acw status` is the main control panel. It shows:
 
 - the live tmux window and pane
-- whether the managed worker is `running`, `warn`, `paused`, `error`, or `dead`
+- whether the managed session runtime is `running`, `warn`, `paused`, `error`, or `dead`
 - when the Codex thread started
 - when `acw` last sent a continue prompt
 - recent visible agent output from the pane
 - the stored continue message
 
-It also flags invariant errors directly when the pane, managed worker,
+It also flags invariant errors directly when the pane, managed session runtime,
 Codex thread, and saved session state stop matching 1:1. `acw` no longer
 silently merges those mismatches into a single “best guess” row.
 
@@ -194,7 +195,7 @@ acw status --details
 ```
 
 to see `HEALTH_DETAIL`, state file paths, watch logs, and the last recorded
-event for each watcher.
+event for each managed session.
 
 When the summary table shows a degraded watcher, `acw` prints a follow-up
 recommendation such as:
@@ -225,7 +226,7 @@ After fixing the problem in the pane, resume with:
 acw resume <target>
 ```
 
-If the managed worker disappears but the live Codex pane is still present,
+If the managed session runtime disappears but the live Codex pane is still present,
 `acw status` reports that as an invariant error instead of pretending the
 session is merely dead.
 
@@ -250,7 +251,7 @@ It checks:
 - whether the target pane resolves
 - whether a Codex thread is discoverable
 - what proved that thread identity
-- whether a managed worker is running, paused, degraded, or dead
+- whether a managed session runtime is running, paused, degraded, or dead
 - whether the pane, worker, Codex thread, and saved session identity still
   match cleanly
 
@@ -268,7 +269,7 @@ and it fails instead of guessing when identity is ambiguous.
 
 `acw status` says `dead`
 
-- The managed worker is gone and there is no live pane claiming that session.
+- The managed session runtime is gone and there is no live pane claiming that session.
 - Run `acw restart <target>` or `acw start <target>`.
 
 `acw status` says `warn`

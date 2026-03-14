@@ -2,6 +2,10 @@
 
 ## 2026-03-14
 
+- Change: removed the last manager-side legacy watcher compatibility layer. `watchd` no longer scans `ps` for old per-pane `auto_continue_logwatch.py` processes, no longer mixes legacy rows into `watcher_rows()`, and no longer carries signal-based stop/pause/resume branches for manager commands.
+- Change: simplified the daemon internals from one thread per managed session plus one `codex-tui.log` reader per thread to one shared daemon event loop. The daemon now tails `codex-tui.log` once per tmux socket, routes completion/interrupt events by `thread_id`, and advances per-session runtime state objects in memory.
+- Change: narrowed cleanup to the daemon-era artifacts only. `acw cleanup` now prunes dead `acw_runtime.*.json`, dead `acw_session.*.json`, dead daemon pid files, and stale per-session watch logs without referring to removed legacy pid/runner-log files.
+- Change: measured the simplified read path directly. On this checkout, `_build_runtime_snapshot()` benchmarks at about 85ms best-of-3 for 5 loops after the daemon simplification.
 - Change: rewrote the manager runtime from one watcher process per pane to one shared daemon per tmux socket. `acw start`/`stop`/`pause`/`resume`/`restart` now mutate thread-keyed session state, ensure the daemon is running, and wait for per-thread runtime rows instead of spawning or discovering per-pane manager-owned processes.
 - Change: extracted the logwatch event loop into `watch_session(...)` so both the direct `auto_continue_logwatch.py` CLI path and daemon-managed workers share the same Codex completion, interrupt, pane-error, and tmux-send behavior.
 - Change: split manager state into desired and observed files. Saved `acw_session.<thread>.json` files now carry desired pane/message/pause/generation state, while `acw_runtime.<scope>.<thread>.json` carries daemon-owned runtime state for one live managed worker.

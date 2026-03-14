@@ -463,20 +463,19 @@ class WatchdUnitTests(unittest.TestCase):
         err = io.StringIO()
         with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
             with patch.object(acw, "ensure_tmux_window_rename_hook"):
-                with patch.object(acw, "is_running_pid_file", return_value=False):
-                    with patch.object(acw, "watcher_pids_for_pane", return_value=[]):
-                        with patch.object(
-                            acw,
-                            "watcher_rows",
-                            return_value=[{
-                                "pane": "%6",
-                                "thread": THREAD,
-                                "pid": "1234",
-                            }],
-                        ):
-                            with redirect_stderr(err):
-                                with self.assertRaises(SystemExit) as ctx:
-                                    acw.cmd_start(["aot2", THREAD, "--message", "continue"])
+                with patch.object(acw, "watcher_pids_for_pane", return_value=[]):
+                    with patch.object(
+                        acw,
+                        "watcher_rows",
+                        return_value=[{
+                            "pane": "%6",
+                            "thread": THREAD,
+                            "pid": "1234",
+                        }],
+                    ):
+                        with redirect_stderr(err):
+                            with self.assertRaises(SystemExit) as ctx:
+                                acw.cmd_start(["aot2", THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("another watcher (pid=1234 pane=%6) is already watching thread", err.getvalue())
 
@@ -494,11 +493,10 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
             with patch.object(acw, "ensure_tmux_window_rename_hook"):
-                with patch.object(acw, "is_running_pid_file", return_value=False):
-                    with patch.object(acw, "watcher_rows", side_effect=fake_rows):
-                        with redirect_stderr(err):
-                            with self.assertRaises(SystemExit) as ctx:
-                                acw.cmd_start(["uvm", "--message", "continue"])
+                with patch.object(acw, "watcher_rows", side_effect=fake_rows):
+                    with redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as ctx:
+                            acw.cmd_start(["uvm", "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         text = err.getvalue()
         self.assertIn("existing watcher for pane=%8 is duplicated", text)
@@ -515,11 +513,10 @@ class WatchdUnitTests(unittest.TestCase):
 
         with patch.object(acw, "resolve_start_pane_target", return_value="%8"):
             with patch.object(acw, "ensure_tmux_window_rename_hook"):
-                with patch.object(acw, "is_running_pid_file", return_value=False):
-                    with patch.object(acw, "watcher_rows", side_effect=fake_rows):
-                        with redirect_stderr(err):
-                            with self.assertRaises(SystemExit) as ctx:
-                                acw.cmd_start(["uvm", OTHER_THREAD, "--message", "continue"])
+                with patch.object(acw, "watcher_rows", side_effect=fake_rows):
+                    with redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as ctx:
+                            acw.cmd_start(["uvm", OTHER_THREAD, "--message", "continue"])
         self.assertEqual(1, ctx.exception.code)
         self.assertIn("existing watcher for pane=%8 is using thread", err.getvalue())
 
@@ -530,18 +527,14 @@ class WatchdUnitTests(unittest.TestCase):
                 with patch.object(
                     acw,
                     "watcher_rows",
-                    return_value=[{"pane": "%9", "thread": THREAD, "pid": "1234"}],
+                    return_value=[{"pane": "%9", "thread": THREAD, "pid": "1234", "runtime_status": "running"}],
                 ):
-                    with patch.object(acw, "_is_pid_stopped", return_value=False):
-                        with patch.object(acw.os, "kill") as kill:
-                            out = io.StringIO()
-                            with redirect_stdout(out):
-                                acw.cmd_stop(["acw"])
+                    out = io.StringIO()
+                    with redirect_stdout(out):
+                        acw.cmd_stop(["acw"])
                 self.assertFalse(Path(acw.state_file_for_thread(THREAD)).exists())
-        self.assertEqual([((1234, acw.signal.SIGTERM),)], kill.call_args_list)
         text = out.getvalue()
-        self.assertIn("stopped: pane=%9 pid=1234", text)
-        self.assertIn("forgot session: pane=%9", text)
+        self.assertIn(f"stopped: pane=%9 thread_id={THREAD}", text)
 
     def test_resolve_start_pane_target_rejects_thread_id(self):
         err = io.StringIO()
@@ -554,19 +547,22 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "resolve_pane_from_window_name", return_value="%7"):
             self.assertEqual("%7", acw.resolve_start_pane_target("formal"))
 
-    def test_watcher_rows_filter_to_current_tmux_socket(self):
-        ps_out = (
-            "101 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
-            "--thread-id 11111111-1111-1111-1111-111111111111 --tmux-socket /tmp/other.sock\n"
-            "202 python3 /repo/bin/auto_continue_logwatch.py --pane %0 "
-            "--thread-id 22222222-2222-2222-2222-222222222222 --tmux-socket /tmp/current.sock\n"
-        )
-        with patch.dict(acw.os.environ, {"AUTO_CONTINUE_TMUX_SOCKET": "/tmp/current.sock"}, clear=False):
-            with patch.object(acw.subprocess, "check_output", return_value=ps_out):
-                rows = acw._legacy_watcher_rows()
-        self.assertEqual(1, len(rows))
-        self.assertEqual("202", rows[0]["pid"])
-        self.assertEqual("/tmp/current.sock", rows[0]["tmux_socket"])
+    def test_watcher_rows_use_runtime_rows_only(self):
+        runtime_rows = [{
+            "pane": "%0",
+            "thread": THREAD,
+            "pid": "202",
+            "tmux_socket": "/tmp/current.sock",
+            "runtime_status": "running",
+        }]
+        with patch.object(acw, "_read_runtime_rows", return_value=runtime_rows):
+            with patch.object(
+                acw.subprocess,
+                "check_output",
+                side_effect=AssertionError("legacy ps scan should not run"),
+            ):
+                rows = acw.watcher_rows()
+        self.assertEqual(runtime_rows, rows)
 
     def test_read_runtime_rows_uses_worker_id_and_daemon_pid_liveness(self):
         runtime_file = "/state/acw_runtime.scope.11111111-1111-1111-1111-111111111111.json"
@@ -606,6 +602,92 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("ok:pane resolved: %7", rendered)
         self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
         self.assertIn("info:thread provenance: live Codex process-owned evidence", rendered)
+
+    def test_daemon_log_tail_only_reads_new_lines(self):
+        existing_turn = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as handle:
+            handle.write(
+                f"2026-03-10 INFO session_loop{{thread_id={THREAD}}}: "
+                f"codex_core::codex: post sampling token usage turn_id={existing_turn} "
+                "total_usage_tokens=1 needs_follow_up=false\n"
+            )
+            log_path = Path(handle.name)
+        try:
+            tail = acw._DaemonCodexLogTail(log_path=log_path)
+            self.assertEqual([], acw._drain_daemon_codex_log_events(tail))
+
+            new_turn = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f"2026-03-10 INFO session_loop{{thread_id={THREAD}}}: "
+                    f"codex_core::codex: post sampling token usage turn_id={new_turn} "
+                    "total_usage_tokens=1 needs_follow_up=false\n"
+                )
+
+            events = acw._drain_daemon_codex_log_events(tail)
+            self.assertEqual(1, len(events))
+            self.assertEqual("completion", events[0].kind)
+            self.assertEqual(THREAD, events[0].thread_id)
+            self.assertEqual(new_turn, events[0].turn_id)
+        finally:
+            tail.close()
+            log_path.unlink(missing_ok=True)
+
+    def test_daemon_process_session_events_updates_saved_state_after_send(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                state_file = Path(acw.state_file_for_thread(THREAD))
+                state_file.write_text(
+                    json.dumps({"thread_id": THREAD, "message": "continue"}),
+                    encoding="utf-8",
+                )
+                runtime = acw._daemon_session_runtime(
+                    _session_record(THREAD, name="formal", message="continue", state_file=str(state_file)),
+                    codex_log_path=Path(td) / "codex-tui.log",
+                )
+                event = acw._LogwatchCodexLogEvent("completion", THREAD, "turn-1", "false")
+
+                with patch.object(acw, "_check_pane_for_interrupt", return_value=None):
+                    with patch.object(acw, "_check_pane_for_errors", return_value=None):
+                        with patch.object(
+                            acw,
+                            "_watch_tmux_send",
+                            return_value=type("SendResult", (), {"status": "ok", "detail": ""})(),
+                        ):
+                            with patch.object(acw, "_compute_watch_health", return_value=("ok", "")):
+                                with patch.object(acw, "_watch_now_ts", return_value="2026-03-14 12:00:00"):
+                                    with patch.object(acw.time, "sleep"):
+                                        acw._daemon_process_session_events(runtime, [event])
+
+                state = acw._read_session_state(THREAD)
+                self.assertEqual("turn-1", state["last_handled_turn"])
+                self.assertEqual(THREAD, state["last_handled_thread"])
+                self.assertEqual("2026-03-14 12:00:00", state["last_continue_at"])
+                self.assertEqual("running", runtime.runtime_status)
+
+    def test_daemon_process_session_events_auto_pauses_on_pane_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw, "STATE_DIR", td):
+                state_file = Path(acw.state_file_for_thread(THREAD))
+                state_file.write_text(
+                    json.dumps({"thread_id": THREAD, "message": "continue"}),
+                    encoding="utf-8",
+                )
+                runtime = acw._daemon_session_runtime(
+                    _session_record(THREAD, name="formal", message="continue", state_file=str(state_file)),
+                    codex_log_path=Path(td) / "codex-tui.log",
+                )
+                event = acw._LogwatchCodexLogEvent("completion", THREAD, "turn-1", "false")
+
+                with patch.object(acw, "_check_pane_for_interrupt", return_value=None):
+                    with patch.object(acw, "_check_pane_for_errors", return_value="Authentication failed"):
+                        acw._daemon_process_session_events(runtime, [event])
+
+                state = acw._read_session_state(THREAD)
+                self.assertTrue(state["paused"])
+                self.assertEqual("auto-paused: Authentication failed", state["health_detail"])
+                self.assertEqual("paused", runtime.runtime_status)
+                self.assertTrue(runtime.paused)
 
     def test_repair_steps_restart_duplicate_watchers_on_same_pane(self):
         model = acw._build_runtime_model(_snapshot(
@@ -1092,20 +1174,19 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_pause_without_target_pauses_all_watchers(self):
         rows = [
-            {"pane": "%1", "pid": "101"},
-            {"pane": "%2", "pid": "202"},
+            {"pane": "%1", "pid": "101", "thread": THREAD, "runtime_status": "running"},
+            {"pane": "%2", "pid": "202", "thread": OTHER_THREAD, "runtime_status": "running"},
         ]
         with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "_is_pid_stopped", return_value=False):
-                with patch.object(acw.os, "kill") as kill:
-                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        acw.cmd_pause([])
+            with patch.object(acw, "_set_session_paused") as set_paused:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    acw.cmd_pause([])
         self.assertEqual(
             [
-                ((101, acw.signal.SIGSTOP),),
-                ((202, acw.signal.SIGSTOP),),
+                ((THREAD, True),),
+                ((OTHER_THREAD, True),),
             ],
-            kill.call_args_list,
+            set_paused.call_args_list,
         )
 
     def test_pause_rejects_star_selector(self):
@@ -1118,16 +1199,15 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_resume_without_target_resumes_all_paused_watchers(self):
         rows = [
-            {"pane": "%1", "pid": "101"},
-            {"pane": "%2", "pid": "202"},
-            {"pane": "%3", "pid": "303"},
+            {"pane": "%1", "pid": "101", "thread": THREAD, "runtime_status": "paused", "paused": "1"},
+            {"pane": "%2", "pid": "202", "thread": OTHER_THREAD, "runtime_status": "running", "paused": ""},
+            {"pane": "%3", "pid": "303", "thread": "33333333-3333-3333-3333-333333333333", "runtime_status": "paused", "paused": "1"},
         ]
         with patch.object(acw, "watcher_rows", return_value=rows):
-            with patch.object(acw, "_is_pid_stopped", side_effect=[True, False, True]):
-                with patch.object(acw, "_restart_panes") as restart_panes:
-                    out = io.StringIO()
-                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                        acw.cmd_resume([])
+            with patch.object(acw, "_restart_panes") as restart_panes:
+                out = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    acw.cmd_resume([])
         restart_panes.assert_called_once_with(["%1", "%3"])
         self.assertIn("resuming 2 paused watcher(s) via restart", out.getvalue())
 
@@ -1141,30 +1221,36 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_resume_target_restarts_paused_watcher_instead_of_sigcont(self):
         with patch.object(acw, "resolve_pane_target", return_value="%7"):
-            with patch.object(acw, "watcher_pids_for_pane", return_value=["1234"]):
-                with patch.object(acw, "_is_pid_stopped", return_value=True):
-                    with patch.object(acw, "_restart_one") as restart_one:
-                        with patch.object(acw.os, "kill") as kill:
-                            out = io.StringIO()
-                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                                acw.cmd_resume(["aot"])
+            with patch.object(
+                acw,
+                "watcher_rows",
+                return_value=[{"pane": "%7", "pid": "1234", "thread": THREAD, "runtime_status": "paused", "paused": "1"}],
+            ):
+                with patch.object(acw, "_restart_one") as restart_one:
+                    with patch.object(acw.os, "kill") as kill:
+                        out = io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                            acw.cmd_resume(["aot"])
         restart_one.assert_called_once_with("aot", "%7", [])
         kill.assert_not_called()
-        self.assertIn("resuming paused watcher via restart: pane=%7 pid=1234", out.getvalue())
+        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={THREAD}", out.getvalue())
 
     def test_resume_multiple_targets_restarts_each_paused_target(self):
         resolved = {"formal": "%6", "aot": "%7"}
 
-        def fake_pids(pane: str) -> list[str]:
-            return {"%6": ["111"], "%7": ["222"]}[pane]
-
         with patch.object(acw, "resolve_pane_target", side_effect=lambda target: resolved[target]):
-            with patch.object(acw, "watcher_pids_for_pane", side_effect=fake_pids):
-                with patch.object(acw, "_is_pid_stopped", return_value=True):
-                    with patch.object(acw, "_restart_one") as restart_one:
-                        out = io.StringIO()
-                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                            acw.cmd_resume(["formal", "aot"])
+            with patch.object(
+                acw,
+                "watcher_rows",
+                side_effect=lambda pane="": {
+                    "%6": [{"pane": "%6", "pid": "111", "thread": THREAD, "runtime_status": "paused", "paused": "1"}],
+                    "%7": [{"pane": "%7", "pid": "222", "thread": OTHER_THREAD, "runtime_status": "paused", "paused": "1"}],
+                }[pane],
+            ):
+                with patch.object(acw, "_restart_one") as restart_one:
+                    out = io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                        acw.cmd_resume(["formal", "aot"])
         self.assertEqual(
             [
                 (("formal", "%6", []),),
@@ -1173,26 +1259,29 @@ class WatchdUnitTests(unittest.TestCase):
             restart_one.call_args_list,
         )
         text = out.getvalue()
-        self.assertIn("resuming paused watcher via restart: pane=%6 pid=111", text)
-        self.assertIn("resuming paused watcher via restart: pane=%7 pid=222", text)
+        self.assertIn(f"resuming paused watcher via restart: pane=%6 thread_id={THREAD}", text)
+        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={OTHER_THREAD}", text)
 
     def test_resume_multiple_targets_continues_when_one_is_not_paused(self):
         resolved = {"formal": "%6", "aot": "%7"}
 
-        def fake_pids(pane: str) -> list[str]:
-            return {"%6": ["111"], "%7": ["222"]}[pane]
-
         with patch.object(acw, "resolve_pane_target", side_effect=lambda target: resolved[target]):
-            with patch.object(acw, "watcher_pids_for_pane", side_effect=fake_pids):
-                with patch.object(acw, "_is_pid_stopped", side_effect=[False, True]):
-                    with patch.object(acw, "_restart_one") as restart_one:
-                        out = io.StringIO()
-                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                            acw.cmd_resume(["formal", "aot"])
+            with patch.object(
+                acw,
+                "watcher_rows",
+                side_effect=lambda pane="": {
+                    "%6": [{"pane": "%6", "pid": "111", "thread": THREAD, "runtime_status": "running", "paused": ""}],
+                    "%7": [{"pane": "%7", "pid": "222", "thread": OTHER_THREAD, "runtime_status": "paused", "paused": "1"}],
+                }[pane],
+            ):
+                with patch.object(acw, "_restart_one") as restart_one:
+                    out = io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                        acw.cmd_resume(["formal", "aot"])
         restart_one.assert_called_once_with("aot", "%7", [])
         text = out.getvalue()
-        self.assertIn("not paused: pane=%6 pid=111", text)
-        self.assertIn("resuming paused watcher via restart: pane=%7 pid=222", text)
+        self.assertIn(f"not paused: pane=%6 thread_id={THREAD}", text)
+        self.assertIn(f"resuming paused watcher via restart: pane=%7 thread_id={OTHER_THREAD}", text)
 
     def test_restart_rejects_star_selector(self):
         err = io.StringIO()

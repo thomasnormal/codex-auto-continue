@@ -221,7 +221,7 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertNotEqual(0, start.returncode, self.harness.diagnostics())
         self.assertIn("resolved: target=plain pane=", start.stdout, self.harness.diagnostics())
-        self.assertIn("could not determine thread_id", start.stderr, self.harness.diagnostics())
+        self.assertIn("no live Codex agent detected in pane", start.stderr, self.harness.diagnostics())
         self.assertFalse(self.harness.manager_pid_file.exists(), self.harness.diagnostics())
 
     def test_manager_status_reports_dead_after_real_watcher_exit(self):

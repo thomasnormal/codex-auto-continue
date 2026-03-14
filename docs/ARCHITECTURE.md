@@ -13,17 +13,18 @@ The current runtime model has three pieces:
   - reports status, doctor output, repairs, and cleanup
 - a hidden shared daemon (`auto_continue_watchd.py _daemon`)
   - one daemon per tmux socket scope
-  - owns all managed live workers for that tmux server
+  - owns all managed live session runtimes for that tmux server
   - reconciles desired session state with live runtime state
+  - tails `~/.codex/log/codex-tui.log` once per tmux socket
 - `bin/auto_continue_logwatch.py`
-  - the session worker implementation
-  - reused both by the legacy direct script path and by daemon worker threads
-  - tails `~/.codex/log/codex-tui.log`
-  - injects continue prompts into tmux panes
+  - shared low-level Codex-log, pane, and tmux-send helpers
+  - still usable as a direct single-session CLI for debugging/tests
+  - no longer discovered or spawned by the manager at runtime
 
-The key simplification is that `acw` no longer launches one OS watcher process
-per managed pane. The daemon is the only long-running manager-owned process for
-one tmux socket, and each managed session is a logical worker inside it.
+The key simplification is that `acw` no longer launches or discovers one OS
+watcher process per managed pane. The daemon is the only long-running
+manager-owned process for one tmux socket, and each managed session is a
+state machine inside it.
 
 
 ## Core Model
@@ -33,7 +34,7 @@ one tmux socket, and each managed session is a logical worker inside it.
 - one live tmux pane
 - one live Codex thread id
 - one managed session record
-- one live managed worker
+- one live managed runtime row
 
 Window or agent name is metadata attached to that mapping, not the primary
 identity.
@@ -103,10 +104,10 @@ Observed managed-worker state lives in:
 ```
 
 These files are written by the daemon and describe the currently attached live
-worker for one managed session:
+session runtime for one managed session:
 
-- worker id (`pid` in the UI; this is a worker-thread identifier, not a
-  standalone process id)
+- daemon-assigned runtime id (`pid` in the UI today; it identifies one live
+  managed session runtime and is not an OS pid)
 - daemon pid
 - pane
 - thread
@@ -146,7 +147,7 @@ Thread identity is proven only from strong evidence:
 
 ### 5. `codex-tui.log`
 
-The worker reads:
+The daemon reads:
 
 ```text
 ~/.codex/log/codex-tui.log
@@ -161,8 +162,8 @@ It uses that log for:
 
 ## Why The Shared Daemon Exists
 
-The older design used one `auto_continue_logwatch.py` process per pane.
-That caused a lot of avoidable complexity:
+The older design used one `auto_continue_logwatch.py` process per pane. That
+caused a lot of avoidable complexity:
 
 - one watcher pid per pane
 - pid files as primary runtime identity
@@ -176,10 +177,9 @@ The shared daemon simplifies the control plane:
 - one reconcile loop
 - one desired-state model
 - one runtime-state model
-- logical workers instead of manager-owned per-pane processes
-
-The worker logic itself still lives in `auto_continue_logwatch.py`; the daemon
-reuses that implementation instead of carrying a second copy of the event loop.
+- per-session state machines instead of manager-owned per-pane processes
+- one shared `codex-tui.log` tail feeding all managed sessions
+- no manager-side legacy process migration path
 
 
 ## Daemon Reconcile Loop
@@ -188,14 +188,15 @@ The hidden `_daemon` subcommand is started on demand by the CLI.
 
 At a high level the loop does this:
 
-1. Load all session files for the current tmux socket scope.
-2. Reconcile them against the in-memory worker map.
-3. Start missing workers.
-4. Stop workers whose session was deleted.
-5. Restart workers whose `(pane, message, generation)` signature changed.
-6. Apply paused/unpaused state to live workers.
-7. Write one runtime JSON file per live managed worker.
-8. Exit automatically after a short idle period when the scope has no sessions.
+1. Drain new Codex events from one shared `codex-tui.log` tail.
+2. Load all session files for the current tmux socket scope.
+3. Reconcile them against the in-memory per-session runtime map.
+4. Create missing runtimes.
+5. Drop runtimes whose session was deleted.
+6. Reinitialize runtimes whose `(pane, message, generation)` signature changed.
+7. Route the drained events to the matching session runtime by `thread_id`.
+8. Refresh session health and write one runtime JSON file per live managed session.
+9. Exit automatically after a short idle period when the scope has no sessions.
 
 That means normal commands are cheap:
 
@@ -206,25 +207,36 @@ That means normal commands are cheap:
 They do not spawn or discover per-pane manager processes anymore.
 
 
-## Worker Model
+## Session Runtime Model
 
-Each daemon worker runs `watch_session(...)` from
-`bin/auto_continue_logwatch.py`.
+Each managed session runtime inside the daemon keeps:
 
-The shared implementation still handles:
+- pane
+- thread id
+- continue message
+- generation
+- paused flag
+- last handled turn
+- one pending startup completion, if any
+- recent health state
+- watch-log path
 
-- Codex completion detection
-- interrupt skipping
+The daemon uses shared helper code from `bin/auto_continue_logwatch.py` for:
+
+- Codex completion parsing
+- interrupt parsing
 - pane-visible error detection
-- auto-pause on auth/quota/remote-compact failures
-- health updates
+- pending-startup completion detection
+- health evaluation
 - tmux `send-keys`
 
-The important daemon-specific difference is pause semantics:
+The important daemon-specific behaviors are:
 
 - `pause` is a logical session flag, not `SIGSTOP`
-- `resume` still restarts the worker generation instead of thawing the old
-  reader, so stale log backlog is not replayed
+- `resume` still restarts the generation instead of thawing an old reader, so
+  stale log backlog is not replayed
+- one shared log tail means the daemon never duplicates global log reads across
+  sessions
 
 This preserves the correctness fix from the old resume rewrite without keeping
 per-pane OS processes around.
@@ -249,11 +261,8 @@ per-pane OS processes around.
 `stop` is destructive manager intent:
 
 - remove the saved session file
-- let the daemon tear down the runtime worker
+- let the daemon tear down the runtime row
 - forget the session from `acw status`
-
-For migration or cleanup, `stop` also still terminates legacy per-pane watcher
-processes if they exist.
 
 ### `pause`
 
@@ -264,7 +273,7 @@ runtime row to reflect that state.
 
 `resume` does not unfreeze an old reader in place.
 
-Instead it restarts the managed worker generation from the current pane/thread
+Instead it restarts the managed session generation from the current pane/thread
 state so backlog is not replayed.
 
 ### `restart`
@@ -290,7 +299,7 @@ The Codex relaunch path is still explicit and strict:
 3. wait for a real shell prompt
 4. run `codex resume <thread-id>`
 5. handle the directory-trust prompt if it appears
-6. request the new worker generation
+6. request the new session generation
 
 ### `edit`
 
@@ -299,7 +308,7 @@ The Codex relaunch path is still explicit and strict:
 1. prove pane and thread
 2. seed the editor from the saved session message
 3. persist the new message
-4. restart the worker generation if the pane is managed
+4. restart the session generation if the pane is managed
 
 ### `status`
 
@@ -323,7 +332,7 @@ It reports:
 - target resolution
 - live thread identity
 - thread provenance
-- worker/runtime/session agreement
+- runtime/session agreement
 - a concrete next command when possible
 
 ### `repair`
@@ -333,7 +342,7 @@ It reports:
 It only auto-applies safe changes, such as:
 
 - recreating a missing saved session for a proven live pane
-- restarting one mismatched managed worker generation
+- restarting one mismatched managed session generation
 - syncing the saved session name to the live tmux window name
 
 It does not guess how to resolve genuinely ambiguous multi-pane or
@@ -345,7 +354,6 @@ multi-thread corruption.
 
 It only removes stale artifacts, such as:
 
-- dead legacy pid files
 - dead runtime rows from a vanished daemon
 - dead session files whose thread has neither a live pane nor a live worker
 
@@ -413,20 +421,13 @@ Important files:
 - `acw_session.<thread>.json`
   - desired state for one managed session
 - `acw_runtime.<scope>.<thread>.json`
-  - observed daemon runtime state for one live worker
+  - observed daemon runtime state for one live managed session
 - `acw_daemon.<scope>.pid`
   - daemon pid for one tmux socket scope
 - `acw_daemon.<scope>.log`
   - daemon stdout/stderr log
 - `auto_continue_logwatch.<pane>.log`
-  - per-pane worker event log
-
-Legacy files may still appear during migration:
-
-- `auto_continue_logwatch.<pane>.pid`
-- `auto_continue_logwatch.<pane>.runner.log`
-
-`cleanup` and `stop` still know how to remove those old artifacts.
+  - per-session event log written by the daemon
 
 
 ## Performance
@@ -434,12 +435,18 @@ Legacy files may still appear during migration:
 The daemon rewrite improves command latency in two ways:
 
 - no manager-side discovery of one OS watcher process per pane
+- one shared `codex-tui.log` reader instead of one per managed session
 - no process spawning for normal start/edit/restart flows
 
 On this checkout after the rewrite:
 
 - `status` is about `0.57s`
 - `edit %0` is about `0.23s`
+
+After removing the transitional legacy layer and collapsing the daemon to one
+shared log tail plus per-session state objects, a direct
+`_build_runtime_snapshot()` microbenchmark on this checkout is about `85ms`
+best-of-3 for 5 loops.
 
 The remaining cost is mostly:
 
@@ -479,7 +486,7 @@ That keeps the operator model simple:
 
 - `start` means "manage this pane/thread"
 - `pause` means "stop continuing this managed session"
-- `resume` and `restart` mean "request a fresh worker generation"
+- `resume` and `restart` mean "request a fresh session generation"
 - `stop` means "forget this managed session"
 - `repair` means "fix live invariant problems"
 - `cleanup` means "delete stale artifacts"
