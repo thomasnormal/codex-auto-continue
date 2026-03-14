@@ -4,6 +4,9 @@
 
 - Change: split the status table `WINDOW/PANE` metadata over separate lines for the thread id and watcher pid. This keeps the rich table easier to scan when invariant-heavy sessions need both identifiers at once.
 - Change: compacted the `STARTED` and `LAST_ACW` values in the status table to drop the repeated `ago` suffix, and rebalanced the rich status layout to give `LAST_AGENT` a larger fixed share of the remaining width than `MESSAGE`.
+- Change: added a first-class `acw repair` workflow on top of the runtime identity model. `repair` defaults to a dry run with no target, applies only safe live-state fixes when asked, preserves saved sessions when it stops orphan/broken watcher processes, and leaves dead-session deletion to `acw cleanup`.
+- Change: `doctor` and `status` now surface the repair workflow directly. `doctor` reports thread-detection provenance and recommends `acw repair` when the invariant model can fix the target cleanly, while `status` now prints a dedicated `acw repair --dry-run` hint for live invariant errors and reserves `acw cleanup` for dead sessions only.
+- Realization: a naive all-pane repair plan was too noisy because it treated every unmanaged live Codex pane as broken manager state. The correct default is to scope no-target `repair` to panes that are already manager-owned by a watcher or a saved `acw` session, while still allowing explicit pane targets for one-off diagnosis.
 
 ## 2026-03-13
 

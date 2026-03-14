@@ -99,6 +99,7 @@ def build_help_text(prog: str) -> str:
   {prog} resume [target ...]
   {prog} restart [target]
   {prog} edit <target>
+  {prog} repair [target] [--dry-run|--all]
   {prog} cleanup
   {prog} doctor [target]
 
@@ -110,7 +111,8 @@ Commands:
   resume    Restart one or more paused watchers, or all paused watchers, from current state.
   restart   Restart one watcher or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running watcher, then restart it.
-  cleanup   Remove stale watcher files.
+  repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.
+  cleanup   Remove dead saved sessions and stale watcher files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
 Targets:
@@ -125,6 +127,9 @@ Examples:
   {prog} resume formal aot
   {prog} restart bugs --restart-codex
   {prog} edit %6
+  {prog} repair --dry-run
+  {prog} repair %6
+  {prog} repair --all
   {prog} restart
   {prog} doctor
 """
@@ -1195,6 +1200,27 @@ def stop_pane_watchers(pane: str) -> None:
             print(f"forgot session: pane={pane} thread_id={thread_id}")
 
 
+def _stop_pane_watchers_keep_session(pane: str) -> None:
+    key = key_from_pane(pane)
+    pf = pid_file_for_key(key)
+    pane_pids = watcher_pids_for_pane(pane)
+    if not pane_pids:
+        Path(pf).unlink(missing_ok=True)
+        print(f"not running: pane={pane}")
+        return
+
+    for pid_str in pane_pids:
+        pid = int(pid_str)
+        try:
+            if _is_pid_stopped(pid):
+                os.kill(pid, signal.SIGCONT)
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        print(f"stopped: pane={pane} pid={pid_str}")
+    Path(pf).unlink(missing_ok=True)
+
+
 def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
     """Find running watchers whose session state name matches *name*."""
     matches: list[dict[str, str]] = []
@@ -1733,6 +1759,162 @@ def cmd_edit(argv: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Repair
+# ---------------------------------------------------------------------------
+
+
+def _parse_repair_args(args: list[str]) -> tuple[str, bool, bool]:
+    target = ""
+    dry_run = False
+    all_targets = False
+
+    rest = list(args)
+    if rest and not rest[0].startswith("--"):
+        target = rest.pop(0)
+
+    while rest:
+        tok = rest.pop(0)
+        if tok == "--dry-run":
+            dry_run = True
+        elif tok == "--all":
+            all_targets = True
+        else:
+            print(f"error: unknown option '{tok}'", file=sys.stderr)
+            sys.exit(2)
+
+    if target and all_targets:
+        print("error: repair accepts either a target or --all, not both", file=sys.stderr)
+        sys.exit(2)
+
+    if not target and not all_targets:
+        dry_run = True
+
+    return target, dry_run, all_targets
+
+
+def _repair_resolve_target(target: str, model: RuntimeModel | None = None) -> tuple[str, str]:
+    if model is None:
+        model = _build_runtime_model()
+    pane, error = _doctor_resolve_target(target, model=model)
+    if pane or not target:
+        return pane, error
+
+    if is_thread_id(target):
+        session = _runtime_session_for_thread(model, target)
+        if session:
+            return "", (
+                f"saved session for thread {_short_thread_id(target)} has no live pane; "
+                "repair only handles live state, so use 'acw cleanup' or restart Codex in the intended pane first"
+            )
+    elif model.sessions_by_name.get(target, ()):
+        return "", (
+            f"saved session target '{target}' has no live pane; repair only handles live state, "
+            "so use 'acw cleanup' or restart Codex in the intended pane first"
+        )
+    return "", error
+
+
+def _print_repair_plan(steps: list[RepairStep], *, dry_run: bool) -> None:
+    header = "repair: dry-run plan" if dry_run else "repair: plan"
+    print(header)
+    for step in steps:
+        prefix = "AUTO" if step.auto_apply else "MANUAL"
+        print(f"{prefix}: {step.summary}")
+
+
+def _apply_repair_step(step: RepairStep) -> None:
+    if step.kind == "restart_watcher":
+        _print_progress(f"repair: restarting watcher on pane={step.target}")
+        _stop_pane_watchers_keep_session(step.target)
+        cmd_start([step.target, step.thread_id, "--message", step.message])
+        return
+
+    if step.kind == "start_watcher":
+        _print_progress(f"repair: starting watcher on pane={step.target}")
+        cmd_start([step.target, step.thread_id, "--message", step.message])
+        return
+
+    if step.kind == "stop_watchers_keep_session":
+        _print_progress(f"repair: stopping watcher processes on pane={step.target} while keeping saved session state")
+        _stop_pane_watchers_keep_session(step.target)
+        return
+
+    if step.kind == "recreate_session":
+        _print_progress(f"repair: recreating saved session state for pane={step.target}")
+        window_name = (run_tmux("display-message", "-p", "-t", step.target, "#{window_name}") or "").strip()
+        _write_session_state(
+            step.thread_id,
+            {
+                "thread_id": step.thread_id,
+                "name": window_name,
+                "message": _message_text(step.message),
+            },
+        )
+        return
+
+    if step.kind == "sync_session_name":
+        _print_progress(f"repair: syncing saved session name for pane={step.target}")
+        window_name = (run_tmux("display-message", "-p", "-t", step.target, "#{window_name}") or "").strip()
+        _write_session_state(step.thread_id, {"thread_id": step.thread_id, "name": window_name})
+        return
+
+    raise RuntimeError(f"unsupported repair step: {step.kind}")
+
+
+def cmd_repair(argv: list[str]) -> None:
+    target, dry_run, all_targets = _parse_repair_args(argv)
+    model = _build_runtime_model()
+
+    target_panes: tuple[str, ...] | None = None
+    if target:
+        pane, error = _repair_resolve_target(target, model=model)
+        if error:
+            print(f"error: {error}", file=sys.stderr)
+            sys.exit(1)
+        target_panes = (pane,)
+
+    steps = _build_repair_plan(model, target_panes=target_panes)
+    if not steps:
+        print("repair: no live invariant issues found")
+        return
+
+    auto_steps = [step for step in steps if step.auto_apply]
+    manual_steps = [step for step in steps if not step.auto_apply]
+
+    if dry_run:
+        _print_repair_plan(steps, dry_run=True)
+        return
+
+    if target and manual_steps:
+        for step in manual_steps:
+            print(f"error: {step.summary}", file=sys.stderr)
+        print(
+            f"hint: run 'acw repair {shlex.quote(target)} --dry-run' to inspect the blocked repair plan",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not auto_steps:
+        print("repair: no safe automatic repairs available")
+        for step in manual_steps:
+            print(f"MANUAL: {step.summary}")
+        if manual_steps:
+            sys.exit(1)
+        return
+
+    _print_progress(f"repair: applying {len(auto_steps)} step(s)")
+    for step in auto_steps:
+        _apply_repair_step(step)
+    print(f"repair: applied {len(auto_steps)} step(s)")
+
+    if manual_steps:
+        print(f"repair: {len(manual_steps)} issue(s) still require manual action")
+        for step in manual_steps:
+            print(f"MANUAL: {step.summary}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Status display
 # ---------------------------------------------------------------------------
 
@@ -1863,6 +2045,14 @@ def _pane_thread_probe(
     if not codex_pids:
         return "", "", "", False
     return "", "", f"could not determine thread_id for pane={pane_id} from the live Codex process", True
+
+
+def _thread_provenance_text(source: str) -> str:
+    if not source:
+        return ""
+    if source == "pid":
+        return "live Codex process-owned evidence"
+    return source.replace("_", " ")
 
 
 def _build_thread_pane_map() -> dict[str, str]:
@@ -2701,6 +2891,8 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
         elif kind == "dead_session":
             dead_rows.append((row, current_pane, window_label))
 
+    live_issue_found = any(row.get("anomalies") for row, _ in watcher_rows) or bool(unwatched_rows or unresolved_rows)
+
     watchers_by_pane: dict[str, list[dict[str, str]]] = defaultdict(list)
     watchers_by_thread: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row, current_pane in watcher_rows:
@@ -2810,6 +3002,12 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
             seen.add(msg)
             messages.append(msg)
 
+    if live_issue_found:
+        msg = "Hint: run acw repair --dry-run for live invariant fixes."
+        if msg not in seen:
+            seen.add(msg)
+            messages.append(msg)
+
     return messages
 
 
@@ -2898,7 +3096,12 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     Console().print(table)
 
 
-def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
+def _status_details(
+    resolved: list[tuple[dict[str, str], str, str]],
+    model: RuntimeModel | None = None,
+) -> None:
+    if model is None:
+        model = _build_runtime_model()
     total = len(resolved)
     for idx, (r, current_pane, window_label) in enumerate(resolved, 1):
         if idx > 1:
@@ -2936,6 +3139,10 @@ def _status_details(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
         print(f"  {'PID:':<16} {r['pid']}")
         print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
+        pane_record = model.panes_by_id.get(current_pane) if current_pane else None
+        provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
+        if provenance:
+            print(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
         print(f"  {'STATE:':<16} {state_value}")
         print(f"  {'STARTED:':<16} {started}")
         print(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
@@ -3054,6 +3261,7 @@ def cmd_status(argv: list[str]) -> None:
             pane_arg = arg
 
     snapshot = _build_runtime_snapshot()
+    model = _build_runtime_model(snapshot)
     recovery = ""
     if not snapshot.panes and not snapshot.watchers:
         recovery = _tmux_socket_recovery_hint()
@@ -3091,7 +3299,7 @@ def cmd_status(argv: list[str]) -> None:
     resolved.sort(key=_status_sort_key)
 
     if details:
-        _status_details(resolved)
+        _status_details(resolved, model=model)
     else:
         _status_table(resolved)
         _print_status_recommendations(resolved)
@@ -3161,6 +3369,321 @@ class DoctorReport:
     recommendations: list[str]
 
 
+@dataclass(frozen=True)
+class RepairStep:
+    kind: str
+    target: str
+    summary: str
+    auto_apply: bool
+    thread_id: str = ""
+    message: str = ""
+
+
+def _pane_numeric_sort_key(pane: str) -> tuple[int, str]:
+    if is_pane_id(pane):
+        try:
+            return int(pane[1:]), pane
+        except ValueError:
+            pass
+    return 10**9, pane
+
+
+def _repair_message_for_pane(model: RuntimeModel, pane: str, live_thread: str) -> str:
+    session = _runtime_session_for_thread(model, live_thread)
+    if session and session.message:
+        return session.message
+    for watcher in _runtime_watchers_for_pane(model, pane):
+        if watcher.thread_id != live_thread:
+            continue
+        if watcher.message_inline:
+            return _message_text(watcher.message_inline)
+    return ""
+
+
+def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
+    pane_record = model.panes_by_id.get(pane)
+    watchers = list(_runtime_watchers_for_pane(model, pane))
+
+    if not pane_record:
+        if watchers:
+            return [
+                RepairStep(
+                    kind="stop_watchers_keep_session",
+                    target=pane,
+                    summary=f"pane {pane} is missing from tmux; stop its watcher processes but keep any saved session",
+                    auto_apply=True,
+                )
+            ]
+        return []
+
+    if not pane_record.has_codex_process:
+        if watchers:
+            return [
+                RepairStep(
+                    kind="stop_watchers_keep_session",
+                    target=pane,
+                    summary=f"pane {pane} has no live Codex agent; stop its watcher processes but keep any saved session",
+                    auto_apply=True,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="manual",
+                target=pane,
+                summary=f"pane {pane} has no live Codex agent; restart Codex there manually before repairing watcher state",
+                auto_apply=False,
+            )
+        ]
+
+    if not is_thread_id(pane_record.detected_thread):
+        detail = pane_record.detected_thread_detail or f"could not determine thread_id for pane={pane} from the live Codex process"
+        return [
+            RepairStep(
+                kind="manual",
+                target=pane,
+                summary=f"pane {pane} is unresolved: {detail}",
+                auto_apply=False,
+            )
+        ]
+
+    live_thread = pane_record.detected_thread.lower()
+    related_panes = sorted(
+        {
+            row.pane_id
+            for row in _runtime_panes_for_thread(model, live_thread)
+            if row.pane_id
+        },
+        key=_pane_numeric_sort_key,
+    )
+    if len(related_panes) > 1:
+        return [
+            RepairStep(
+                kind="manual",
+                target=pane,
+                summary=(
+                    f"thread {_short_thread_id(live_thread)} is active across panes {', '.join(related_panes)}; "
+                    "choose one pane to keep and repair the others manually"
+                ),
+                auto_apply=False,
+                thread_id=live_thread,
+            )
+        ]
+
+    watched_panes = sorted(
+        {
+            row.pane
+            for row in _runtime_watchers_for_thread(model, live_thread)
+            if row.pane
+        },
+        key=_pane_numeric_sort_key,
+    )
+    if len(watched_panes) > 1:
+        return [
+            RepairStep(
+                kind="manual",
+                target=pane,
+                summary=(
+                    f"thread {_short_thread_id(live_thread)} is watched across panes {', '.join(watched_panes)}; "
+                    "choose one pane to keep and repair the others manually"
+                ),
+                auto_apply=False,
+                thread_id=live_thread,
+            )
+        ]
+
+    session = _runtime_session_for_thread(model, live_thread)
+    if session:
+        conflict = _runtime_session_name_conflict(model, session)
+        if conflict:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=f"pane {pane} is blocked: {conflict}",
+                    auto_apply=False,
+                    thread_id=live_thread,
+                )
+            ]
+
+    message = _repair_message_for_pane(model, pane, live_thread)
+    if not watchers:
+        if not session or not message:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=(
+                        f"pane {pane} has live thread {_short_thread_id(live_thread)} but no watcher and no saved continue message; "
+                        "start it manually with an explicit --message"
+                    ),
+                    auto_apply=False,
+                    thread_id=live_thread,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="start_watcher",
+                target=pane,
+                summary=f"start one watcher on pane {pane} for thread {_short_thread_id(live_thread)}",
+                auto_apply=True,
+                thread_id=live_thread,
+                message=message,
+            )
+        ]
+
+    if len(watchers) > 1:
+        if not message:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=(
+                        f"pane {pane} has duplicate watcher processes but no saved continue message for thread "
+                        f"{_short_thread_id(live_thread)}; repair it manually"
+                    ),
+                    auto_apply=False,
+                    thread_id=live_thread,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="restart_watcher",
+                target=pane,
+                summary=f"replace duplicate watcher processes on pane {pane} with one watcher for thread {_short_thread_id(live_thread)}",
+                auto_apply=True,
+                thread_id=live_thread,
+                message=message,
+            )
+        ]
+
+    watcher = watchers[0]
+    if not is_thread_id(watcher.thread_id):
+        if not message:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=f"pane {pane} has a watcher with an invalid thread id and no saved continue message; repair it manually",
+                    auto_apply=False,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="restart_watcher",
+                target=pane,
+                summary=f"restart the watcher on pane {pane} with the live thread {_short_thread_id(live_thread)}",
+                auto_apply=True,
+                thread_id=live_thread,
+                message=message,
+            )
+        ]
+
+    if watcher.thread_id != live_thread:
+        if not message:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=(
+                        f"pane {pane} watcher is bound to {_short_thread_id(watcher.thread_id)}, but the live pane is "
+                        f"{_short_thread_id(live_thread)} and no saved continue message is available; repair it manually"
+                    ),
+                    auto_apply=False,
+                    thread_id=live_thread,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="restart_watcher",
+                target=pane,
+                summary=f"rebind the watcher on pane {pane} to the live thread {_short_thread_id(live_thread)}",
+                auto_apply=True,
+                thread_id=live_thread,
+                message=message,
+            )
+        ]
+
+    if not session:
+        if not message:
+            return [
+                RepairStep(
+                    kind="manual",
+                    target=pane,
+                    summary=f"pane {pane} has no saved session and no recoverable continue message; repair it manually",
+                    auto_apply=False,
+                    thread_id=live_thread,
+                )
+            ]
+        return [
+            RepairStep(
+                kind="recreate_session",
+                target=pane,
+                summary=f"recreate the missing saved session for pane {pane} and thread {_short_thread_id(live_thread)}",
+                auto_apply=True,
+                thread_id=live_thread,
+                message=message,
+            )
+        ]
+
+    if pane_record.window_name and session.name and pane_record.window_name != session.name:
+        return [
+            RepairStep(
+                kind="sync_session_name",
+                target=pane,
+                summary=f"sync the saved session name for pane {pane} to the current window name '{pane_record.window_name}'",
+                auto_apply=True,
+                thread_id=live_thread,
+            )
+        ]
+
+    return []
+
+
+def _build_repair_plan(
+    model: RuntimeModel,
+    target_panes: tuple[str, ...] | None = None,
+) -> list[RepairStep]:
+    if target_panes is None:
+        candidate_panes_set = set(model.watchers_by_pane)
+        for pane in model.snapshot.panes:
+            if not pane.pane_id or not is_thread_id(pane.detected_thread):
+                continue
+            if _runtime_session_for_thread(model, pane.detected_thread):
+                candidate_panes_set.add(pane.pane_id)
+        candidate_panes = sorted(candidate_panes_set, key=_pane_numeric_sort_key)
+    else:
+        candidate_panes = list(target_panes)
+
+    steps: list[RepairStep] = []
+    seen: set[tuple[object, ...]] = set()
+    for pane in candidate_panes:
+        for step in _repair_steps_for_pane(model, pane):
+            key = (step.kind, step.summary) if not step.auto_apply else (step.kind, step.target, step.thread_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            steps.append(step)
+
+    if target_panes is None:
+        live_threads = set(model.panes_by_thread) | set(model.watchers_by_thread)
+        dead_sessions = [
+            session
+            for session in model.snapshot.sessions
+            if session.thread_id not in live_threads
+        ]
+        if dead_sessions:
+            steps.append(
+                RepairStep(
+                    kind="cleanup_dead_sessions",
+                    target="",
+                    summary=f"run acw cleanup to remove {len(dead_sessions)} dead saved session(s)",
+                    auto_apply=False,
+                )
+            )
+
+    return steps
+
+
 def _doctor_recommendation_target(target: str, pane: str, rows: list[dict[str, str]]) -> str:
     if target:
         return target
@@ -3208,6 +3731,10 @@ def _doctor_report(target: str = "") -> DoctorReport:
     tid, thread_error = _strict_thread_for_pane(model, pane)
     if tid and is_thread_id(tid):
         checks.append(("ok", f"Codex thread detected: {tid}"))
+        pane_record = model.panes_by_id.get(pane)
+        provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
+        if provenance:
+            checks.append(("info", f"thread provenance: {provenance}"))
     else:
         checks.append(("error", thread_error or f"could not detect a Codex thread for pane {pane}"))
         errors += 1
@@ -3275,6 +3802,12 @@ def _doctor_report(target: str = "") -> DoctorReport:
         checks.append(("info", f"no watcher running for pane {pane}"))
         if tid and is_thread_id(tid):
             recommendations.append(f"acw start {shlex.quote(command_target)} {tid}")
+
+    repair_steps = _repair_steps_for_pane(model, pane) if pane else []
+    if any(step.auto_apply for step in repair_steps):
+        recommendations.insert(0, f"acw repair {shlex.quote(command_target)}")
+    elif repair_steps:
+        recommendations.insert(0, f"acw repair {shlex.quote(command_target)} --dry-run")
 
     result = "error" if errors else ("warn" if warnings else "ok")
     exit_code = 1 if errors else 0
@@ -3445,7 +3978,7 @@ def main() -> None:
     # Only clean up stale files on commands that mutate state.  Read-only
     # commands (status, pause, resume) skip the cleanup overhead (ps scan +
     # multiple globs).
-    if subcmd in ("start", "stop", "restart", "edit", "cleanup"):
+    if subcmd in ("start", "stop", "restart", "edit", "repair", "cleanup"):
         cleanup_stale_files()
 
     commands = {
@@ -3454,6 +3987,7 @@ def main() -> None:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "restart": cmd_restart,
+        "repair": cmd_repair,
         "cleanup": cmd_cleanup,
         "status": cmd_status,
         "edit": cmd_edit,

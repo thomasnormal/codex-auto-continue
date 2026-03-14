@@ -61,7 +61,7 @@ acw command (watchd.py, one-shot CLI)
   +--> ~/.codex/acw_session.<thread>.json
   +--> ~/.codex/state_*.sqlite
   |
-  +--> start / restart / doctor / status / cleanup decisions
+  +--> start / restart / repair / doctor / status / cleanup decisions
   |
   +--> spawn auto_continue_logwatch.py for one pane
             |
@@ -228,7 +228,7 @@ rebuilds its view of the world from:
 - saved sessions
 - Codex SQLite state
 
-That is why `status`, `doctor`, `start`, `restart`, and `edit` all notice pane
+That is why `status`, `doctor`, `repair`, `start`, `restart`, and `edit` all notice pane
 renames, index moves, and process changes without a background manager loop.
 
 ### Start flow
@@ -524,10 +524,52 @@ It checks:
 
 It also prints concrete next-command recommendations like:
 
+- `acw repair ...`
 - `acw start ...`
 - `acw resume ...`
 - `acw restart ...`
 - `acw stop ...`
+
+When thread identity is proven, `doctor` also reports the provenance instead of
+just the thread value. Today that provenance is phrased in terms of live
+Codex-process-owned evidence rather than any pane-local heuristic.
+
+### Repair
+
+`repair` is the live-state recovery workflow built on the same runtime model as
+`status` and `doctor`.
+
+The important split is:
+
+- `repair` fixes live pane / watcher / thread / saved-session mismatches
+- `cleanup` removes dead saved-session state and other stale files
+
+`repair` uses the same strict model and never guesses a thread id. With no
+target, it defaults to a dry run and only considers manager-owned panes:
+
+- panes with a live watcher
+- panes whose live thread matches a saved `acw` session
+
+It intentionally ignores random unmanaged Codex panes in the all-pane view so
+the repair plan stays focused on `acw`-owned state.
+
+The first implementation only auto-applies safe local repairs, such as:
+
+- starting a missing watcher for a managed live pane
+- replacing duplicate watcher processes on one pane with a single watcher
+- rebinding one broken watcher to the pane's proven live thread
+- recreating a missing saved session from a healthy live watcher
+- syncing a saved session name to the current tmux window name
+- stopping orphan watcher processes while preserving saved session state
+
+When the model cannot choose safely, `repair` stops and prints a manual blocker
+instead, for example:
+
+- one thread active across multiple panes
+- one thread watched across multiple panes
+- unresolved live pane thread identity
+- missing continue message for a pane that needs a new watcher
+- one saved session name shared by multiple threads
 
 ### Cleanup
 

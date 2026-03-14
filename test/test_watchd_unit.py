@@ -273,6 +273,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("0:6:formal/%6", text)
         self.assertIn("0:10:aot2/%10", text)
         self.assertIn("Invariant error: thread 11111111…1111 is watched on panes %10, %6", text)
+        self.assertIn("Hint: run acw repair --dry-run for live invariant fixes.", text)
 
     def test_status_summary_flags_duplicate_agent_name_on_multiple_threads(self):
         snapshot = _snapshot(
@@ -543,6 +544,61 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("ok:tmux server reachable", rendered)
         self.assertIn("ok:pane resolved: %7", rendered)
         self.assertIn(f"ok:Codex thread detected: {THREAD}", rendered)
+        self.assertIn("info:thread provenance: live Codex process-owned evidence", rendered)
+
+    def test_repair_steps_restart_duplicate_watchers_on_same_pane(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            watchers=(
+                _watcher_record("%7", THREAD, pid="111"),
+                _watcher_record("%7", THREAD, pid="222"),
+            ),
+            sessions=(_session_record(THREAD, name="formal", message="continue by plan"),),
+        ))
+        steps = acw._repair_steps_for_pane(model, "%7")
+        self.assertEqual(["restart_watcher"], [step.kind for step in steps])
+        self.assertTrue(steps[0].auto_apply)
+        self.assertEqual("%7", steps[0].target)
+        self.assertEqual(THREAD, steps[0].thread_id)
+        self.assertEqual("continue by plan", steps[0].message)
+
+    def test_repair_steps_start_unwatched_live_pane_with_saved_session(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
+            sessions=(_session_record(THREAD, name="formal", message="continue by plan"),),
+        ))
+        steps = acw._repair_steps_for_pane(model, "%7")
+        self.assertEqual(["start_watcher"], [step.kind for step in steps])
+        self.assertTrue(steps[0].auto_apply)
+        self.assertEqual("continue by plan", steps[0].message)
+
+    def test_repair_steps_flag_duplicate_thread_across_panes_as_manual(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(
+                _pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),
+                _pane_record("%8", THREAD, window_label="0:8:aot", window_name="aot"),
+            ),
+            sessions=(_session_record(THREAD, name="formal", message="continue"),),
+        ))
+        steps = acw._repair_steps_for_pane(model, "%7")
+        self.assertEqual(["manual"], [step.kind for step in steps])
+        self.assertFalse(steps[0].auto_apply)
+        self.assertIn("%7, %8", steps[0].summary)
+
+    def test_repair_plan_reports_dead_sessions_as_cleanup_only(self):
+        model = acw._build_runtime_model(_snapshot(
+            sessions=(_session_record(THREAD, name="formal", message="continue"),),
+        ))
+        steps = acw._build_repair_plan(model)
+        self.assertEqual(["cleanup_dead_sessions"], [step.kind for step in steps])
+        self.assertFalse(steps[0].auto_apply)
+        self.assertIn("acw cleanup", steps[0].summary)
+
+    def test_repair_plan_ignores_unmanaged_live_panes_by_default(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%9", THREAD, window_label="0:9:scratch", window_name="scratch"),),
+        ))
+        self.assertEqual([], acw._build_repair_plan(model))
 
     def test_doctor_report_recommends_restart_for_warn_watcher(self):
         model = acw._build_runtime_model(_snapshot(

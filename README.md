@@ -106,8 +106,9 @@ acw pause [target]   Pause one watcher or all watchers
 acw resume [target]  Resume one or more paused watchers, or all paused watchers
 acw restart [target] Restart one watcher or all watchers
 acw edit <target>    Edit the stored continue prompt, then restart
+acw repair [target]  Inspect or apply safe live-state repairs
 acw doctor [target]  Diagnose tmux, auth, pane, and watcher state
-acw cleanup          Remove stale watcher files
+acw cleanup          Remove dead saved sessions and stale watcher files
 ```
 
 For all-watcher operations, use the no-target forms:
@@ -143,6 +144,15 @@ Codex process, not just a fresh watcher.
 `acw restart` with no target now also recovers dead watchers whose Codex panes
 are still live. It restarts from the saved thread/message state instead of
 requiring a fresh `acw start`.
+
+`repair` is the live-state recovery workflow. With no target, `acw repair`
+defaults to a dry run and shows safe automatic repairs plus manual blockers
+without touching anything. Use `acw repair <target>` for one managed pane, or
+`acw repair --all` to apply the safe repairs across all managed panes.
+
+`cleanup` is intentionally separate from `repair`: it only removes dead saved
+session files and stale watcher artifacts. It does not try to fix live
+pane/watcher/thread mismatches.
 
 ## Continue Message
 
@@ -235,12 +245,14 @@ It checks:
 - whether the tmux server is reachable
 - whether the target pane resolves
 - whether a Codex thread is discoverable
+- what proved that thread identity
 - whether a watcher is running, paused, degraded, or dead
 - whether the pane, watcher, Codex thread, and saved session identity still
   match cleanly
 
-It also prints an explicit recommended next command when appropriate, and it
-fails instead of guessing when identity is ambiguous.
+It also prints an explicit recommended next command when appropriate, including
+`acw repair ...` when the live invariant model can repair the problem safely,
+and it fails instead of guessing when identity is ambiguous.
 
 ## Troubleshooting
 
@@ -260,6 +272,12 @@ fails instead of guessing when identity is ambiguous.
 - Run `acw doctor <target>`.
 - `warn` usually means degraded but still partially functional, not necessarily
   dead.
+
+`acw status` shows `Invariant error`
+
+- Run `acw repair --dry-run` first to inspect the live repair plan.
+- If the issue is only dead sessions, run `acw cleanup`.
+- Use `acw doctor <target>` when you want provenance and a focused target-level diagnosis.
 
 tmux socket disappeared
 
