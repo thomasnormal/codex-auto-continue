@@ -78,6 +78,7 @@ class MockManagerHarness:
                 preferred_tmux_socket_fn=lambda: self.tmux_socket,
             )
         )
+        self._tmux_socket_available = True
         self.manager_state_db = self.state_dir / acw_state.STATE_DB_FILENAME
         self._patchers: list[patch] = []
         self._panes: dict[str, MockPane] = {}
@@ -144,6 +145,14 @@ class MockManagerHarness:
         if self._current_pane == pane_id:
             remaining = sorted(self._panes.values(), key=lambda pane: pane.window_index)
             self._current_pane = remaining[0].pane_id if remaining else ""
+
+    def delete_tmux_socket(self) -> None:
+        self._tmux_socket_available = False
+        Path(self.tmux_socket).unlink(missing_ok=True)
+
+    def recreate_tmux_socket(self) -> None:
+        self._tmux_socket_available = True
+        Path(self.tmux_socket).write_text("", encoding="utf-8")
 
     def start_codex(self, prompt: str) -> MockTurnObservation:
         pane = self._pane(self._current_pane)
@@ -348,7 +357,7 @@ class MockManagerHarness:
             patch.object(acw, "_daemon_rpc_patch_session", side_effect=self._daemon_patch_session),
             patch.object(acw, "_daemon_rpc_remove_session", side_effect=self._daemon_remove_session),
             patch.object(acw, "_daemon_rpc_restart_codex", side_effect=self._daemon_restart_codex),
-            patch.object(acw, "_tmux_socket_recovery_hint", return_value=""),
+            patch.object(acw, "_tmux_socket_recovery_hint", side_effect=self._tmux_socket_recovery_hint),
         ]
         for patcher in self._patchers:
             patcher.start()
@@ -570,6 +579,8 @@ class MockManagerHarness:
     def _run_tmux(self, *args: str) -> str | None:
         if not args:
             return None
+        if not self._tmux_socket_available:
+            return None
         if args[0] == "list-sessions":
             return "mock-session\n"
         if args[:3] == ("display-message", "-p", "-t") and len(args) >= 5:
@@ -692,6 +703,14 @@ class MockManagerHarness:
         if word:
             return word.group(1)
         return prompt.strip().splitlines()[0][:120] if prompt.strip() else "-"
+
+    def _tmux_socket_recovery_hint(self) -> str:
+        if self._tmux_socket_available:
+            return ""
+        return (
+            f"hint: tmux socket '{self.tmux_socket}' is unreachable; "
+            "recreate it with `kill -USR1 424242`"
+        )
 
     def _wait_for(self, predicate, *, timeout: float, description: str) -> None:
         deadline = time.time() + timeout

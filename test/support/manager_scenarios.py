@@ -261,6 +261,28 @@ class ManagerScenarioMixin:
         self.assertIn("formal", recovered.stdout, self.harness.diagnostics())
         self.assertIn("aot", recovered.stdout, self.harness.diagnostics())
 
+    def test_manager_restart_without_target_recovers_dead_runtime(self):
+        self.harness.rename_window("recoverdead")
+        self.harness.start_codex("say exactly RECOVERDEAD and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "recoverdead", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started_in_pane(pane, first_turn.thread_id)
+        runtime_id_before = str(
+            self.harness.manager_runtime_row_for_pane(pane).get("runtime_id", "")
+        )
+
+        self.harness.stop_manager_watcher()
+        restart = self.harness.run_manager("restart")
+        self.harness.wait_for_manager_watcher_started_in_pane(pane, first_turn.thread_id)
+
+        self.assertIn("--- restarting", restart.stdout, self.harness.diagnostics())
+        self.assertNotEqual(
+            runtime_id_before,
+            str(self.harness.manager_runtime_row_for_pane(pane).get("runtime_id", "")),
+        )
+
     def test_manager_status_summary_shows_recent_last_agent_text(self):
         token = "CONTROLPANELTOKEN"
         self.harness.rename_window("summary")
@@ -273,3 +295,20 @@ class ManagerScenarioMixin:
 
         self.assertIn("LAST_AGENT", status.stdout, self.harness.diagnostics())
         self.assertIn(token, status.stdout, self.harness.diagnostics())
+
+    def test_manager_recovers_after_private_tmux_socket_recreation(self):
+        self.harness.rename_window("socket")
+        self.harness.start_codex("say the word hello and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.delete_tmux_socket()
+        stale = self.harness.run_manager("start", "socket", "--message", "test continue", check=False)
+        self.assertNotEqual(0, stale.returncode, self.harness.diagnostics())
+        self.assertIn("kill -USR1", stale.stderr, self.harness.diagnostics())
+
+        self.harness.recreate_tmux_socket()
+        restored = self.harness.run_manager("start", "socket", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
+
+        self.assertIn("resolved: target=socket pane=", restored.stdout, self.harness.diagnostics())
+        self.assertIn(first_turn.thread_id, restored.stdout, self.harness.diagnostics())

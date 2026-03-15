@@ -380,4 +380,4 @@ Current real-Codex coverage includes:
 - interrupt skip and auto-resume after the next manual prompt
 - manager start for plain `codex` panes
 - manager start for `codex resume <thread-id>` panes
-- `doctor`, `edit`, `status`, dead-watcher reporting, and tmux socket recovery
+- shared manager scenarios for `doctor`, `edit`, `status`, `repair --all`, daemon-death recovery via `restart`, and tmux socket recovery

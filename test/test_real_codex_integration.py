@@ -105,23 +105,5 @@ class RealCodexWatcherIntegrationTests(_RealCodexHarnessTestCase):
         self.assertNotIn("auto-paused:", state_text)
         self.assertIn("test continue", pane_text, self.harness.diagnostics())
 
-    def test_manager_recovers_after_private_tmux_socket_recreation(self):
-        self.harness.rename_window("socket")
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-
-        self.harness.delete_tmux_socket()
-        stale = self.harness.run_manager("start", "socket", "--message", "test continue", check=False)
-        self.assertNotEqual(0, stale.returncode, self.harness.diagnostics())
-        self.assertIn("kill -USR1", stale.stderr, self.harness.diagnostics())
-
-        self.harness.recreate_tmux_socket()
-        restored = self.harness.run_manager("start", "socket", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        self.assertIn("resolved: target=socket pane=", restored.stdout, self.harness.diagnostics())
-        self.assertIn(first_turn.thread_id, restored.stdout, self.harness.diagnostics())
-
-
 if __name__ == "__main__":
     unittest.main()
