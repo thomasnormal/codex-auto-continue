@@ -23,6 +23,9 @@ from pathlib import Path
 import threading
 from typing import Callable, Literal, Optional
 
+from acw_ids import is_thread_id
+from acw_ids import THREAD_ID_RE
+
 try:
     from watchdog.observers import Observer as _WatchdogObserver
     from watchdog.events import FileSystemEventHandler as _FSHandler
@@ -64,16 +67,9 @@ STATE_DIR = Path.home() / ".codex"
 
 def _session_state_path(thread_id: str) -> Path:
     return STATE_DIR / f"acw_session.{thread_id}.json"
-
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
 PSTREE_PROCESS_PID_RE = re.compile(r"(?<!\{)[A-Za-z0-9_.+-]+\((\d+)\)")
 
 THREAD_LINE_RE = re.compile(r"session_loop\{thread_id=([0-9a-f\-]+)\}")
-
-def is_thread_id(s: str) -> bool:
-    return bool(THREAD_ID_RE.fullmatch(s))
 
 HEALTH_CHECK_INTERVAL = 30.0   # seconds between periodic health checks
 STARTUP_GRACE_SECS = 60.0

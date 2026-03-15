@@ -7,16 +7,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from acw_ids import is_thread_id
 
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
 _PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
 _SHELL_PROMPT_RE = re.compile(r"^\[[^\]]+\]\$\s*$")
-
-
-def _is_thread_id(value: str) -> bool:
-    return bool(THREAD_ID_RE.fullmatch(value or ""))
 
 
 def _freeze_multimap(mapping: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
@@ -197,7 +191,7 @@ def thread_times(thread_id: str, *, compact: bool, thread_times_from_state_db, f
 
 
 def thread_title(thread_id: str, *, state_dir: str) -> str:
-    if not _is_thread_id(thread_id):
+    if not is_thread_id(thread_id):
         return ""
     root = Path(state_dir)
     if not root.is_dir():

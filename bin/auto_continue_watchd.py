@@ -25,6 +25,7 @@ import acw_rpc
 import acw_daemon
 import acw_control
 import acw_commands
+import acw_ids
 import acw_observe
 import acw_probe
 import acw_repair
@@ -49,10 +50,6 @@ from auto_continue_logwatch import tmux_send as _watch_tmux_send
 # ---------------------------------------------------------------------------
 # Constants & path resolution
 # ---------------------------------------------------------------------------
-
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
 
 DAEMON_POLL_INTERVAL_SECS = 0.2
 DAEMON_IDLE_EXIT_SECS = 2.0
@@ -116,12 +113,11 @@ def key_from_pane(pane: str) -> str:
 
 
 def is_pane_id(s: str) -> bool:
-    return bool(re.fullmatch(r"%[0-9]+", s))
+    return acw_ids.is_pane_id(s)
 
 
 def current_tmux_pane() -> str:
-    pane = os.environ.get("TMUX_PANE", "").strip()
-    return pane if is_pane_id(pane) else ""
+    return acw_ids.current_tmux_pane()
 
 
 def _truncate(s: str, width: int) -> str:
@@ -140,7 +136,7 @@ def _read_pid_file(path: str) -> str | None:
 
 
 def is_thread_id(s: str) -> bool:
-    return bool(THREAD_ID_RE.fullmatch(s))
+    return acw_ids.is_thread_id(s)
 
 
 def watch_log_for_key(key: str) -> str:

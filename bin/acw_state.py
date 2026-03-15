@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from pathlib import Path
+
+from acw_ids import is_thread_id
 
 
 STATE_DB_FILENAME = "acw_state.sqlite"
 SESSION_REF_PREFIX = "sqlite:session:"
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
-
 _JSON_MIGRATION_KEY = "json_migration_v1"
 _SQLITE_MIGRATION_KEY = "sqlite_agent_model_v1"
 _SQLITE_WAL_KEY = "sqlite_wal_v1"
@@ -60,12 +57,6 @@ _DAEMON_SCOPE_DEFAULTS: dict[str, object] = {
     "heartbeat_ts": "",
     "started_ts": "",
 }
-
-
-def is_thread_id(value: str) -> bool:
-    return bool(THREAD_ID_RE.fullmatch(value or ""))
-
-
 def state_db_path(state_dir: str) -> str:
     return os.path.join(state_dir, STATE_DB_FILENAME)
 

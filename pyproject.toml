@@ -43,6 +43,7 @@ py-modules = [
   "auto_continue_logwatch",
   "acw_bootstrap",
   "acw_daemon",
+  "acw_ids",
   "acw_control",
   "acw_commands",
   "acw_probe",

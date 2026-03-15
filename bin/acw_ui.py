@@ -3,27 +3,15 @@ from __future__ import annotations
 import re
 import shutil
 
-
-THREAD_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
-
-
-def _is_thread_id(value: str) -> bool:
-    return bool(THREAD_ID_RE.fullmatch(value or ""))
-
-
-def _short_thread_id(thread_id: str) -> str:
-    if not _is_thread_id(thread_id):
-        return thread_id
-    return f"{thread_id[:8]}…{thread_id[-4:]}"
+from acw_ids import is_thread_id
+from acw_ids import short_thread_id
 
 
 def status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, runtime_id: str) -> str:
     line1 = f"{window_label}/{current_pane}" if current_pane else window_label
     lines = [line1]
-    if _is_thread_id(thread_id):
-        lines.append(f"[dim]{_short_thread_id(thread_id)}[/dim]")
+    if is_thread_id(thread_id):
+        lines.append(f"[dim]{short_thread_id(thread_id)}[/dim]")
     if runtime_id:
         lines.append(f"[dim]id={runtime_id}[/dim]")
     return "\n".join(lines)
