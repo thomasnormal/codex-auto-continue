@@ -25,6 +25,7 @@ import acw_state
 import acw_rpc
 import acw_daemon
 import acw_commands
+import acw_observe
 import acw_probe
 import acw_repair
 import acw_ui
@@ -3077,57 +3078,7 @@ def _resolve_restart_pane_target(target: str, model: RuntimeModel | None = None)
 
 
 def cmd_status(argv: list[str]) -> None:
-    pane_arg = ""
-    details = False
-    for arg in argv:
-        if arg == "--details":
-            details = True
-        else:
-            pane_arg = arg
-
-    snapshot = _build_runtime_snapshot()
-    model = _build_runtime_model(snapshot)
-    recovery = ""
-    if not snapshot.panes and not snapshot.watchers:
-        recovery = _tmux_socket_recovery_hint()
-        if recovery:
-            print(
-                "warning: tmux metadata is unavailable; status is falling back to saved session state",
-                file=sys.stderr,
-            )
-            print(recovery, file=sys.stderr)
-
-    resolved = _build_status_entries_from_snapshot(snapshot)
-
-    # Optional pane filter.
-    if pane_arg:
-        target = pane_arg
-        pane = _resolve_live_pane_target(target)
-        if pane and pane != target:
-            print(f"resolved: target={target} pane={pane}")
-        target_thread = target.lower() if is_thread_id(target) else ""
-        resolved = [
-            (r, lp, wl)
-            for r, lp, wl in resolved
-            if (pane and lp == pane)
-            or (target_thread and r.get("thread", "").lower() == target_thread)
-            or r.get("session_name", "") == target
-        ]
-
-    detail_tag = " (details)" if details else ""
-    print(f"Sessions{detail_tag}: {len(resolved)}")
-
-    if not resolved:
-        print("(none)")
-        return
-
-    resolved.sort(key=_status_sort_key)
-
-    if details:
-        _status_details(resolved, model=model)
-    else:
-        _status_table(resolved)
-        _print_status_recommendations(resolved)
+    acw_observe.cmd_status(_observe_context(), argv)
 
 
 # ---------------------------------------------------------------------------
@@ -3186,12 +3137,7 @@ def _doctor_resolve_target(target: str, model: RuntimeModel | None = None) -> tu
     return "", f"could not resolve target '{target}'"
 
 
-@dataclass
-class DoctorReport:
-    checks: list[tuple[str, str]]
-    result: str
-    exit_code: int
-    recommendations: list[str]
+DoctorReport = acw_observe.DoctorReport
 
 
 RepairStep = acw_repair.RepairStep
@@ -3250,6 +3196,39 @@ def _command_context() -> acw_commands.CommandContext:
     )
 
 
+def _observe_context() -> acw_observe.ObserveContext:
+    return acw_observe.ObserveContext(
+        state_dir=STATE_DIR,
+        preferred_tmux_socket=_preferred_tmux_socket,
+        is_thread_id=is_thread_id,
+        build_runtime_snapshot=_build_runtime_snapshot,
+        build_runtime_model=_build_runtime_model,
+        build_status_entries_from_snapshot=_build_status_entries_from_snapshot,
+        tmux_socket_recovery_hint=_tmux_socket_recovery_hint,
+        resolve_live_pane_target=_resolve_live_pane_target,
+        status_sort_key=_status_sort_key,
+        status_details=_status_details,
+        status_table=_status_table,
+        print_status_recommendations=_print_status_recommendations,
+        state_dir_is_writable=_state_dir_is_writable,
+        codex_auth_state_available=_codex_auth_state_available,
+        run_tmux=run_tmux,
+        doctor_resolve_target=_doctor_resolve_target,
+        strict_thread_for_pane=_strict_thread_for_pane,
+        thread_provenance_text=_thread_provenance_text,
+        runtime_watchers_for_pane=_runtime_watchers_for_pane,
+        watcher_anomalies=_watcher_anomalies,
+        read_state_json=_read_state_json,
+        compute_state=_compute_state,
+        repair_steps_for_pane=_repair_steps_for_pane,
+        current_tmux_pane=current_tmux_pane,
+        read_session_state=_read_session_state,
+        print_doctor_plain=_print_doctor_plain,
+        print_doctor_rich=_print_doctor_rich,
+        short_thread_id=_short_thread_id,
+    )
+
+
 def _pane_numeric_sort_key(pane: str) -> tuple[int, str]:
     return acw_repair.pane_numeric_sort_key(pane, context=_repair_context())
 
@@ -3293,134 +3272,7 @@ def _doctor_recommendation_target(target: str, pane: str, rows: list[dict[str, s
 
 
 def _doctor_report(target: str = "") -> DoctorReport:
-    checks: list[tuple[str, str]] = []
-    recommendations: list[str] = []
-    errors = 0
-    warnings = 0
-    model = _build_runtime_model()
-
-    ok, detail = _state_dir_is_writable()
-    checks.append(("ok" if ok else "error", f"state dir writable: {detail}"))
-    errors += 0 if ok else 1
-
-    ok, detail = _codex_auth_state_available()
-    checks.append(("ok" if ok else "error", f"Codex auth state present: {detail}"))
-    errors += 0 if ok else 1
-
-    tmux_ok = run_tmux("list-sessions") is not None
-    checks.append(("ok" if tmux_ok else "error", "tmux server reachable"))
-    errors += 0 if tmux_ok else 1
-    recovery = _tmux_socket_recovery_hint()
-    if recovery:
-        checks.append(("info", recovery))
-
-    pane, pane_error = _doctor_resolve_target(target, model=model)
-    if pane_error:
-        checks.append(("error", pane_error))
-        errors += 1
-        return DoctorReport(checks=checks, result="error", exit_code=1, recommendations=recommendations)
-
-    if not pane:
-        checks.append(("info", "pane checks skipped: no target and TMUX_PANE not set"))
-        result = "error" if errors else "ok"
-        return DoctorReport(checks=checks, result=result, exit_code=1 if errors else 0, recommendations=recommendations)
-
-    checks.append(("ok", f"pane resolved: {pane}"))
-    tid, thread_error = _strict_thread_for_pane(model, pane)
-    if tid and is_thread_id(tid):
-        checks.append(("ok", f"Codex thread detected: {tid}"))
-        pane_record = model.panes_by_id.get(pane)
-        provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
-        if provenance:
-            checks.append(("info", f"thread provenance: {provenance}"))
-    else:
-        checks.append(("error", thread_error or f"could not detect a Codex thread for pane {pane}"))
-        errors += 1
-
-    rows = [watcher for watcher in _runtime_watchers_for_pane(model, pane)]
-    ps_rows = [
-        {
-            "pid": watcher.pid,
-            "pane": watcher.pane,
-            "thread": watcher.thread_id,
-            "state": watcher.state_file,
-            "watch": watcher.watch_log,
-            "msg_inline": watcher.message_inline,
-            "paused": "1" if watcher.paused else "",
-            "runtime_status": watcher.runtime_status,
-            "runtime_detail": watcher.runtime_detail,
-        }
-        for watcher in rows
-    ]
-    command_target = _doctor_recommendation_target(target, pane, ps_rows)
-    if len(rows) > 1:
-        runtime_ids = ", ".join(sorted(watcher.pid or "?" for watcher in rows))
-        checks.append(("error", f"multiple managed runtimes running on pane {pane}: {runtime_ids}"))
-        errors += 1
-        recommendations.append(f"acw stop {shlex.quote(pane)}")
-    elif rows:
-        watcher = rows[0]
-        checks.append(("ok", f"runtime running: pane={pane} id={watcher.pid}"))
-        anomalies = _watcher_anomalies(model, watcher)
-        if anomalies:
-            detail = "; ".join(anomalies)
-            checks.append(("error", f"runtime identity mismatch: {detail}"))
-            errors += 1
-            recommendations.append(f"acw stop {shlex.quote(pane)}")
-        else:
-            row = {
-                "pid": watcher.pid,
-                "pane": watcher.pane,
-                "thread": watcher.thread_id,
-                "state": watcher.state_file,
-                "watch": watcher.watch_log,
-                "msg_inline": watcher.message_inline,
-                "paused": "1" if watcher.paused else "",
-                "runtime_status": watcher.runtime_status,
-                "runtime_detail": watcher.runtime_detail,
-            }
-            sj = _read_state_json(watcher.state_file)
-            watcher_state = _compute_state(row, sj)
-            health_detail = sj.get("health_detail", "").strip()
-            if watcher_state == "running":
-                checks.append(("ok", "runtime health: running"))
-            elif watcher_state == "paused":
-                msg = "runtime paused"
-                if health_detail:
-                    msg += f" - {health_detail}"
-                checks.append(("warn", msg))
-                warnings += 1
-                recommendations.append(f"acw resume {shlex.quote(command_target)}")
-            else:
-                msg = f"runtime health: {watcher_state}"
-                if health_detail:
-                    msg += f" - {health_detail}"
-                level = "warn" if watcher_state == "warn" else "error"
-                checks.append((level, msg))
-                if level == "warn":
-                    warnings += 1
-                else:
-                    errors += 1
-                recommendations.append(f"acw restart {shlex.quote(command_target)}")
-    else:
-        checks.append(("info", f"no managed runtime running for pane {pane}"))
-        if tid and is_thread_id(tid):
-            recommendations.append(f"acw start {shlex.quote(command_target)} {tid}")
-
-    repair_steps = _repair_steps_for_pane(model, pane) if pane else []
-    if any(step.auto_apply for step in repair_steps):
-        recommendations.insert(0, f"acw repair {shlex.quote(command_target)}")
-    elif repair_steps:
-        recommendations.insert(0, f"acw repair {shlex.quote(command_target)} --dry-run")
-
-    result = "error" if errors else ("warn" if warnings else "ok")
-    exit_code = 1 if errors else 0
-    return DoctorReport(
-        checks=checks,
-        result=result,
-        exit_code=exit_code,
-        recommendations=list(dict.fromkeys(recommendations)),
-    )
+    return acw_observe.doctor_report(_observe_context(), target)
 
 def _print_doctor_plain(report: DoctorReport) -> None:
     acw_ui.print_doctor_plain(
@@ -3440,20 +3292,7 @@ def _print_doctor_rich(report: DoctorReport) -> None:
 
 
 def cmd_doctor(argv: list[str]) -> None:
-    target = ""
-    if argv:
-        if len(argv) > 1 or argv[0].startswith("--"):
-            print("error: doctor accepts at most one target", file=sys.stderr)
-            sys.exit(2)
-        target = argv[0]
-
-    report = _doctor_report(target)
-    try:
-        _print_doctor_rich(report)
-    except ModuleNotFoundError:
-        _print_doctor_plain(report)
-    if report.exit_code:
-        sys.exit(report.exit_code)
+    acw_observe.cmd_doctor(_observe_context(), argv)
 
 
 # ---------------------------------------------------------------------------

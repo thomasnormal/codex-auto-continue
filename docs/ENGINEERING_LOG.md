@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted status/doctor orchestration into `bin/acw_observe.py`. `watchd` now delegates the high-level status filtering, shared-daemon reporting, doctor report building, and doctor/status command flow through an explicit observe context, while the lower-level runtime snapshot and row helpers stay local for now.
 - Change: extracted the mutating command layer into `bin/acw_commands.py`. `start/stop/pause/resume/restart/edit/repair` plus their argument parsing and restart/repair orchestration now live behind an explicit command context, while `auto_continue_watchd.py` keeps thin wrappers for the existing API surface.
 - Change: extracted the repair planner into `bin/acw_repair.py`. `watchd` now keeps the CLI-side repair command orchestration, but the actual pane/runtime repair policy and `RepairStep` data model live in a dedicated module with an explicit callback context. That makes the daemon/runtime model easier to reason about and keeps repair policy separate from tmux/Codex command glue.
 - Change: made SQLite WAL setup one-time and best-effort in `acw_state._connect()`. `acw` used to execute `PRAGMA journal_mode=WAL` on every connect, even though WAL mode is persistent once enabled. The shared daemon crash traced to that repeated pragma, not to opening the database itself, so `watchd` now enables WAL once when possible and otherwise keeps using the open connection instead of crashing the control plane.
