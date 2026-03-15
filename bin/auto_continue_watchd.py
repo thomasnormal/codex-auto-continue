@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 import glob
 import io
-import json
 import os
 import re
 import shlex
@@ -21,6 +19,7 @@ from pathlib import Path
 
 import acw_state
 import acw_session
+import acw_status
 import acw_rpc
 import acw_daemon
 import acw_control
@@ -1480,107 +1479,43 @@ def _build_status_entries_from_snapshot(
 
 
 def _read_state_json(state_path: str) -> dict[str, str]:
-    """Read persisted session health fields from a DB ref or legacy JSON path."""
-    result: dict[str, str] = {}
-    if not state_path:
-        return result
-    if state_path.startswith(acw_state.SESSION_REF_PREFIX):
-        data = acw_state.read_state_ref(state_path, state_dir=STATE_DIR)
-        for key in ("health", "health_detail", "health_ts", "last_continue_at", "thread_id"):
-            if key in data:
-                result[key] = str(data[key])
-        return result
-    if not os.path.isfile(state_path):
-        return result
-    try:
-        with open(state_path) as f:
-            data = json.load(f)
-        for key in ("health", "health_detail", "health_ts", "last_continue_at", "window_name", "thread_id"):
-            if key in data:
-                result[key] = str(data[key])
-    except (OSError, json.JSONDecodeError):
-        pass
-    return result
+    return acw_status.read_state_json(
+        state_path,
+        state_dir=STATE_DIR,
+        session_ref_prefix=acw_state.SESSION_REF_PREFIX,
+        read_state_ref_fn=acw_state.read_state_ref,
+    )
 
 
 def _resolve_message(r: dict[str, str]) -> tuple[str, str]:
-    """Return (mode, value), preferring canonical persisted session state.
-
-    mode is 'file', 'inline', or '' if no message is found.
-    """
-    tid = r.get("thread", "")
-    if tid and is_thread_id(tid):
-        ss = _read_session_state(tid)
-        msg = ss.get("message", "")
-        if msg:
-            return "inline", msg
-    if r.get("msg_inline"):
-        return "inline", r["msg_inline"]
-    return "", ""
+    return acw_status.resolve_message(
+        r,
+        is_thread_id_fn=is_thread_id,
+        read_session_state_fn=_read_session_state,
+    )
 
 
 def _short_thread_id(thread_id: str) -> str:
-    """Return a compact display form for a thread id in summary tables."""
-    if not is_thread_id(thread_id):
-        return thread_id
-    return f"{thread_id[:8]}…{thread_id[-4:]}"
+    return acw_status.short_thread_id(thread_id, is_thread_id_fn=is_thread_id)
 
 
 def _compute_state(r: dict[str, str], sj: dict[str, str]) -> str:
-    """Derive display state from process status and health JSON."""
-    if r.get("entity_kind") == "dead_session":
-        return "dead"
-    if r.get("anomalies"):
-        return "error"
-    runtime_status = r.get("runtime_status", "")
-    if runtime_status == "paused" or r.get("paused", "") == "1":
-        return "paused"
-    if runtime_status == "error":
-        return "error"
-    if runtime_status == "warn":
-        return "warn"
-    if runtime_status == "running":
-        h = sj.get("health", "")
-        if h == "stale":
-            h = "warn"
-        if h and h != "ok":
-            return h
-        return "running"
-    if runtime_status == "stopping":
-        return "warn"
-    runtime_id = r.get("runtime_id", "") or r.get("pid", "")
-    if runtime_id and runtime_id.isdigit() and _is_pid_stopped(int(runtime_id)):
-        return "paused"
-    # No live watcher runtime.
-    if not runtime_id:
-        return "dead"
-    h = sj.get("health", "")
-    if h == "stale":
-        h = "warn"
-    if h and h != "ok":
-        return h
-    return "running"
+    return acw_status.compute_state(
+        r,
+        sj,
+        is_pid_stopped_fn=_is_pid_stopped,
+    )
 
 
 def _message_summary_for_row(r: dict[str, str]) -> str:
-    mode, value = _resolve_message(r)
-    if mode == "inline" and value:
-        return value
-    return "-"
-
-
-_STATE_STYLES = {
-    "running": "green",
-    "paused": "yellow",
-    "warn": "dark_orange",
-    "error": "bold red",
-    "dead": "dim",
-}
+    return acw_status.message_summary_for_row(
+        r,
+        resolve_message_fn=_resolve_message,
+    )
 
 
 def _styled_state(state: str) -> str:
-    style = _STATE_STYLES.get(state, "")
-    return f"[{style}]{state}[/{style}]" if style else state
+    return acw_status.styled_state(state)
 
 
 _DOCTOR_RESULT_STYLES = {
@@ -1591,12 +1526,11 @@ _DOCTOR_RESULT_STYLES = {
 
 
 def _state_summary(state: str, sj: dict[str, str]) -> str:
-    """Return a compact state cell, with inline detail for degraded rows."""
-    detail = sj.get("health_detail", "").strip()
-    if not detail or state == "running":
-        return _styled_state(state)
-    detail_summary = _truncate(detail, 28)
-    return f"{_styled_state(state)}\n[dim]{detail_summary}[/dim]"
+    return acw_status.state_summary(
+        state,
+        sj.get("health_detail", ""),
+        truncate_fn=_truncate,
+    )
 
 
 _MAX_MSG_LINES = 3
@@ -1624,90 +1558,32 @@ def _status_table_plain(rows_data: list[tuple[str, str, str, str, str, str]]) ->
 
 
 def _status_target_for_row(row: dict[str, str], current_pane: str, window_label: str) -> str:
-    if row.get("entity_kind") != "dead_session" and current_pane:
-        return current_pane
-    name = row.get("name", "").strip()
-    if name and name != "-":
-        return name
-    session_name = row.get("session_name", "").strip()
-    if session_name and session_name != "-":
-        return session_name
-    if window_label and ":" in window_label:
-        tail = window_label.rsplit(":", 1)[-1].strip()
-        if tail and tail != "-":
-            return tail
-    return current_pane or row.get("pane", "")
+    return acw_status.status_target_for_row(row, current_pane, window_label)
 
 
 def _sort_session_key(session_name: str) -> tuple[int, object]:
-    if session_name.isdigit():
-        return 0, int(session_name)
-    return 1, session_name
+    return acw_status.sort_session_key(session_name)
 
 
 def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, object], int, int, int, str]:
-    row, current_pane, window_label = item
-    match = re.match(r"([^:]+):(\d+):", window_label)
-    if match:
-        session_name = match.group(1)
-        window_index = int(match.group(2))
-    else:
-        session_name = "~"
-        window_index = 10**9
-
-    pane_number = 10**9
-    pane = current_pane or row.get("pane", "")
-    if is_pane_id(pane):
-        try:
-            pane_number = int(pane[1:])
-        except ValueError:
-            pass
-    pid_number = 10**9
-    pid = row.get("pid", "")
-    if pid.isdigit():
-        pid_number = int(pid)
-    return (_sort_session_key(session_name), window_index, pane_number, pid_number, window_label)
+    return acw_status.status_sort_key(
+        item,
+        is_pane_id_fn=is_pane_id,
+    )
 
 
 def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
-    commands: list[str] = []
-    seen: set[str] = set()
-    for row, current_pane, window_label in resolved:
-        if row.get("anomalies"):
-            continue
-        if row.get("entity_kind") == "dead_session":
-            continue
-        state = _compute_state(row, _read_state_json(row["state"]))
-        if state not in {"warn", "error"}:
-            continue
-        target = _status_target_for_row(row, current_pane, window_label)
-        if not target:
-            continue
-        cmd = f"acw doctor {shlex.quote(target)}"
-        if cmd in seen:
-            continue
-        seen.add(cmd)
-        commands.append(cmd)
-    return commands
+    return acw_status.status_recommendations(
+        resolved,
+        compute_state_fn=_compute_state,
+        read_state_json_fn=_read_state_json,
+        status_target_for_row_fn=_status_target_for_row,
+        quote_target_fn=shlex.quote,
+    )
 
 
 def _daemon_scope_alive(scope_state: dict[str, str]) -> bool:
-    alive_text = str(scope_state.get("alive", "")).strip().lower()
-    if alive_text in {"1", "true", "yes"}:
-        return True
-    if alive_text in {"0", "false", "no"}:
-        return False
-    daemon_pid = str(scope_state.get("daemon_pid", "")).strip()
-    if not daemon_pid.isdigit():
-        return False
-    try:
-        os.kill(int(daemon_pid), 0)
-    except OSError:
-        return False
-    socket_path = str(scope_state.get("socket_path", "")).strip()
-    if not socket_path or not Path(socket_path).exists():
-        return False
-    return True
+    return acw_status.daemon_scope_alive(scope_state)
 
 
 def _daemon_scope_down_detail(
@@ -1716,215 +1592,45 @@ def _daemon_scope_down_detail(
     pid_file: str,
     socket_file: str,
 ) -> str:
-    daemon_pid = str(scope_state.get("daemon_pid", "")).strip()
-    if daemon_pid:
-        if not daemon_pid.isdigit():
-            return f"daemon pid '{daemon_pid}' is invalid"
-        try:
-            os.kill(int(daemon_pid), 0)
-        except OSError:
-            if Path(pid_file).exists():
-                return f"pid file points to dead daemon pid {daemon_pid}"
-            return f"daemon pid {daemon_pid} is not running"
-
-    socket_path = str(scope_state.get("socket_path", "")).strip() or socket_file
-    if socket_path and not Path(socket_path).exists():
-        return f"control socket {socket_path} is missing"
-    return "no daemon heartbeat or control socket found"
+    return acw_status.daemon_scope_down_detail(
+        scope_state,
+        pid_file=pid_file,
+        socket_file=socket_file,
+    )
 
 
 def _observed_daemon_scope_state(socket_path: str | None = None) -> dict[str, str]:
-    scope_state = dict(_read_daemon_scope_state(socket_path))
-    pid_file = daemon_pid_file_for_scope(socket_path)
-    socket_file = daemon_socket_file_for_scope(socket_path)
-    pid_from_file = _read_pid_file(pid_file) or ""
-    socket_exists = Path(socket_file).exists()
-
-    if pid_from_file:
-        scope_state["daemon_pid"] = pid_from_file
-    if socket_exists:
-        scope_state["socket_path"] = socket_file
-    elif not str(scope_state.get("socket_path", "")).strip() and pid_from_file:
-        scope_state["socket_path"] = socket_file
-
-    if not str(scope_state.get("alive", "")).strip():
-        scope_state["alive"] = "1" if _daemon_scope_alive(scope_state) else "0"
-
-    if scope_state["alive"] in {"0", "false", "no"} and not str(scope_state.get("detail", "")).strip():
-        scope_state["detail"] = _daemon_scope_down_detail(
+    return acw_status.observed_daemon_scope_state(
+        socket_path=socket_path,
+        read_daemon_scope_state_fn=_read_daemon_scope_state,
+        read_pid_file_fn=_read_pid_file,
+        daemon_pid_file_for_scope_fn=daemon_pid_file_for_scope,
+        daemon_socket_file_for_scope_fn=daemon_socket_file_for_scope,
+        daemon_scope_alive_fn=_daemon_scope_alive,
+        daemon_scope_down_detail_fn=lambda scope_state, pid_file, socket_file: _daemon_scope_down_detail(
             scope_state,
             pid_file=pid_file,
             socket_file=socket_file,
-        )
-
-    return scope_state
+        ),
+    )
 
 
 def _shared_daemon_error_message(unwatched_rows: list[tuple[dict[str, str], str]]) -> str:
-    if not unwatched_rows:
-        return ""
-    scope_state = _observed_daemon_scope_state()
-    if _daemon_scope_alive(scope_state):
-        return ""
-    detail = str(scope_state.get("detail", "")).strip()
-    scope_label = _tmux_scope_label()
-    msg = (
-        f"Shared daemon error: acw daemon is down for tmux scope {scope_label}; "
-        f"{len(unwatched_rows)} managed live Codex pane(s) currently have no runtime."
+    return acw_status.shared_daemon_error_message(
+        unwatched_rows,
+        observed_daemon_scope_state_fn=_observed_daemon_scope_state,
+        daemon_scope_alive_fn=_daemon_scope_alive,
+        tmux_scope_label_fn=_tmux_scope_label,
     )
-    if detail:
-        msg += f" Detail: {detail}."
-    msg += " Fix: run acw repair --all or any mutating acw command to restart the daemon."
-    return msg
 
 
 def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
-    messages: list[str] = []
-    seen: set[str] = set()
-
-    watcher_rows: list[tuple[dict[str, str], str]] = []
-    unwatched_rows: list[tuple[dict[str, str], str]] = []
-    unresolved_rows: list[tuple[dict[str, str], str]] = []
-    dead_rows: list[tuple[dict[str, str], str, str]] = []
-    rows_by_session_name: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row, current_pane, window_label in resolved:
-        kind = row.get("entity_kind", "watcher")
-        session_name = row.get("session_name", "").strip()
-        if session_name:
-            rows_by_session_name[session_name].append(row)
-        if kind == "watcher":
-            watcher_rows.append((row, current_pane))
-        elif kind == "unwatched_pane":
-            unwatched_rows.append((row, current_pane))
-        elif kind == "unresolved_pane":
-            unresolved_rows.append((row, current_pane))
-        elif kind == "dead_session":
-            dead_rows.append((row, current_pane, window_label))
-
-    daemon_down_message = _shared_daemon_error_message(unwatched_rows)
-    live_issue_found = any(row.get("anomalies") for row, _ in watcher_rows) or bool(unwatched_rows or unresolved_rows)
-
-    watchers_by_pane: dict[str, list[dict[str, str]]] = defaultdict(list)
-    watchers_by_thread: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row, current_pane in watcher_rows:
-        pane = current_pane or row.get("pane", "")
-        if pane:
-            watchers_by_pane[pane].append(row)
-        thread_id = row.get("thread", "")
-        if is_thread_id(thread_id):
-            watchers_by_thread[thread_id.lower()].append(row)
-
-    for pane, rows in sorted(watchers_by_pane.items()):
-        if len(rows) <= 1:
-            continue
-        runtime_ids = ", ".join(sorted((row.get("runtime_id") or row.get("pid", "?")) for row in rows))
-        msg = f"Invariant error: pane {pane} has {len(rows)} managed runtimes ({runtime_ids}). Fix: acw repair {pane}"
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    for thread_id, rows in sorted(watchers_by_thread.items()):
-        panes = sorted({row.get("pane", "") for row in rows if row.get("pane", "")})
-        if len(panes) <= 1:
-            continue
-        cleanup = "; ".join(f"acw stop {pane}" for pane in panes)
-        msg = (
-            f"Invariant error: thread {_short_thread_id(thread_id)} has managed runtimes on panes {', '.join(panes)}. "
-            f"Clean up: {cleanup}; then start exactly one managed runtime."
-        )
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    for session_name, rows in sorted(rows_by_session_name.items()):
-        threads = sorted({row.get("thread", "").lower() for row in rows if is_thread_id(row.get("thread", ""))})
-        if len(threads) <= 1:
-            continue
-        thread_list = ", ".join(_short_thread_id(thread_id) for thread_id in threads)
-        msg = (
-            f"Invariant error: agent name '{session_name}' maps to multiple threads ({thread_list}). "
-            "Clean up the duplicate session/pane state before targeting it by name."
-        )
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    if daemon_down_message:
-        if daemon_down_message not in seen:
-            seen.add(daemon_down_message)
-            messages.append(daemon_down_message)
-    else:
-        for row, current_pane in unwatched_rows:
-            pane = current_pane or row.get("pane", "")
-            msg = (
-                f"Invariant error: live Codex pane {pane} has thread {_short_thread_id(row.get('thread', ''))} "
-                f"but no runtime. Fix: acw repair {pane}"
-            )
-            if msg not in seen:
-                seen.add(msg)
-                messages.append(msg)
-
-    for row, current_pane in unresolved_rows:
-        pane = current_pane or row.get("pane", "")
-        detail = row.get("anomaly_detail", "").strip() or "could not determine thread_id from the live Codex process"
-        msg = (
-            f"Invariant error: live Codex pane {pane} has a Codex process but no detectable thread id ({detail}). "
-            f"Clean up: restart Codex there, then run acw start {pane}."
-        )
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    for row, current_pane in watcher_rows:
-        anomalies = set(row.get("anomalies", ()))
-        pane = current_pane or row.get("pane", "")
-        runtime_id = row.get("runtime_id") or row.get("pid", "?")
-        if "no saved session" in anomalies:
-            msg = (
-                f"Invariant error: pane {pane} runtime id={runtime_id} has no saved session. "
-                f"Fix: acw repair {pane}"
-            )
-            if msg not in seen:
-                seen.add(msg)
-                messages.append(msg)
-        if "no live Codex agent detected in pane" in anomalies:
-            msg = (
-                f"Invariant error: pane {pane} runtime id={runtime_id} has no live Codex agent in the pane. "
-                f"Fix: acw repair {pane}"
-            )
-            if msg not in seen:
-                seen.add(msg)
-                messages.append(msg)
-        if any(detail.startswith("could not determine thread_id") for detail in anomalies):
-            msg = (
-                f"Invariant error: pane {pane} runtime id={runtime_id} has a live Codex process but its thread id "
-                f"could not be detected. Fix: acw repair {pane} --dry-run"
-            )
-            if msg not in seen:
-                seen.add(msg)
-                messages.append(msg)
-        if any(detail.startswith("pane agent thread is ") for detail in anomalies):
-            msg = (
-                f"Invariant error: pane {pane} runtime id={runtime_id} is bound to the wrong thread. "
-                f"Fix: acw repair {pane}"
-            )
-            if msg not in seen:
-                seen.add(msg)
-                messages.append(msg)
-
-    if dead_rows:
-        msg = "Hint: run acw cleanup to remove dead sessions."
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    if live_issue_found:
-        msg = "Hint: run acw repair --dry-run for live invariant fixes."
-        if msg not in seen:
-            seen.add(msg)
-            messages.append(msg)
-
-    return messages
+    return acw_status.status_invariant_messages(
+        resolved,
+        is_thread_id_fn=is_thread_id,
+        short_thread_id_fn=_short_thread_id,
+        shared_daemon_error_message_fn=_shared_daemon_error_message,
+    )
 
 
 def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> None:

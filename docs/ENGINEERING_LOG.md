@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted the status/state-derivation helpers into `bin/acw_status.py`. Persisted health reads, message resolution, runtime-state derivation, daemon-down/shared-invariant messaging, and status recommendation logic now live in one module, while `auto_continue_watchd.py` keeps wrapper names for the existing CLI/test surface.
 - Change: extracted the session/message/rename-hook glue into `bin/acw_session.py`. Session-state reads/writes, saved-session loading, continue-message normalization, and the tmux `window-renamed` synchronization path now live in one module while `auto_continue_watchd.py` keeps the same wrapper names for tests and CLI compatibility.
 - Change: extracted tmux/scope/path and target-resolution helpers into `bin/acw_tmux.py`. `watchd` now keeps compatibility wrappers for `run_tmux`, tmux-scope naming, socket recovery hints, and pane/window target resolution so the CLI surface and existing regression patch points stay stable while the tmux-specific logic lives in one place.
 - Change: extracted the daemon/control-plane orchestration into `bin/acw_control.py`. Daemon process supervision, daemon RPC transport/mutations, daemon reconcile/wait helpers, and in-pane Codex restart control now live behind explicit callback contexts, while `auto_continue_watchd.py` keeps compatibility wrappers so the existing CLI and regression tests still patch the same names.
