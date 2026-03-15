@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1651,7 +1652,13 @@ def _daemon_main(argv: list[str]) -> None:
         socket_file.unlink(missing_ok=True)
         log_tail.close()
         for thread_id in list(runtimes):
-            _remove_runtime_state(thread_id, scope)
+            try:
+                _remove_runtime_state(thread_id, scope)
+            except sqlite3.Error as exc:
+                print(
+                    f"warning: failed to remove runtime state for thread_id={thread_id}: {exc}",
+                    file=sys.stderr,
+                )
         pid_file.unlink(missing_ok=True)
 
 

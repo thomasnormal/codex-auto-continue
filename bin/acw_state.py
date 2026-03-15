@@ -15,6 +15,7 @@ THREAD_ID_RE = re.compile(
 
 _JSON_MIGRATION_KEY = "json_migration_v1"
 _SQLITE_MIGRATION_KEY = "sqlite_agent_model_v1"
+_SQLITE_WAL_KEY = "sqlite_wal_v1"
 
 _AGENT_DEFAULTS: dict[str, object] = {
     "agent_id": "",
@@ -84,10 +85,10 @@ def _connect(state_dir: str) -> sqlite3.Connection:
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(state_db_path(state_dir), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(conn)
+    _maybe_enable_wal(conn)
     _maybe_migrate_legacy_json(conn, state_dir)
     _maybe_migrate_legacy_sqlite_tables(conn)
     return conn
@@ -198,6 +199,20 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
         (name,),
     ).fetchone()
     return row is not None
+
+
+def _maybe_enable_wal(conn: sqlite3.Connection) -> None:
+    if _meta_value(conn, _SQLITE_WAL_KEY) == "1":
+        return
+    try:
+        row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    except sqlite3.OperationalError:
+        return
+    mode = str(row[0]).strip().lower() if row else ""
+    if mode != "wal":
+        return
+    with conn:
+        _set_meta_value(conn, _SQLITE_WAL_KEY, "1")
 
 
 def _agent_id_for_thread(thread_id: str) -> str:

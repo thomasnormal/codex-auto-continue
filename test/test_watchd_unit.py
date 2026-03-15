@@ -12,6 +12,7 @@ from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import MagicMock
 from unittest.mock import mock_open
 
 import sys
@@ -528,6 +529,44 @@ class WatchdUnitTests(unittest.TestCase):
                 )
         finally:
             conn.close()
+
+    def test_sqlite_connect_skips_wal_pragma_after_initial_setup(self):
+        fake_conn = MagicMock()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw_state.sqlite3, "connect", return_value=fake_conn):
+                with patch.object(acw_state, "_ensure_schema"):
+                    with patch.object(acw_state, "_maybe_migrate_legacy_json"):
+                        with patch.object(acw_state, "_maybe_migrate_legacy_sqlite_tables"):
+                            with patch.object(acw_state, "_meta_value", return_value="1"):
+                                conn = acw_state._connect(td)
+
+        self.assertIs(fake_conn, conn)
+        executed = [call.args[0] for call in fake_conn.execute.call_args_list]
+        self.assertNotIn("PRAGMA journal_mode=WAL", executed)
+
+    def test_sqlite_connect_survives_operational_error_enabling_wal(self):
+        fake_conn = MagicMock()
+
+        def execute(sql, *args, **kwargs):
+            if sql == "PRAGMA journal_mode=WAL":
+                raise sqlite3.OperationalError("unable to open database file")
+            result = MagicMock()
+            result.fetchone.return_value = None
+            return result
+
+        fake_conn.execute.side_effect = execute
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(acw_state.sqlite3, "connect", return_value=fake_conn):
+                with patch.object(acw_state, "_ensure_schema"):
+                    with patch.object(acw_state, "_maybe_migrate_legacy_json"):
+                        with patch.object(acw_state, "_maybe_migrate_legacy_sqlite_tables"):
+                            with patch.object(acw_state, "_meta_value", return_value=""):
+                                with patch.object(acw_state, "_set_meta_value") as set_meta:
+                                    conn = acw_state._connect(td)
+
+        self.assertIs(fake_conn, conn)
+        set_meta.assert_not_called()
 
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
@@ -1174,6 +1213,44 @@ class WatchdUnitTests(unittest.TestCase):
                 self.assertEqual("auto-paused: Authentication failed", state["health_detail"])
                 self.assertEqual("paused", runtime.runtime_status)
                 self.assertTrue(runtime.paused)
+
+    def test_daemon_main_cleanup_ignores_sqlite_errors_removing_runtime_state(self):
+        class DummyServer:
+            def close(self):
+                return None
+
+        class DummyTail:
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = os.path.join(td, "acw_daemon.pid")
+            socket_file = os.path.join(td, "acw_daemon.sock")
+
+            def fail_reconcile(_scope, *, log_tail, runtimes):
+                del log_tail
+                runtimes[THREAD] = object()
+                raise KeyboardInterrupt
+
+            with patch.object(acw.acw_rpc, "listen", return_value=DummyServer()):
+                with patch.object(acw, "daemon_pid_file_for_scope", return_value=pid_file):
+                    with patch.object(acw, "daemon_socket_file_for_scope", return_value=socket_file):
+                        with patch.object(acw, "_DaemonCodexLogTail", return_value=DummyTail()):
+                            with patch.object(acw, "_write_daemon_scope_state"):
+                                with patch.object(acw, "_daemon_process_rpc_requests", return_value=0):
+                                    with patch.object(acw, "_daemon_reconcile_once", side_effect=fail_reconcile):
+                                        with patch.object(
+                                            acw,
+                                            "_remove_runtime_state",
+                                            side_effect=sqlite3.OperationalError("unable to open database file"),
+                                        ) as remove_runtime:
+                                            err = io.StringIO()
+                                            with redirect_stderr(err):
+                                                with self.assertRaises(KeyboardInterrupt):
+                                                    acw._daemon_main([])
+
+        remove_runtime.assert_called_once_with(THREAD, "")
+        self.assertIn("failed to remove runtime state", err.getvalue())
 
     def test_repair_steps_restart_duplicate_watchers_on_same_pane(self):
         model = acw._build_runtime_model(_snapshot(

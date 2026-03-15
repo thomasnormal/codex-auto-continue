@@ -1,5 +1,11 @@
 # Engineering Log
 
+## 2026-03-15
+
+- Change: made SQLite WAL setup one-time and best-effort in `acw_state._connect()`. `acw` used to execute `PRAGMA journal_mode=WAL` on every connect, even though WAL mode is persistent once enabled. The shared daemon crash traced to that repeated pragma, not to opening the database itself, so `watchd` now enables WAL once when possible and otherwise keeps using the open connection instead of crashing the control plane.
+- Change: hardened daemon shutdown after SQLite failures. If the daemon is already unwinding because a state operation raised `sqlite3.Error`, cleanup now logs and skips runtime-row deletion failures instead of masking the original problem with a second traceback from `_remove_runtime_state(...)`.
+- Realization: in the live daemon crash, `sqlite3.connect(...)` had already succeeded. The failure was specifically the follow-up `PRAGMA journal_mode=WAL`, which is another reason not to treat WAL reconfiguration as a mandatory per-connection step.
+
 ## 2026-03-14
 
 - Change: made daemon-down reporting live-first. `status` now synthesizes daemon scope state from SQLite heartbeat rows plus the real pid file and control socket, so a dead shared daemon reports as one `Shared daemon error:` instead of N fake pane-local `... but no runtime` repairs.
