@@ -656,7 +656,9 @@ class RealCodexHarness:
                 return None
             return TurnObservation(thread_id=thread_id, sources=sources)
 
-        return self._wait_for_value(_probe, timeout=timeout, description="first completed Codex turn")
+        turn = self._wait_for_value(_probe, timeout=timeout, description="first completed Codex turn")
+        self.reset_codex_log_baseline()
+        return turn
 
     def capture_pane(self, lines: int = 80) -> str:
         return self.tmux_stdout("capture-pane", "-t", self.pane_id, "-p", "-S", f"-{lines}")
@@ -793,6 +795,8 @@ class RealCodexHarness:
         state_dump.chmod(0o700)
         for pattern in ("acw_state.sqlite*", "acw_daemon.*", "auto_continue_logwatch*.log"):
             for src in self.codex_dir.glob(pattern):
+                if not src.exists():
+                    continue
                 shutil.copy2(src, state_dump / src.name)
         return dst
 

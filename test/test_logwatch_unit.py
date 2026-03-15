@@ -174,6 +174,22 @@ class LogwatchUnitTests(unittest.TestCase):
             with patch.object(logwatch, "_process_start_epoch", return_value=100.0):
                 self.assertIsNone(logwatch._thread_from_state_db_pid("222", Path(tmpdir)))
 
+    def test_thread_from_codex_pid_accepts_proc_comm_name(self):
+        def fake_readlink(path: str) -> str:
+            if path == "/proc/222/exe":
+                return "/usr/bin/python3"
+            raise OSError(path)
+
+        def fake_read_text(self: Path, encoding=None, errors=None) -> str:
+            if str(self) == "/proc/222/comm":
+                return "codex\n"
+            raise OSError(str(self))
+
+        with patch.object(logwatch.os, "readlink", side_effect=fake_readlink):
+            with patch.object(logwatch.Path, "read_text", fake_read_text):
+                with patch.object(logwatch, "_thread_from_state_db_pid", return_value=THREAD):
+                    self.assertEqual(THREAD, logwatch.thread_from_codex_pid("222"))
+
     def test_parse_codex_log_event_parses_post_sampling_line(self):
         line = (
             f"2026-03-10 INFO session_loop{{thread_id={THREAD}}}: codex_core::codex: "

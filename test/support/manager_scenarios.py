@@ -8,18 +8,20 @@ import re
 def manager_scenario_backends() -> set[str]:
     raw = os.environ.get("ACW_MANAGER_SCENARIO_BACKEND", "").strip().lower()
     if not raw:
+        backends = {"mock"}
+        if os.environ.get("AUTO_CONTINUE_RUN_LOCAL_CODEX_TESTS") == "1":
+            backends.add("local")
         if os.environ.get("AUTO_CONTINUE_RUN_REAL_CODEX_TESTS") == "1":
-            return {"mock", "real"}
-        return {"mock"}
-    if raw == "mock":
-        return {"mock"}
-    if raw == "real":
-        return {"real"}
+            backends.add("real")
+        return backends
     if raw == "both":
         return {"mock", "real"}
-    raise RuntimeError(
-        "ACW_MANAGER_SCENARIO_BACKEND must be one of: mock, real, both"
-    )
+    if raw == "all":
+        return {"mock", "local", "real"}
+    parts = {part.strip() for part in raw.split(",") if part.strip()}
+    if parts and parts <= {"mock", "local", "real"}:
+        return parts
+    raise RuntimeError("ACW_MANAGER_SCENARIO_BACKEND must be one of: mock, local, real, both, all, or a comma-separated subset")
 
 
 def manager_scenario_backend_enabled(name: str) -> bool:
@@ -455,7 +457,7 @@ class ManagerScenarioMixin:
         )
 
     def test_manager_status_summary_shows_recent_last_agent_text(self):
-        token = "CONTROLPANELTOKEN"
+        token = "PANELTOK"
         self.harness.rename_window("summary")
         self.harness.start_codex(f"say exactly {token} and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()

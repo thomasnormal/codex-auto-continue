@@ -955,12 +955,19 @@ def _thread_from_codex_procfs(pid: str) -> Optional[str]:
 
 def thread_from_codex_pid(pid: str) -> Optional[str]:
     """If *pid* is a codex process, return its thread_id from local Codex state."""
+    exe_name = ""
     try:
-        exe = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
-        if exe.removesuffix(" (deleted)") != "codex":
-            return None
+        exe_name = os.readlink(f"/proc/{pid}/exe").rsplit("/", 1)[-1]
     except OSError:
-        return None
+        exe_name = ""
+    exe_name = exe_name.removesuffix(" (deleted)")
+    if exe_name != "codex":
+        try:
+            proc_name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            return None
+        if proc_name != "codex":
+            return None
     return _thread_from_state_db_pid(pid) or _thread_from_codex_procfs(pid)
 
 

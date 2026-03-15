@@ -351,16 +351,28 @@ Real end-to-end suite:
 bash test/test_rollout_e2e.sh
 ```
 
-Shared manager scenarios can run on the mock backend, the real backend, or
-both:
+Shared manager scenarios can run on the mock backend, the local tmux backend
+(real CLI + tmux + SQLite + daemon with a stub `codex` process), the real
+backend, or any comma-separated subset:
 
 ```bash
 python3 -m unittest test.test_manager_scenarios
+ACW_MANAGER_SCENARIO_BACKEND=local AUTO_CONTINUE_RUN_LOCAL_CODEX_TESTS=1 \
+  python3 -m unittest test.test_local_codex_integration.LocalCodexManagerScenarioTests
 ACW_MANAGER_SCENARIO_BACKEND=real AUTO_CONTINUE_RUN_REAL_CODEX_TESTS=1 \
   python3 -m unittest test.test_real_codex_integration.RealCodexManagerScenarioTests
-ACW_MANAGER_SCENARIO_BACKEND=both AUTO_CONTINUE_RUN_REAL_CODEX_TESTS=1 \
-  python3 -m unittest test.test_manager_scenarios test.test_real_codex_integration.RealCodexManagerScenarioTests
+ACW_MANAGER_SCENARIO_BACKEND=mock,local AUTO_CONTINUE_RUN_LOCAL_CODEX_TESTS=1 \
+  python3 -m unittest test.test_manager_scenarios test.test_local_codex_integration
+ACW_MANAGER_SCENARIO_BACKEND=all AUTO_CONTINUE_RUN_LOCAL_CODEX_TESTS=1 AUTO_CONTINUE_RUN_REAL_CODEX_TESTS=1 \
+  python3 -m unittest test.test_manager_scenarios test.test_local_codex_integration test.test_real_codex_integration
 ```
+
+The local suite:
+
+- uses a dedicated private tmux server on its own socket
+- runs the real manager/daemon/runtime stack against a stub `codex`
+- does not need live Codex credentials or network access
+- still exercises live pane probing, tmux control, SQLite state, and daemon RPC
 
 The real suite:
 
@@ -381,3 +393,8 @@ Current real-Codex coverage includes:
 - manager start for plain `codex` panes
 - manager start for `codex resume <thread-id>` panes
 - shared manager scenarios for `doctor`, `edit`, `status`, `repair --all`, daemon-death recovery via `restart`, and tmux socket recovery
+
+Current local-backend coverage includes the full shared manager scenario suite,
+including `start`, `stop`, `pause`, `resume`, `restart --restart-codex`,
+`status`, `doctor`, `repair`, daemon-death recovery, and CLI parsing checks
+against a real tmux/daemon/SQLite stack.
