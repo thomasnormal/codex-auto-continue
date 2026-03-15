@@ -24,6 +24,7 @@ from pathlib import Path
 import acw_state
 import acw_rpc
 import acw_daemon
+import acw_commands
 import acw_probe
 import acw_repair
 import acw_ui
@@ -735,45 +736,20 @@ def resolve_thread_id(pane: str, requested: str = "", *, model: RuntimeModel | N
 def parse_thread_and_message_args(
     args: list[str],
 ) -> tuple[str, str, bool]:
-    thread_arg, message_value, message_explicit, _ = _parse_restartable_args(args)
-    return thread_arg, message_value, message_explicit
+    return acw_commands.parse_thread_and_message_args(args)
 
 
 def parse_restart_args(
     args: list[str],
 ) -> tuple[str, str, bool, bool]:
-    return _parse_restartable_args(args, allow_restart_codex=True)
+    return acw_commands.parse_restart_args(args)
 
 
 def _parse_restartable_args(
     args: list[str],
     allow_restart_codex: bool = False,
 ) -> tuple[str, str, bool, bool]:
-    """Return (thread_arg, message_value, message_explicit, restart_codex)."""
-    thread_arg = ""
-    message_value = ""
-    message_explicit = False
-    restart_codex = False
-
-    rest = list(args)
-    if rest and not rest[0].startswith("--"):
-        thread_arg = rest.pop(0)
-
-    while rest:
-        tok = rest.pop(0)
-        if tok == "--message":
-            if not rest:
-                print("error: --message requires a value", file=sys.stderr)
-                sys.exit(1)
-            message_value = rest.pop(0)
-            message_explicit = True
-        elif allow_restart_codex and tok == "--restart-codex":
-            restart_codex = True
-        else:
-            print(f"error: unknown option '{tok}'", file=sys.stderr)
-            sys.exit(1)
-
-    return thread_arg, message_value, message_explicit, restart_codex
+    return acw_commands.parse_restartable_args(args, allow_restart_codex=allow_restart_codex)
 
 
 # ---------------------------------------------------------------------------
@@ -870,17 +846,7 @@ def _watcher_row_for_pane(pane: str) -> dict[str, str] | None:
 
 
 def _system_exit_detail(exc: SystemExit, stderr_text: str = "") -> str:
-    lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
-    for line in reversed(lines):
-        if line.startswith("error:"):
-            return line.removeprefix("error:").strip()
-    for line in reversed(lines):
-        if not line.startswith("hint:"):
-            return line
-    if isinstance(exc.code, str) and exc.code.strip():
-        return exc.code.strip()
-    code = exc.code if isinstance(exc.code, int) else 1
-    return f"exit {code}"
+    return acw_commands.system_exit_detail(exc, stderr_text)
 
 
 def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | None:
@@ -1691,44 +1657,12 @@ def _validate_existing_pane_watcher(
     requested_thread: str = "",
     model: RuntimeModel | None = None,
 ) -> tuple[str, str] | None:
-    if model is None:
-        model = _build_runtime_model()
-
-    watchers = list(_runtime_watchers_for_pane(model, pane))
-    if not watchers:
-        return None
-
-    if len(watchers) != 1:
-        joined = " ".join(sorted(w.pid or "?" for w in watchers))
-        return (
-            f"error: multiple managed runtimes already running for pane={pane}: {joined}",
-            f"hint: run 'acw repair {pane} --dry-run' to inspect the fix plan, or 'acw stop {pane}' to stop all pane runtimes first",
-        )
-
-    row = watchers[0]
-    thread_id = row.thread_id
-    if requested_thread and is_thread_id(thread_id) and thread_id.lower() != requested_thread.lower():
-        return (
-            f"error: existing runtime for pane={pane} is using thread {thread_id[:8]}…, "
-            f"not requested thread {requested_thread[:8]}…",
-            f"hint: inspect 'acw repair {pane} --dry-run' or stop it first with 'acw stop {pane}' if you want to start a different session there",
-        )
-
-    anomalies = _watcher_anomalies(model, row)
-    other = _other_watcher_for_thread(pane, thread_id)
-    if other:
-        return (
-            f"error: existing runtime for pane={pane} is duplicated; pane={other['pane']} "
-            f"id={other.get('runtime_id') or other.get('pid', '?')} is already watching thread {thread_id[:8]}…",
-            f"hint: inspect 'acw repair {pane} --dry-run' or stop the duplicate runtimes with 'acw stop {pane}' and 'acw stop {other['pane']}', then start once",
-        )
-    if anomalies:
-        detail = "; ".join(anomalies)
-        return (
-            f"error: existing runtime for pane={pane} is inconsistent: {detail}",
-            f"hint: stop it first with 'acw stop {pane}', then start once after the pane/session identity is clean",
-        )
-    return None
+    return acw_commands.validate_existing_pane_watcher(
+        _command_context(),
+        pane,
+        requested_thread,
+        model=model,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1737,367 +1671,53 @@ def _validate_existing_pane_watcher(
 
 
 def cmd_start(argv: list[str]) -> None:
-    rest = list(argv)
-    if rest and not rest[0].startswith("--"):
-        target = rest.pop(0)
-    else:
-        target = ""
-    if not target:
-        print(
-            "error: pane target is required\n"
-            "usage: auto_continue_watchd.py start <pane-id|window-index|session:window> "
-            "[thread-id] [--message TEXT]",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    pane = resolve_start_pane_target(target)
-    if pane != target:
-        _print_progress(f"resolved: target={target} pane={pane}")
-    ensure_tmux_window_rename_hook()
-
-    thread_arg, msg_value, msg_explicit = parse_thread_and_message_args(rest)
-
-    # No --message given: open editor for interactive input.
-    if not msg_explicit:
-        value = _edit_message_interactive()
-        if value is None or not value.strip():
-            print("start: no message provided, aborting", file=sys.stderr)
-            sys.exit(1)
-        msg_value = value
-
-    model = _build_runtime_model()
-    existing_rows = [row for row in watcher_rows() if row.get("pane", "") == pane]
-    if existing_rows:
-        validation = _validate_existing_pane_watcher(pane, thread_arg, model=model)
-        if validation:
-            print(validation[0], file=sys.stderr)
-            print(validation[1], file=sys.stderr)
-            sys.exit(1)
-        existing = existing_rows[0]
-        print(
-            f"already running: pane={pane} thread_id={existing.get('thread', '')}",
-        )
-        return
-
-    if thread_arg and thread_arg != "auto":
-        _print_progress(f"start: using explicit thread_id for pane={pane}")
-    else:
-        _print_progress(f"start: resolving Codex thread for pane={pane}")
-    thread_id = resolve_thread_id(pane, thread_arg, model=model)
-    _print_progress(f"start: thread_id={thread_id}")
-
-    other = _other_watcher_for_thread(pane, thread_id)
-    if other:
-        print(
-            f"error: another runtime (id={other.get('runtime_id') or other.get('pid', '?')} pane={other['pane']}) "
-            f"is already watching thread {thread_id[:8]}…",
-            file=sys.stderr,
-        )
-        print(
-            f"hint: inspect 'acw repair {pane} --dry-run' or stop it first with 'acw stop {other['pane']}' to avoid duplicates",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    other_panes = [row for row in _runtime_panes_for_thread(model, thread_id) if row.pane_id != pane]
-    if other_panes:
-        panes = ", ".join(sorted({row.pane_id for row in other_panes if row.pane_id}))
-        print(
-            f"error: another live Codex pane is already using thread {thread_id[:8]}… on {panes}",
-            file=sys.stderr,
-        )
-        print(
-            f"hint: clean up the duplicate panes first, then start exactly one managed runtime for {thread_id[:8]}…",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    message_text = _message_text(msg_value)
-    wn = run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or ""
-    existing_session = _read_session_state(thread_id)
-    row = _daemon_rpc_upsert_session(
-        thread_id,
-        pane=pane,
-        name=wn.strip(),
-        message=message_text,
-        paused=False,
-        generation=_current_session_generation(existing_session),
-    )
-
-    if (not thread_arg or thread_arg == "auto") and thread_id != "auto":
-        _print_progress(f"resolved: pane={pane} thread_id={thread_id}")
-
-    daemon_pid = row.get("daemon_pid", "")
-    _print_progress(f"started: pane={pane} thread_id={thread_id} daemon_pid={daemon_pid}")
+    acw_commands.cmd_start(_command_context(), argv)
 
 
 def stop_pane_watchers(pane: str) -> None:
-    model = _build_runtime_model()
-    session_threads: set[str] = set()
-    for watcher in _runtime_watchers_for_pane(model, pane):
-        if is_thread_id(watcher.thread_id) and _runtime_session_for_thread(model, watcher.thread_id):
-            session_threads.add(watcher.thread_id.lower())
-    pane_record = model.panes_by_id.get(pane)
-    if pane_record and is_thread_id(pane_record.detected_thread):
-        session = _runtime_session_for_thread(model, pane_record.detected_thread)
-        if session:
-            session_threads.add(session.thread_id.lower())
-    rows = watcher_rows(pane)
-    managed_threads = {
-        row.get("thread", "").lower()
-        for row in rows
-        if row.get("runtime_status", "")
-        and is_thread_id(row.get("thread", ""))
-    }
-
-    if not managed_threads and not session_threads:
-        print(f"not running: pane={pane}")
-        return
-
-    for thread_id in sorted(managed_threads | session_threads):
-        _daemon_rpc_remove_session(thread_id, timeout_secs=2.0)
-        print(f"stopped: pane={pane} thread_id={thread_id}")
+    acw_commands.stop_pane_watchers(_command_context(), pane)
 
 
 def _stop_pane_watchers_keep_session(pane: str) -> None:
-    rows = watcher_rows(pane)
-    if not rows:
-        print(f"not running: pane={pane}")
-        return
-
-    for row in rows:
-        thread_id = row.get("thread", "").lower()
-        if not row.get("runtime_status", "") or not is_thread_id(thread_id):
-            continue
-        existing = _read_session_state(thread_id)
-        _daemon_rpc_patch_session(
-            thread_id,
-            {
-                "pane": "",
-                "paused": True,
-                "generation": _current_session_generation(existing) + 1,
-            },
-            wait={"kind": "absent"},
-            timeout_secs=2.0,
-        )
-        print(f"stopped: pane={pane} thread_id={thread_id}")
+    acw_commands.stop_pane_watchers_keep_session(_command_context(), pane)
 
 
 def _find_watchers_by_window_name(name: str) -> list[dict[str, str]]:
-    """Find running watchers whose session state name matches *name*."""
-    matches: list[dict[str, str]] = []
-    for r in watcher_rows():
-        tid = r["thread"]
-        if not tid or not is_thread_id(tid):
-            continue
-        ss = _read_session_state(tid)
-        if ss.get("name", "") == name:
-            matches.append(r)
-    return matches
+    return acw_commands.find_watchers_by_window_name(_command_context(), name)
 
 
 def _stop_watcher_rows(rows: list[dict[str, str]]) -> None:
-    """Stop managed watcher sessions."""
-    forgotten_threads: set[str] = set()
-    for r in rows:
-        thread_id = r.get("thread", "").lower()
-        if r.get("runtime_status", "") and is_thread_id(thread_id) and thread_id not in forgotten_threads:
-            forgotten_threads.add(thread_id)
-            _daemon_rpc_remove_session(thread_id, timeout_secs=2.0)
-            print(f"stopped: pane={r['pane']} thread_id={thread_id}")
+    acw_commands.stop_watcher_rows(_command_context(), rows)
 
 
 def cmd_stop(argv: list[str]) -> None:
-    target = argv[0] if argv else ""
-
-    if target:
-        # Pane ID.
-        if is_pane_id(target):
-            stop_pane_watchers(target)
-            return
-
-        # Match managed runtime rows by saved session name first — this
-        # still finds the intended session even if the tmux window name
-        # was reused elsewhere.
-        matches = _find_watchers_by_window_name(target)
-        if matches:
-            _stop_watcher_rows(matches)
-            return
-
-        # Tmux window name or index.
-        pane = resolve_pane_from_window_name(target)
-        if not pane:
-            pane = resolve_pane_from_window_target(target) if re.fullmatch(r"\d+|[^:]+:\d+", target) else None
-        if pane and is_pane_id(pane):
-            stop_pane_watchers(pane)
-            return
-
-        print(f"error: no managed session found for '{target}'", file=sys.stderr)
-        print(
-            "hint: use a pane id ('%6'), window name, or window index ('2')",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    had_any = False
-    for r in watcher_rows():
-        had_any = True
-        _stop_watcher_rows([r])
-
-    if not had_any:
-        print("not running")
-    forgotten = 0
-    for session in _load_session_records():
-        if _remove_session_state(session.thread_id):
-            forgotten += 1
-            print(f"forgot session: thread_id={session.thread_id}")
-    if not had_any and forgotten == 0:
-        return
+    acw_commands.cmd_stop(
+        _command_context(),
+        argv,
+        stop_pane_watchers_fn=stop_pane_watchers,
+    )
 
 
 def cmd_pause(argv: list[str]) -> None:
-    """Pause managed session runtime(s) without forgetting saved session state."""
-    if argv and argv[0] == "*":
-        print("error: '*' is no longer supported for pause; use 'acw pause' with no target", file=sys.stderr)
-        sys.exit(2)
-    pane_arg = argv[0] if argv else ""
-
-    if pane_arg:
-        pane = resolve_pane_target(pane_arg)
-        rows = watcher_rows(pane)
-        if not rows:
-            print(f"not running: pane={pane}")
-            return
-        for row in rows:
-            thread_id = row.get("thread", "").lower()
-            if not row.get("runtime_status", "") or not is_thread_id(thread_id):
-                continue
-            if row.get("paused", "") == "1":
-                print(f"already paused: pane={pane} thread_id={thread_id}")
-                continue
-            _daemon_rpc_patch_session(
-                thread_id,
-                {"paused": True},
-                wait={
-                    "kind": "runtime",
-                    "pane": pane,
-                    "paused": True,
-                    "statuses": ["paused"],
-                },
-                timeout_secs=2.0,
-            )
-            print(f"paused: pane={pane} thread_id={thread_id}")
-        return
-
-    had_any = False
-    for r in watcher_rows():
-        had_any = True
-        thread_id = r.get("thread", "").lower()
-        if not r.get("runtime_status", "") or not is_thread_id(thread_id):
-            continue
-        if r.get("paused", "") == "1":
-            print(f"already paused: pane={r['pane']} thread_id={thread_id}")
-            continue
-        _daemon_rpc_patch_session(
-            thread_id,
-            {"paused": True},
-            wait={
-                "kind": "runtime",
-                "pane": r["pane"],
-                "paused": True,
-                "statuses": ["paused"],
-            },
-            timeout_secs=2.0,
-        )
-        print(f"paused: pane={r['pane']} thread_id={thread_id}")
-
-    if not had_any:
-        print("not running")
+    acw_commands.cmd_pause(_command_context(), argv)
 
 
 def cmd_resume(argv: list[str]) -> None:
-    """Resume paused managed session runtime(s) by restarting from current state."""
-    if "*" in argv:
-        print("error: '*' is no longer supported for resume; use 'acw resume' with no target", file=sys.stderr)
-        sys.exit(2)
-
-    if argv:
-        seen_panes: set[str] = set()
-        for pane_arg in argv:
-            pane = resolve_pane_target(pane_arg)
-            if pane in seen_panes:
-                continue
-            seen_panes.add(pane)
-            rows = watcher_rows(pane)
-            if not rows:
-                print(f"not running: pane={pane}")
-                continue
-            for row in rows:
-                thread_id = row.get("thread", "").lower()
-                if not row.get("runtime_status", "") or not is_thread_id(thread_id):
-                    continue
-                if row.get("paused", "") != "1":
-                    print(f"not paused: pane={pane} thread_id={thread_id}")
-                    continue
-                print(f"resuming paused session via restart: pane={pane} thread_id={thread_id}")
-                _restart_one(pane_arg, pane, [])
-                break
-        return
-
-    paused_panes: list[str] = []
-    for r in watcher_rows():
-        thread_id = r.get("thread", "").lower()
-        if r.get("runtime_status", "") and is_thread_id(thread_id) and r.get("paused", "") == "1" and r["pane"]:
-            paused_panes.append(r["pane"])
-
-    if not paused_panes:
-        print("no paused managed sessions")
-        return
-
-    print(f"resuming {len(paused_panes)} paused managed session(s) via restart")
-    _restart_panes(paused_panes)
+    acw_commands.cmd_resume(
+        _command_context(),
+        argv,
+        restart_panes_fn=_restart_panes,
+        restart_one_fn=_restart_one,
+    )
 
 
 def _restart_panes(panes: list[str]) -> None:
-    restarted = 0
-    failed = 0
-    failed_details: list[str] = []
-    for pane in panes:
-        if run_tmux("display-message", "-p", "-t", pane, "#{pane_id}") is None:
-            stop_pane_watchers(pane)
-            continue
-
-        _print_progress(f"--- restarting {pane} ---")
-        captured_err = io.StringIO()
-        printed_err = False
-        try:
-            old_stderr = sys.stderr
-            sys.stderr = captured_err
-            _restart_one(pane, pane, [])
-        except SystemExit as exc:
-            failed += 1
-            detail_text = captured_err.getvalue()
-            if detail_text:
-                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
-                printed_err = True
-            detail = _system_exit_detail(exc, detail_text)
-            failed_details.append(f"{pane}: {detail}")
-            print(f"error: restart failed for pane={pane}: {detail}", file=old_stderr)
-            continue
-        finally:
-            sys.stderr = old_stderr
-            detail_text = captured_err.getvalue()
-            if detail_text and not printed_err:
-                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
-        restarted += 1
-
-    if restarted == 0:
-        print("no live panes to restart")
-    elif failed:
-        print(f"restart: {failed} pane(s) failed")
-        for detail in failed_details:
-            print(f"restart: failure detail: {detail}")
+    acw_commands.restart_panes(
+        _command_context(),
+        panes,
+        stop_pane_watchers_fn=stop_pane_watchers,
+        restart_one_fn=_restart_one,
+    )
 
 
 def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 2.0) -> bool:
@@ -2225,187 +1845,24 @@ def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
 
 
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
-    if pane != target:
-        _print_progress(f"resolved: target={target} pane={pane}")
-    _print_progress(f"restart: preparing pane={pane}")
-
-    thread_arg, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
-    model = _build_runtime_model()
-
-    resolved_thread = ""
-    if thread_arg and thread_arg != "auto":
-        if restart_codex and not is_thread_id(thread_arg):
-            print(f"error: invalid thread_id '{thread_arg}'", file=sys.stderr)
-            sys.exit(1)
-        if is_thread_id(thread_arg):
-            resolved_thread = thread_arg.lower()
-        pane_record = model.panes_by_id.get(pane)
-        live_thread = pane_record.detected_thread.lower() if pane_record and is_thread_id(pane_record.detected_thread) else ""
-        if live_thread and resolved_thread and live_thread != resolved_thread and not restart_codex:
-            print(
-                f"error: pane {pane} is running thread {_short_thread_id(live_thread)}, "
-                f"not requested thread {_short_thread_id(resolved_thread)}",
-                file=sys.stderr,
-            )
-            print(
-                "hint: use --restart-codex to relaunch Codex into that thread, or restart against the live pane thread",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    else:
-        _print_progress(f"restart: resolving Codex thread for pane={pane}")
-        resolved_thread, thread_error = _strict_thread_for_pane(model, pane)
-        if thread_error:
-            print(f"error: {thread_error}", file=sys.stderr)
-            print(
-                f"hint: clean up pane {pane} so exactly one live pane, one runtime, and one session agree on the thread",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    if resolved_thread:
-        _print_progress(f"restart: thread_id={resolved_thread}")
-    else:
-        _print_progress(f"restart: thread_id unresolved for pane={pane}")
-
-    if not msg_explicit:
-        _print_progress(f"restart: loading saved continue message for pane={pane}")
-        if resolved_thread and is_thread_id(resolved_thread):
-            session, session_error = _strict_session_for_thread(model, resolved_thread)
-            if session_error:
-                print(f"error: {session_error}", file=sys.stderr)
-                print(
-                    f"hint: repair the saved session for thread {_short_thread_id(resolved_thread)} before restarting without --message",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if session and session.message:
-                msg_value = session.message
-
-    if not thread_arg:
-        thread_arg = resolved_thread
-
-    if restart_codex:
-        if not resolved_thread or not is_thread_id(resolved_thread):
-            print(
-                f"error: could not determine thread_id for pane={pane}; "
-                "--restart-codex requires a concrete thread id",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-    existing_session = _read_session_state(resolved_thread) if is_thread_id(resolved_thread) else {}
-    next_generation = _current_session_generation(existing_session) + 1
-
-    if restart_codex and is_thread_id(resolved_thread):
-        _daemon_rpc_patch_session(
-            resolved_thread,
-            {
-                "paused": True,
-                "generation": _current_session_generation(existing_session),
-            },
-            wait={
-                "kind": "runtime",
-                "pane": pane,
-                "paused": True,
-                "statuses": ["paused"],
-            },
-            timeout_secs=2.0,
-        )
-
-    if restart_codex:
-        _print_progress(f"restarting codex: pane={pane} thread_id={resolved_thread}")
-        _daemon_rpc_restart_codex(pane, resolved_thread)
-
-    _print_progress(f"restart: starting runtime for pane={pane}")
-    window_name = (run_tmux("display-message", "-p", "-t", pane, "#{window_name}") or "").strip()
-    row = _daemon_rpc_upsert_session(
-        resolved_thread,
-        pane=pane,
-        name=window_name,
-        message=msg_value,
-        paused=False,
-        generation=next_generation,
-    )
-    daemon_pid = row.get("daemon_pid", "")
-    _print_progress(f"started: pane={pane} thread_id={resolved_thread} daemon_pid={daemon_pid}")
+    acw_commands.restart_one(_command_context(), target, pane, rest)
 
 
 def cmd_restart(argv: list[str]) -> None:
-    rest = list(argv)
-    if rest and not rest[0].startswith("--"):
-        target = rest.pop(0)
-    else:
-        target = ""
-    if target == "*":
-        print("error: '*' is no longer supported for restart; use 'acw restart' with no target", file=sys.stderr)
-        sys.exit(2)
-    if not target:
-        if rest:
-            print("error: restart does not accept additional arguments", file=sys.stderr)
-            sys.exit(2)
-        model = _build_runtime_model()
-        panes = {pane.pane_id for pane in model.snapshot.panes if pane.pane_id and is_thread_id(pane.detected_thread)}
-        panes.update({watcher.pane for watcher in model.snapshot.watchers if watcher.pane})
-        panes = sorted(panes)
-        if not panes:
-            print("no live panes to restart")
-            return
-        _restart_panes(panes)
-        return
-
-    model = _build_runtime_model()
-    pane = _resolve_restart_pane_target(target, model=model)
-    _restart_one(target, pane, rest)
+    acw_commands.cmd_restart(
+        _command_context(),
+        argv,
+        restart_panes_fn=_restart_panes,
+        restart_one_fn=_restart_one,
+    )
 
 
 def cmd_edit(argv: list[str]) -> None:
-    if not argv or argv[0].startswith("--"):
-        print(
-            "error: pane target is required\n"
-            "usage: auto_continue_watchd.py edit <pane-id|window-index|session:window>",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    target = argv[0]
-    pane = resolve_pane_target(target)
-    if pane != target:
-        print(f"resolved: target={target} pane={pane}")
-
-    model = _build_runtime_model()
-    tid, thread_error = _strict_thread_for_pane(model, pane)
-    if thread_error:
-        print(f"error: {thread_error}", file=sys.stderr)
-        print(
-            f"hint: clean up pane {pane} so exactly one live pane, one runtime, and one saved session agree before editing",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    session, session_error = _strict_session_for_thread(model, tid)
-    if session_error:
-        print(f"error: {session_error}", file=sys.stderr)
-        print(
-            f"hint: repair the saved session for thread {_short_thread_id(tid)} before editing its message",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    value = session.message if session else ""
-
-    new_value = _edit_message_interactive(value)
-    if new_value is None:
-        return
-
-    if new_value == value:
-        print("edit: message unchanged")
-        return
-
-    if tid and is_thread_id(tid):
-        _daemon_rpc_patch_session(tid, {"message": new_value}, timeout_secs=2.0)
-    print(f"edit: message updated for pane {pane}")
-    if _runtime_watchers_for_pane(model, pane):
-        cmd_restart([pane, "--message", new_value])
+    acw_commands.cmd_edit(
+        _command_context(),
+        argv,
+        cmd_restart_fn=cmd_restart,
+    )
 
 # ---------------------------------------------------------------------------
 # Repair
@@ -2413,165 +1870,37 @@ def cmd_edit(argv: list[str]) -> None:
 
 
 def _parse_repair_args(args: list[str]) -> tuple[str, bool, bool]:
-    target = ""
-    dry_run = False
-    all_targets = False
-
-    rest = list(args)
-    if rest and not rest[0].startswith("--"):
-        target = rest.pop(0)
-
-    while rest:
-        tok = rest.pop(0)
-        if tok == "--dry-run":
-            dry_run = True
-        elif tok == "--all":
-            all_targets = True
-        else:
-            print(f"error: unknown option '{tok}'", file=sys.stderr)
-            sys.exit(2)
-
-    if target and all_targets:
-        print("error: repair accepts either a target or --all, not both", file=sys.stderr)
-        sys.exit(2)
-
-    if not target and not all_targets:
-        dry_run = True
-
-    return target, dry_run, all_targets
+    return acw_commands.parse_repair_args(args)
 
 
 def _repair_resolve_target(target: str, model: RuntimeModel | None = None) -> tuple[str, str]:
-    if model is None:
-        model = _build_runtime_model()
-    pane, error = _doctor_resolve_target(target, model=model)
-    if pane or not target:
-        return pane, error
-
-    if is_thread_id(target):
-        session = _runtime_session_for_thread(model, target)
-        if session:
-            return "", (
-                f"saved session for thread {_short_thread_id(target)} has no live pane; "
-                "repair only handles live state, so use 'acw cleanup' or restart Codex in the intended pane first"
-            )
-    elif model.sessions_by_name.get(target, ()):
-        return "", (
-            f"saved session target '{target}' has no live pane; repair only handles live state, "
-            "so use 'acw cleanup' or restart Codex in the intended pane first"
-        )
-    return "", error
+    return acw_commands.repair_resolve_target(_command_context(), target, model=model)
 
 
 def _print_repair_plan(steps: list[RepairStep], *, dry_run: bool) -> None:
-    header = "repair: dry-run plan" if dry_run else "repair: plan"
-    print(header)
-    for step in steps:
-        prefix = "AUTO" if step.auto_apply else "MANUAL"
-        print(f"{prefix}: {step.summary}")
-        command = _repair_command_hint(step)
-        if command:
-            print(f"run: {command}")
+    acw_commands.print_repair_plan(steps, dry_run=dry_run)
 
 
 def _repair_command_hint(step: RepairStep) -> str:
-    if step.kind == "cleanup_dead_sessions":
-        return "acw cleanup"
-    if step.target:
-        return f"acw repair {shlex.quote(step.target)}"
-    return ""
+    return acw_commands.repair_command_hint(step)
 
 
 def _apply_repair_step(step: RepairStep) -> None:
-    if step.kind == "restart_watcher":
-        _print_progress(f"repair: restarting runtime on pane={step.target}")
-        _stop_pane_watchers_keep_session(step.target)
-        cmd_start([step.target, step.thread_id, "--message", step.message])
-        return
-
-    if step.kind == "start_watcher":
-        _print_progress(f"repair: starting runtime on pane={step.target}")
-        cmd_start([step.target, step.thread_id, "--message", step.message])
-        return
-
-    if step.kind == "stop_watchers_keep_session":
-        _print_progress(f"repair: stopping runtime entries on pane={step.target} while keeping saved session state")
-        _stop_pane_watchers_keep_session(step.target)
-        return
-
-    if step.kind == "recreate_session":
-        _print_progress(f"repair: recreating saved session state for pane={step.target}")
-        window_name = (run_tmux("display-message", "-p", "-t", step.target, "#{window_name}") or "").strip()
-        _write_session_state(
-            step.thread_id,
-            {
-                "thread_id": step.thread_id,
-                "name": window_name,
-                "message": _message_text(step.message),
-            },
-        )
-        return
-
-    if step.kind == "sync_session_name":
-        _print_progress(f"repair: syncing saved session name for pane={step.target}")
-        window_name = (run_tmux("display-message", "-p", "-t", step.target, "#{window_name}") or "").strip()
-        _write_session_state(step.thread_id, {"thread_id": step.thread_id, "name": window_name})
-        return
-
-    raise RuntimeError(f"unsupported repair step: {step.kind}")
+    acw_commands.apply_repair_step(
+        _command_context(),
+        step,
+        cmd_start_fn=cmd_start,
+        stop_pane_watchers_keep_session_fn=_stop_pane_watchers_keep_session,
+    )
 
 
 def cmd_repair(argv: list[str]) -> None:
-    target, dry_run, all_targets = _parse_repair_args(argv)
-    model = _build_runtime_model()
-
-    target_panes: tuple[str, ...] | None = None
-    if target:
-        pane, error = _repair_resolve_target(target, model=model)
-        if error:
-            print(f"error: {error}", file=sys.stderr)
-            sys.exit(1)
-        target_panes = (pane,)
-
-    steps = _build_repair_plan(model, target_panes=target_panes)
-    if not steps:
-        print("repair: no live invariant issues found")
-        return
-
-    auto_steps = [step for step in steps if step.auto_apply]
-    manual_steps = [step for step in steps if not step.auto_apply]
-
-    if dry_run:
-        _print_repair_plan(steps, dry_run=True)
-        return
-
-    if target and manual_steps:
-        for step in manual_steps:
-            print(f"error: {step.summary}", file=sys.stderr)
-        print(
-            f"hint: run 'acw repair {shlex.quote(target)} --dry-run' to inspect the blocked repair plan",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if not auto_steps:
-        print("repair: no safe automatic repairs available")
-        for step in manual_steps:
-            print(f"MANUAL: {step.summary}")
-        if manual_steps:
-            sys.exit(1)
-        return
-
-    _print_progress(f"repair: applying {len(auto_steps)} step(s)")
-    for step in auto_steps:
-        _apply_repair_step(step)
-    print(f"repair: applied {len(auto_steps)} step(s)")
-
-    if manual_steps:
-        print(f"repair: {len(manual_steps)} issue(s) still require manual action")
-        for step in manual_steps:
-            print(f"MANUAL: {step.summary}")
-        sys.exit(1)
+    acw_commands.cmd_repair(
+        _command_context(),
+        argv,
+        cmd_start_fn=cmd_start,
+        stop_pane_watchers_keep_session_fn=_stop_pane_watchers_keep_session,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3879,6 +3208,45 @@ def _repair_context() -> acw_repair.RepairContext:
         runtime_panes_for_thread=_runtime_panes_for_thread,
         runtime_session_for_thread=_runtime_session_for_thread,
         runtime_session_name_conflict=_runtime_session_name_conflict,
+    )
+
+
+def _command_context() -> acw_commands.CommandContext:
+    return acw_commands.CommandContext(
+        is_pane_id=is_pane_id,
+        is_thread_id=is_thread_id,
+        print_progress=_print_progress,
+        build_runtime_model=_build_runtime_model,
+        watcher_rows=watcher_rows,
+        runtime_watchers_for_pane=_runtime_watchers_for_pane,
+        runtime_panes_for_thread=_runtime_panes_for_thread,
+        runtime_session_for_thread=_runtime_session_for_thread,
+        watcher_anomalies=_watcher_anomalies,
+        other_watcher_for_thread=_other_watcher_for_thread,
+        resolve_start_pane_target=resolve_start_pane_target,
+        resolve_pane_target=resolve_pane_target,
+        resolve_pane_from_window_name=resolve_pane_from_window_name,
+        resolve_pane_from_window_target=resolve_pane_from_window_target,
+        resolve_thread_id=resolve_thread_id,
+        resolve_restart_pane_target=_resolve_restart_pane_target,
+        ensure_tmux_window_rename_hook=ensure_tmux_window_rename_hook,
+        edit_message_interactive=_edit_message_interactive,
+        message_text=_message_text,
+        read_session_state=_read_session_state,
+        write_session_state=_write_session_state,
+        remove_session_state=_remove_session_state,
+        daemon_rpc_upsert_session=_daemon_rpc_upsert_session,
+        daemon_rpc_patch_session=_daemon_rpc_patch_session,
+        daemon_rpc_remove_session=_daemon_rpc_remove_session,
+        daemon_rpc_restart_codex=_daemon_rpc_restart_codex,
+        current_session_generation=_current_session_generation,
+        load_session_records=_load_session_records,
+        strict_thread_for_pane=_strict_thread_for_pane,
+        strict_session_for_thread=_strict_session_for_thread,
+        short_thread_id=_short_thread_id,
+        build_repair_plan=_build_repair_plan,
+        doctor_resolve_target=_doctor_resolve_target,
+        run_tmux=run_tmux,
     )
 
 
