@@ -20,6 +20,7 @@ import traceback
 from pathlib import Path
 
 import acw_state
+import acw_session
 import acw_rpc
 import acw_daemon
 import acw_control
@@ -215,16 +216,15 @@ def state_db_file() -> str:
 
 
 def _read_session_state(thread_id: str) -> dict:
-    data = acw_state.read_session_state(thread_id, state_dir=STATE_DIR)
-    return {str(key): value for key, value in data.items()} if data else {}
+    return acw_session.read_session_state(thread_id, state_dir=STATE_DIR)
 
 
 def _write_session_state(thread_id: str, data: dict) -> None:
-    acw_state.write_session_state(thread_id, data, state_dir=STATE_DIR)
+    acw_session.write_session_state(thread_id, data, state_dir=STATE_DIR)
 
 
 def _remove_session_state(thread_id: str) -> bool:
-    return acw_state.remove_session_state(thread_id, state_dir=STATE_DIR)
+    return acw_session.remove_session_state(thread_id, state_dir=STATE_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -508,55 +508,39 @@ def _parse_restartable_args(
 
 
 def _normalize_message_text(text: str) -> str:
-    """Match logwatch behavior: strip comment lines and trim."""
-    return "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
-    ).strip()
+    return acw_session.normalize_message_text(text)
 
 
 def _message_text(value: str) -> str:
-    """Resolve the concrete continue message text."""
-    return _normalize_message_text(value)
+    return acw_session.message_text(value)
 
 
 def _set_thread_name(thread_id: str, name: str) -> None:
-    if not is_thread_id(thread_id):
-        return
-    _write_session_state(thread_id, {"thread_id": thread_id, "name": name})
+    acw_session.set_thread_name(
+        thread_id,
+        name,
+        is_thread_id_fn=is_thread_id,
+        write_session_state_fn=_write_session_state,
+    )
 
 
 def ensure_tmux_window_rename_hook() -> None:
-    """Install a global tmux hook to keep session names in sync."""
-    cmd = (
-        f"{shlex.quote(sys.executable)} "
-        f"{shlex.quote(str(Path(__file__).resolve()))} "
-        "_window-renamed "
-        "\"#{window_id}\" "
-        "#{q:window_name}"
+    acw_session.ensure_tmux_window_rename_hook(
+        python_executable=sys.executable,
+        entrypoint=str(Path(__file__).resolve()),
+        run_tmux_fn=run_tmux,
     )
-    run_tmux("set-hook", "-g", "window-renamed", f"run-shell {shlex.quote(cmd)}")
 
 
 def cmd_window_renamed(argv: list[str]) -> None:
-    """Hook handler: sync renamed tmux window title into session state."""
-    if len(argv) < 2:
-        return
-    window_id = argv[0]
-    new_name = argv[1]
-    listing = run_tmux("list-panes", "-t", window_id, "-F", "#{pane_id}")
-    if not listing:
-        return
-
-    seen_threads: set[str] = set()
-    for pane in (ln.strip() for ln in listing.splitlines()):
-        if not is_pane_id(pane):
-            continue
-        rows = watcher_rows(pane)
-        tid = rows[0]["thread"].lower() if rows and is_thread_id(rows[0].get("thread", "")) else ""
-        if not tid or tid in seen_threads:
-            continue
-        seen_threads.add(tid)
-        _set_thread_name(tid, new_name)
+    acw_session.handle_window_renamed(
+        argv,
+        run_tmux_fn=run_tmux,
+        watcher_rows_fn=watcher_rows,
+        is_pane_id_fn=is_pane_id,
+        is_thread_id_fn=is_thread_id,
+        set_thread_name_fn=_set_thread_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2062,8 +2046,10 @@ def _status_details(
 
 
 def _load_sessions(socket_path: str | None = None) -> list[dict[str, str]]:
-    """Load all saved manager sessions for one tmux socket scope."""
-    rows = acw_state.load_sessions(state_dir=STATE_DIR, scope=_tmux_scope_key(socket_path))
+    rows = acw_session.load_sessions(
+        state_dir=STATE_DIR,
+        scope=_tmux_scope_key(socket_path),
+    )
     return [{str(key): value for key, value in row.items()} for row in rows]
 
 
