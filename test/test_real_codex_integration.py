@@ -1,8 +1,8 @@
-import json
-import re
 import unittest
 from pathlib import Path
 
+from test.support.manager_scenarios import ManagerScenarioMixin
+from test.support.manager_scenarios import manager_scenario_backend_enabled
 from test.support.real_codex_harness import RealCodexHarness
 from test.support.real_codex_harness import require_real_codex_prereqs
 
@@ -21,7 +21,7 @@ def _test_failed(case: unittest.TestCase) -> bool:
     return False
 
 
-class RealCodexWatcherIntegrationTests(unittest.TestCase):
+class _RealCodexHarnessTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         reason = require_real_codex_prereqs()
@@ -37,6 +37,16 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
             self.harness.archive_failure_artifacts(self.id())
         self.harness.cleanup()
 
+
+class RealCodexManagerScenarioTests(ManagerScenarioMixin, _RealCodexHarnessTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not manager_scenario_backend_enabled("real"):
+            raise unittest.SkipTest("ACW manager scenarios are running without the real backend")
+
+
+class RealCodexWatcherIntegrationTests(_RealCodexHarnessTestCase):
     def test_watcher_sends_continue_for_second_real_codex_turn(self):
         self.harness.start_codex("say the word hello and nothing else")
         first_turn = self.harness.wait_for_first_completed_turn()
@@ -94,252 +104,6 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         self.assertIn("skip: interrupted turn=", watch_log)
         self.assertNotIn("auto-paused:", state_text)
         self.assertIn("test continue", pane_text, self.harness.diagnostics())
-
-    def test_manager_start_works_for_plain_full_auto_codex_pane(self):
-        self.harness.rename_window("fullauto")
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-
-        start = self.harness.run_manager("start", "fullauto", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        self.assertIn("resolved: target=fullauto pane=", start.stdout, self.harness.diagnostics())
-        self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
-
-    def test_manager_start_works_for_codex_resume_pane(self):
-        self.harness.rename_window("seed")
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-
-        self.harness.new_window("resume")
-        self.harness.resume_codex(first_turn.thread_id)
-        self.harness.wait_for_recent_codex_log_contains(first_turn.thread_id, timeout=45.0)
-        self.harness.tmux("kill-window", "-t", f"{self.harness.session_name}:0")
-
-        start = self.harness.run_manager("start", "resume", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        self.assertIn("resolved: target=resume pane=", start.stdout, self.harness.diagnostics())
-        self.assertIn(first_turn.thread_id, start.stdout, self.harness.diagnostics())
-
-    def test_manager_resume_accepts_multiple_targets(self):
-        self.harness.rename_window("formal")
-        self.harness.start_codex("say exactly FORMALDONE and nothing else")
-        formal_turn = self.harness.wait_for_first_completed_turn()
-        formal_pane = self.harness.pane_id
-
-        self.harness.new_window("aot")
-        self.harness.start_codex("say exactly AOTDONE and nothing else")
-        aot_turn = self.harness.wait_for_first_completed_turn()
-        aot_pane = self.harness.pane_id
-
-        self.harness.run_manager("start", "formal", "--message", "continue formal")
-        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
-        self.harness.run_manager("start", "aot", "--message", "continue aot")
-        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
-        formal_pid_before = self.harness._read_manager_pid_for_pane(formal_pane)
-        aot_pid_before = self.harness._read_manager_pid_for_pane(aot_pane)
-
-        self.harness.run_manager("pause", "formal")
-        self.harness.run_manager("pause", "aot")
-        self.harness.wait_for_manager_watcher_paused_in_pane(formal_pane)
-        self.harness.wait_for_manager_watcher_paused_in_pane(aot_pane)
-
-        resume = self.harness.run_manager("resume", "formal", "aot")
-        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
-        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
-
-        self.assertIn("resolved: target=formal pane=", resume.stdout, self.harness.diagnostics())
-        self.assertIn("resolved: target=aot pane=", resume.stdout, self.harness.diagnostics())
-        self.assertIsNotNone(self.harness.manager_runtime_row(formal_turn.thread_id), self.harness.diagnostics())
-        self.assertIsNotNone(self.harness.manager_runtime_row(aot_turn.thread_id), self.harness.diagnostics())
-        self.assertNotEqual(formal_pid_before, self.harness._read_manager_pid_for_pane(formal_pane))
-        self.assertNotEqual(aot_pid_before, self.harness._read_manager_pid_for_pane(aot_pane))
-
-    def test_manager_restart_restart_codex_reuses_same_thread(self):
-        self.harness.rename_window("bugs")
-        self.harness.start_codex("say exactly BUGSDONE and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        bugs_pane = self.harness.pane_id
-
-        self.harness.run_manager("start", "bugs", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started_in_pane(bugs_pane, first_turn.thread_id)
-        watcher_pid_before = self.harness._read_manager_pid_for_pane(bugs_pane)
-
-        restart = self.harness.run_manager("restart", "bugs", "--restart-codex")
-        self.harness.wait_for_manager_watcher_started_in_pane(bugs_pane, first_turn.thread_id)
-        self.harness.wait_for_pane_contains_in_pane(
-            bugs_pane,
-            f"codex resume {first_turn.thread_id}",
-            timeout=30.0,
-        )
-        self.harness.reset_codex_log_baseline()
-        self.harness.send_codex_prompt_to_pane(
-            bugs_pane,
-            "say exactly RESTARTRESUMEOK and nothing else",
-        )
-        resumed_turn = self.harness.wait_for_first_completed_turn(timeout=60.0)
-
-        self.assertIn("restarting codex: pane=", restart.stdout, self.harness.diagnostics())
-        self.assertEqual(first_turn.thread_id, resumed_turn.thread_id, self.harness.diagnostics())
-        self.assertNotEqual(watcher_pid_before, self.harness._read_manager_pid_for_pane(bugs_pane))
-
-    def test_manager_edit_updates_message_for_current_pane(self):
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager("start", self.harness.pane_id, "--message", "initial continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        editor = self.harness.make_editor_script("updated continue")
-        self.harness.run_manager("edit", self.harness.pane_id, env_overrides={"EDITOR": str(editor)})
-        self.harness.wait_for_manager_state_contains(first_turn.thread_id, "updated continue")
-
-        state_row = self.harness.manager_session_row(first_turn.thread_id)
-        state_text = json.dumps(state_row or {}, sort_keys=True)
-        self.assertIn("updated continue", state_text, self.harness.diagnostics())
-
-    def test_manager_status_details_reads_live_sqlite_state_ref(self):
-        self.harness.rename_window("details")
-        self.harness.start_codex("say exactly DETAILSOK and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager("start", "details", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        runtime_row = self.harness.manager_runtime_row(first_turn.thread_id)
-        self.assertIsNotNone(runtime_row, self.harness.diagnostics())
-        self.assertEqual(
-            f"sqlite:session:{first_turn.thread_id}",
-            str(runtime_row.get("state_ref", "")),
-            self.harness.diagnostics(),
-        )
-
-        status = self.harness.run_manager("status", "--details")
-
-        self.assertIn("=== Entry 1/1 ===", status.stdout, self.harness.diagnostics())
-        self.assertIn(f"THREAD_ID:       {first_turn.thread_id}", status.stdout, self.harness.diagnostics())
-        self.assertIn(
-            f"STATE_REF:       sqlite:session:{first_turn.thread_id}",
-            status.stdout,
-            self.harness.diagnostics(),
-        )
-        self.assertIn("STATE:           running", status.stdout, self.harness.diagnostics())
-
-    def test_manager_doctor_reports_healthy_current_pane(self):
-        self.harness.start_codex("say the word hello and nothing else")
-        self.harness.wait_for_pane_contains("• hello", timeout=60.0)
-
-        doctor = self.harness.run_manager_in_current_pane("doctor")
-
-        self.assertIn("RESULT: ok", doctor.stdout, self.harness.diagnostics())
-        self.assertRegex(
-            doctor.stdout,
-            re.compile(r"Codex thread detected: [0-9a-f]{8}-[0-9a-f-]{27}"),
-            self.harness.diagnostics(),
-        )
-
-    def test_manager_doctor_reports_missing_thread_for_plain_shell_pane(self):
-        self.harness.rename_window("shellpane")
-
-        doctor = self.harness.run_manager_in_current_pane("doctor", check=False)
-
-        self.assertNotEqual(0, doctor.returncode, self.harness.diagnostics())
-        self.assertIn("pane resolved:", doctor.stdout, self.harness.diagnostics())
-        self.assertIn("no live Codex agent detected in pane", doctor.stdout, self.harness.diagnostics())
-        self.assertIn("RESULT: error", doctor.stdout, self.harness.diagnostics())
-
-    def test_manager_start_fails_on_plain_shell_pane_without_thread(self):
-        self.harness.rename_window("plain")
-
-        start = self.harness.run_manager("start", "plain", "--message", "test continue", check=False)
-
-        self.assertNotEqual(0, start.returncode, self.harness.diagnostics())
-        self.assertIn("resolved: target=plain pane=", start.stdout, self.harness.diagnostics())
-        self.assertIn("no live Codex agent detected in pane", start.stderr, self.harness.diagnostics())
-        self.assertFalse(self.harness.manager_pid_file.exists(), self.harness.diagnostics())
-
-    def test_manager_status_reports_dead_after_real_watcher_exit(self):
-        self.harness.rename_window("deadwatch")
-        self.harness.start_codex("say the word hello and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager("start", "deadwatch", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        self.harness.stop_manager_watcher()
-        status = self.harness.run_manager("status", "--details")
-
-        self.assertIn("deadwatch", status.stdout, self.harness.diagnostics())
-        self.assertIn("STATE:           error", status.stdout, self.harness.diagnostics())
-        self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
-
-    def test_manager_restart_without_target_recovers_dead_watcher(self):
-        self.harness.rename_window("recoverdead")
-        self.harness.start_codex("say exactly RECOVERDEAD and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager("start", "recoverdead", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started_in_pane(self.harness.pane_id, first_turn.thread_id)
-        watcher_pid_before = self.harness._read_manager_pid_for_pane(self.harness.pane_id)
-
-        self.harness.stop_manager_watcher()
-        restart = self.harness.run_manager("restart")
-        self.harness.wait_for_manager_watcher_started_in_pane(self.harness.pane_id, first_turn.thread_id)
-
-        self.assertIn("--- restarting", restart.stdout, self.harness.diagnostics())
-        self.assertNotEqual(watcher_pid_before, self.harness._read_manager_pid_for_pane(self.harness.pane_id))
-
-    def test_manager_repair_all_recovers_shared_daemon_for_multiple_live_panes(self):
-        self.harness.rename_window("formal")
-        self.harness.start_codex("say exactly FORMALREAL and nothing else")
-        formal_turn = self.harness.wait_for_first_completed_turn()
-        formal_pane = self.harness.pane_id
-
-        self.harness.new_window("aot")
-        self.harness.start_codex("say exactly AOTREAL and nothing else")
-        aot_turn = self.harness.wait_for_first_completed_turn()
-        aot_pane = self.harness.pane_id
-
-        self.harness.run_manager("start", "formal", "--message", "continue formal")
-        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
-        self.harness.run_manager("start", "aot", "--message", "continue aot")
-        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
-
-        daemon_pid_before = self.harness._read_manager_daemon_pid()
-        self.assertIsNotNone(daemon_pid_before, self.harness.diagnostics())
-
-        self.harness.stop_manager_watcher()
-        status = self.harness.run_manager("status")
-        self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
-        self.assertIn(
-            "2 managed live Codex pane(s) currently have no runtime",
-            status.stdout,
-            self.harness.diagnostics(),
-        )
-
-        repair = self.harness.run_manager("repair", "--all")
-        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
-        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
-
-        daemon_pid_after = self.harness._read_manager_daemon_pid()
-        self.assertIsNotNone(daemon_pid_after, self.harness.diagnostics())
-        self.assertNotEqual(daemon_pid_before, daemon_pid_after, self.harness.diagnostics())
-        self.assertIn("repair:", repair.stdout, self.harness.diagnostics())
-
-        recovered = self.harness.run_manager("status")
-        self.assertNotIn("Shared daemon error:", recovered.stdout, self.harness.diagnostics())
-        self.assertIn("formal", recovered.stdout, self.harness.diagnostics())
-        self.assertIn("aot", recovered.stdout, self.harness.diagnostics())
-
-    def test_manager_status_summary_shows_recent_last_agent_text(self):
-        token = "CONTROLPANELTOKEN"
-        self.harness.rename_window("summary")
-        self.harness.start_codex(f"say exactly {token} and nothing else")
-        first_turn = self.harness.wait_for_first_completed_turn()
-        self.harness.run_manager("start", "summary", "--message", "test continue")
-        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
-
-        status = self.harness.run_manager("status")
-
-        self.assertIn("LAST_AGENT", status.stdout, self.harness.diagnostics())
-        self.assertIn(token, status.stdout, self.harness.diagnostics())
 
     def test_manager_recovers_after_private_tmux_socket_recreation(self):
         self.harness.rename_window("socket")

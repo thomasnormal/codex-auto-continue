@@ -342,13 +342,24 @@ Fast checks:
 
 ```bash
 bash test/smoke.sh
-python3 -m unittest test.test_watchd_unit test.test_logwatch_unit
+python3 -m unittest test.test_watchd_unit test.test_logwatch_unit test.test_manager_scenarios
 ```
 
 Real end-to-end suite:
 
 ```bash
 bash test/test_rollout_e2e.sh
+```
+
+Shared manager scenarios can run on the mock backend, the real backend, or
+both:
+
+```bash
+python3 -m unittest test.test_manager_scenarios
+ACW_MANAGER_SCENARIO_BACKEND=real AUTO_CONTINUE_RUN_REAL_CODEX_TESTS=1 \
+  python3 -m unittest test.test_real_codex_integration.RealCodexManagerScenarioTests
+ACW_MANAGER_SCENARIO_BACKEND=both AUTO_CONTINUE_RUN_REAL_CODEX_TESTS=1 \
+  python3 -m unittest test.test_manager_scenarios test.test_real_codex_integration.RealCodexManagerScenarioTests
 ```
 
 The real suite:
@@ -361,7 +372,7 @@ The real suite:
 GitHub Actions runs the fast path on pushes and pull requests:
 
 - `bash test/smoke.sh`
-- `python3 -m unittest test.test_watchd_unit test.test_logwatch_unit test.test_real_codex_harness_unit`
+- `python3 -m unittest test.test_watchd_unit test.test_logwatch_unit test.test_real_codex_harness_unit test.test_manager_scenarios`
 
 Current real-Codex coverage includes:
 

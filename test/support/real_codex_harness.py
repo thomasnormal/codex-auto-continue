@@ -471,6 +471,12 @@ class RealCodexHarness:
         self.pane_id = pane.strip()
         return self.pane_id
 
+    def kill_pane(self, pane_id: str) -> None:
+        self.tmux("kill-pane", "-t", pane_id)
+        if self.pane_id == pane_id:
+            panes = self.tmux_stdout("list-panes", "-t", self.session_name, "-F", "#{pane_id}")
+            self.pane_id = panes.splitlines()[0] if panes.strip() else ""
+
     def start_codex(self, prompt: str) -> None:
         self.send_keys(f"codex {shlex.quote(prompt)}", "C-m")
         self._maybe_accept_directory_trust_prompt()
@@ -633,6 +639,9 @@ class RealCodexHarness:
 
         return self._wait_for_value(_probe, timeout=timeout, description=f"codex log containing {needle!r}")
 
+    def wait_for_thread_visible(self, thread_id: str, timeout: float = 30.0) -> None:
+        self.wait_for_recent_codex_log_contains(thread_id, timeout=timeout)
+
     def reset_codex_log_baseline(self) -> None:
         self._codex_log_baseline = self._line_count(self.codex_log)
 
@@ -749,6 +758,9 @@ class RealCodexHarness:
             raise AssertionError(f"manager daemon pid file missing\n{self.diagnostics()}")
         os.kill(pid, signal.SIGTERM)
         self._wait_for(lambda: not self._pid_is_alive(pid), timeout=15.0, description="manager watcher exit")
+
+    def manager_daemon_pid(self) -> Optional[int]:
+        return self._read_manager_daemon_pid()
 
     def delete_tmux_socket(self) -> None:
         self.tmux_socket.unlink(missing_ok=True)
