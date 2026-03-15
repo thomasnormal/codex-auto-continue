@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: deduplicated the daemon/control wiring that remained in `auto_continue_watchd.py`. Repeated `acw_control.*Context(...)` construction now goes through small local context-builder helpers, which makes the remaining entrypoint glue shorter and keeps daemon dependency wiring in one place.
 - Change: finished moving the remaining status/detail assembly into `bin/acw_status.py`. The per-row detail selection, status recommendation printing, summary-table row assembly, and `status --details` text output now live with the rest of the status/state helpers instead of staying inline in `auto_continue_watchd.py`.
 - Change: extracted the runtime-store adapter layer into `bin/acw_runtime_store.py`. Thread-keyed runtime/daemon-scope reads and writes, watch-log/state-db path helpers, and the compatibility `watcher_rows()` / `thread_from_running_watcher_for_pane()` view now live outside `auto_continue_watchd.py`, while the wrapper names stay stable for tests and CLI callers.
 - Change: extracted the status/state-derivation helpers into `bin/acw_status.py`. Persisted health reads, message resolution, runtime-state derivation, daemon-down/shared-invariant messaging, and status recommendation logic now live in one module, while `auto_continue_watchd.py` keeps wrapper names for the existing CLI/test surface.

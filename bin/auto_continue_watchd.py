@@ -620,19 +620,23 @@ def _daemon_scope_env(socket_path: str) -> dict[str, str]:
     return env
 
 
+def _daemon_process_context() -> acw_control.DaemonProcessContext:
+    return acw_control.DaemonProcessContext(
+        read_pid_file=_read_pid_file,
+        current_scope_key=_tmux_scope_key,
+        current_scope_label=_tmux_scope_label,
+        daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+        daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+        daemon_log_file_for_scope=daemon_log_file_for_scope,
+        daemon_scope_env=_daemon_scope_env,
+        daemon_entrypoint=str(Path(__file__).resolve()),
+    )
+
+
 def _daemon_pid_alive(pid_file: str) -> str:
     return acw_control.daemon_pid_alive(
         pid_file,
-        context=acw_control.DaemonProcessContext(
-            read_pid_file=_read_pid_file,
-            current_scope_key=_tmux_scope_key,
-            current_scope_label=_tmux_scope_label,
-            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
-            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
-            daemon_log_file_for_scope=daemon_log_file_for_scope,
-            daemon_scope_env=_daemon_scope_env,
-            daemon_entrypoint=str(Path(__file__).resolve()),
-        ),
+        context=_daemon_process_context(),
     )
 
 
@@ -641,31 +645,13 @@ def _stop_existing_daemon(pid_str: str, pid_file: str, socket_file: str) -> None
         pid_str,
         pid_file,
         socket_file,
-        context=acw_control.DaemonProcessContext(
-            read_pid_file=_read_pid_file,
-            current_scope_key=_tmux_scope_key,
-            current_scope_label=_tmux_scope_label,
-            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
-            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
-            daemon_log_file_for_scope=daemon_log_file_for_scope,
-            daemon_scope_env=_daemon_scope_env,
-            daemon_entrypoint=str(Path(__file__).resolve()),
-        ),
+        context=_daemon_process_context(),
     )
 
 
 def _ensure_daemon_running() -> str:
     return acw_control.ensure_daemon_running(
-        context=acw_control.DaemonProcessContext(
-            read_pid_file=_read_pid_file,
-            current_scope_key=_tmux_scope_key,
-            current_scope_label=_tmux_scope_label,
-            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
-            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
-            daemon_log_file_for_scope=daemon_log_file_for_scope,
-            daemon_scope_env=_daemon_scope_env,
-            daemon_entrypoint=str(Path(__file__).resolve()),
-        )
+        context=_daemon_process_context(),
     )
 
 
@@ -675,6 +661,18 @@ def _current_session_generation(data: dict) -> int:
 
 def _normalize_runtime_row(data: dict[str, object] | None) -> dict[str, str]:
     return acw_control.normalize_runtime_row(data)
+
+
+def _daemon_rpc_client_context() -> acw_control.DaemonRpcClientContext:
+    return acw_control.DaemonRpcClientContext(
+        ensure_daemon_running=_ensure_daemon_running,
+        current_socket_file=daemon_socket_file_for_scope,
+        current_log_file=daemon_log_file_for_scope,
+        write_daemon_scope_state=_write_daemon_scope_state,
+        watch_now_ts=_watch_now_ts,
+        current_scope_key=_tmux_scope_key,
+        print_progress=_print_progress,
+    )
 
 
 def _daemon_rpc_call(
@@ -687,15 +685,7 @@ def _daemon_rpc_call(
         command,
         params,
         timeout_secs=timeout_secs,
-        context=acw_control.DaemonRpcClientContext(
-            ensure_daemon_running=_ensure_daemon_running,
-            current_socket_file=daemon_socket_file_for_scope,
-            current_log_file=daemon_log_file_for_scope,
-            write_daemon_scope_state=_write_daemon_scope_state,
-            watch_now_ts=_watch_now_ts,
-            current_scope_key=_tmux_scope_key,
-            print_progress=_print_progress,
-        ),
+        context=_daemon_rpc_client_context(),
     )
 
 
@@ -762,13 +752,17 @@ def _session_signature(session: SavedSessionRecord) -> tuple[str, str, int]:
     return acw_control.session_signature(session)
 
 
+def _scoped_session_context() -> acw_control.ScopedSessionContext:
+    return acw_control.ScopedSessionContext(
+        load_sessions=_load_sessions,
+        normalize_tmux_socket=_tmux_scope_key,
+    )
+
+
 def _load_scoped_session_records(socket_path: str | None = None) -> list[SavedSessionRecord]:
     return acw_control.load_scoped_session_records(
         socket_path,
-        context=acw_control.ScopedSessionContext(
-            load_sessions=_load_sessions,
-            normalize_tmux_socket=_tmux_scope_key,
-        ),
+        context=_scoped_session_context(),
     )
 
 
@@ -889,6 +883,25 @@ def _daemon_runtime_row(thread_id: str, runtime: _DaemonSessionRuntime | None) -
     )
 
 
+def _daemon_reconcile_context() -> acw_control.DaemonReconcileContext:
+    return acw_control.DaemonReconcileContext(
+        drain_daemon_codex_log_events=_drain_daemon_codex_log_events,
+        load_scoped_session_records=_load_scoped_session_records,
+        remove_runtime_state=_remove_runtime_state,
+        daemon_session_runtime=_daemon_session_runtime,
+        message_text=_message_text,
+        daemon_process_session_events=_daemon_process_session_events,
+        daemon_runtime_events=_daemon_runtime_events,
+        daemon_refresh_session_health=_daemon_refresh_session_health,
+        daemon_runtime_payload=_daemon_runtime_payload,
+        write_runtime_state=_write_runtime_state,
+        append_log=_watch_append_log,
+        codex_log_path=DAEMON_CODEX_LOG_PATH,
+        is_thread_id=is_thread_id,
+        time_module=time,
+    )
+
+
 def _daemon_reconcile_once(
     scope: str,
     *,
@@ -899,22 +912,16 @@ def _daemon_reconcile_once(
         scope,
         log_tail=log_tail,
         runtimes=runtimes,
-        context=acw_control.DaemonReconcileContext(
-            drain_daemon_codex_log_events=_drain_daemon_codex_log_events,
-            load_scoped_session_records=_load_scoped_session_records,
-            remove_runtime_state=_remove_runtime_state,
-            daemon_session_runtime=_daemon_session_runtime,
-            message_text=_message_text,
-            daemon_process_session_events=_daemon_process_session_events,
-            daemon_runtime_events=_daemon_runtime_events,
-            daemon_refresh_session_health=_daemon_refresh_session_health,
-            daemon_runtime_payload=_daemon_runtime_payload,
-            write_runtime_state=_write_runtime_state,
-            append_log=_watch_append_log,
-            codex_log_path=DAEMON_CODEX_LOG_PATH,
-            is_thread_id=is_thread_id,
-            time_module=time,
-        ),
+        context=_daemon_reconcile_context(),
+    )
+
+
+def _daemon_wait_context() -> acw_control.DaemonWaitContext:
+    return acw_control.DaemonWaitContext(
+        daemon_reconcile_once=_daemon_reconcile_once,
+        daemon_runtime_row=_daemon_runtime_row,
+        current_session_generation=_current_session_generation,
+        time_module=time,
     )
 
 
@@ -936,12 +943,7 @@ def _daemon_wait_for_condition(
         runtimes=runtimes,
         send_progress=send_progress,
         timeout_secs=timeout_secs,
-        context=acw_control.DaemonWaitContext(
-            daemon_reconcile_once=_daemon_reconcile_once,
-            daemon_runtime_row=_daemon_runtime_row,
-            current_session_generation=_current_session_generation,
-            time_module=time,
-        ),
+        context=_daemon_wait_context(),
     )
 
 
@@ -953,19 +955,23 @@ def _daemon_wait_matches(row: dict[str, str], wait: dict[str, object]) -> bool:
     )
 
 
+def _restart_codex_context() -> acw_control.RestartCodexContext:
+    return acw_control.RestartCodexContext(
+        wait_for_shell_prompt=_wait_for_shell_prompt,
+        terminate_codex_processes_in_pane=_terminate_codex_processes_in_pane,
+        run_tmux=run_tmux,
+        wait_for_codex_process=_wait_for_codex_process,
+        accept_directory_trust_prompt_in_pane=_accept_directory_trust_prompt_in_pane,
+        print_progress=_print_progress,
+    )
+
+
 def _restart_codex_in_pane_result(pane: str, thread_id: str, *, progress) -> tuple[bool, str]:
     return acw_control.restart_codex_in_pane_result(
         pane,
         thread_id,
         progress=progress,
-        context=acw_control.RestartCodexContext(
-            wait_for_shell_prompt=_wait_for_shell_prompt,
-            terminate_codex_processes_in_pane=_terminate_codex_processes_in_pane,
-            run_tmux=run_tmux,
-            wait_for_codex_process=_wait_for_codex_process,
-            accept_directory_trust_prompt_in_pane=_accept_directory_trust_prompt_in_pane,
-            print_progress=_print_progress,
-        ),
+        context=_restart_codex_context(),
     )
 
 
@@ -1015,24 +1021,28 @@ def _daemon_process_rpc_requests(
     )
 
 
+def _daemon_main_context() -> acw_control.DaemonMainContext:
+    return acw_control.DaemonMainContext(
+        normalize_tmux_socket=_tmux_scope_key,
+        daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+        daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+        daemon_log_tail_cls=_DaemonCodexLogTail,
+        codex_log_path=DAEMON_CODEX_LOG_PATH,
+        write_daemon_scope_state=_write_daemon_scope_state,
+        watch_now_ts=_watch_now_ts,
+        daemon_process_rpc_requests=_daemon_process_rpc_requests,
+        daemon_reconcile_once=_daemon_reconcile_once,
+        remove_runtime_state=_remove_runtime_state,
+        daemon_poll_interval_secs=DAEMON_POLL_INTERVAL_SECS,
+        daemon_idle_exit_secs=DAEMON_IDLE_EXIT_SECS,
+        time_module=time,
+    )
+
+
 def _daemon_main(argv: list[str]) -> None:
     acw_control.daemon_main(
         argv,
-        context=acw_control.DaemonMainContext(
-            normalize_tmux_socket=_tmux_scope_key,
-            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
-            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
-            daemon_log_tail_cls=_DaemonCodexLogTail,
-            codex_log_path=DAEMON_CODEX_LOG_PATH,
-            write_daemon_scope_state=_write_daemon_scope_state,
-            watch_now_ts=_watch_now_ts,
-            daemon_process_rpc_requests=_daemon_process_rpc_requests,
-            daemon_reconcile_once=_daemon_reconcile_once,
-            remove_runtime_state=_remove_runtime_state,
-            daemon_poll_interval_secs=DAEMON_POLL_INTERVAL_SECS,
-            daemon_idle_exit_secs=DAEMON_IDLE_EXIT_SECS,
-            time_module=time,
-        ),
+        context=_daemon_main_context(),
     )
 
 
