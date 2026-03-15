@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 import glob
-import hashlib
 import io
 import json
 import os
@@ -29,6 +28,7 @@ import acw_observe
 import acw_probe
 import acw_repair
 import acw_runtime
+import acw_tmux
 import acw_ui
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
@@ -167,7 +167,7 @@ Examples:
 
 
 def sanitize_key(s: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", s)
+    return acw_tmux.sanitize_key(s)
 
 
 def key_from_pane(pane: str) -> str:
@@ -233,128 +233,96 @@ def _remove_session_state(thread_id: str) -> bool:
 
 
 def run_tmux(*args: str) -> str | None:
-    """Run a tmux command, trying socket env then fallback without TMUX env."""
-    cmd: list[str] = ["tmux"]
-    sock = _preferred_tmux_socket()
-    if sock:
-        cmd += ["-S", sock]
-    cmd += list(args)
-    try:
-        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    if not sock and os.environ.get("TMUX", ""):
-        # If the current client/server is healthy, do not silently fall back to
-        # another tmux server (that can create windows in the wrong session).
-        if _tmux_client_env_healthy():
-            return None
-        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-        try:
-            return subprocess.check_output(
-                ["tmux"] + list(args), stderr=subprocess.DEVNULL, text=True, env=env
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-    elif sock:
-        # Socket override can become stale; fallback to default tmux server.
-        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-        try:
-            return subprocess.check_output(
-                ["tmux"] + list(args),
-                stderr=subprocess.DEVNULL,
-                text=True,
-                env=env,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-    return None
+    return acw_tmux.run_tmux(
+        *args,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+        tmux_client_env_healthy_fn=_tmux_client_env_healthy,
+        check_output_fn=subprocess.check_output,
+    )
 
 
 def _tmux_socket_from_env() -> str:
-    """Return tmux socket path parsed from $TMUX, or empty string."""
-    tmux_env = os.environ.get("TMUX", "")
-    if not tmux_env:
-        return ""
-    # TMUX format: "/tmp/tmux-UID/default,<client_pid>,<session_id>"
-    parts = tmux_env.split(",", 1)
-    if not parts:
-        return ""
-    sock = parts[0].strip()
-    return sock if sock else ""
+    return acw_tmux.tmux_socket_from_env()
 
 
 def _preferred_tmux_socket() -> str:
-    sock = os.environ.get("AUTO_CONTINUE_TMUX_SOCKET", "")
-    return sock if sock else _tmux_socket_from_env()
+    return acw_tmux.preferred_tmux_socket()
 
 
 def _is_default_tmux_socket_path(sock: str) -> bool:
-    return bool(re.fullmatch(r"/tmp/tmux-\d+/default", sock))
+    return acw_tmux.is_default_tmux_socket_path(sock)
 
 
 def _tmux_scope_key(socket_path: str | None = None) -> str:
-    sock = _preferred_tmux_socket() if socket_path is None else socket_path
-    sock = (sock or "").strip()
-    if not sock or _is_default_tmux_socket_path(sock):
-        return ""
-    return sock
+    return acw_tmux.tmux_scope_key(
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def _tmux_scope_token(socket_path: str | None = None) -> str:
-    scope = _tmux_scope_key(socket_path)
-    if not scope:
-        return "default"
-    sanitized = sanitize_key(scope)
-    if len(sanitized) <= 48:
-        return sanitized
-    label = sanitize_key(os.path.basename(scope)) or "scope"
-    digest = hashlib.sha1(scope.encode("utf-8")).hexdigest()[:12]
-    return f"{label[:24]}-{digest}"
+    return acw_tmux.tmux_scope_token(
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def _tmux_scope_label(socket_path: str | None = None) -> str:
-    scope = _tmux_scope_key(socket_path)
-    return scope if scope else "(default)"
+    return acw_tmux.tmux_scope_label(
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def _session_scope_matches_current(data: dict) -> bool:
-    return _tmux_scope_key(str(data.get("tmux_socket", "")).strip()) == _tmux_scope_key()
+    return acw_tmux.session_scope_matches_current(
+        data,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def daemon_pid_file_for_scope(socket_path: str | None = None) -> str:
-    return os.path.join(STATE_DIR, f"acw_daemon.{_tmux_scope_token(socket_path)}.pid")
+    return acw_tmux.daemon_pid_file_for_scope(
+        STATE_DIR,
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def daemon_log_file_for_scope(socket_path: str | None = None) -> str:
-    return os.path.join(STATE_DIR, f"acw_daemon.{_tmux_scope_token(socket_path)}.log")
+    return acw_tmux.daemon_log_file_for_scope(
+        STATE_DIR,
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def _daemon_socket_root() -> str:
-    root = os.environ.get("XDG_RUNTIME_DIR", "").strip() or tempfile.gettempdir()
-    path = Path(root) / f"acw-{os.getuid()}"
-    path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-    return str(path)
+    return acw_tmux.daemon_socket_root()
 
 
 def daemon_socket_file_for_scope(socket_path: str | None = None) -> str:
-    return os.path.join(_daemon_socket_root(), f"acw_daemon.{_tmux_scope_token(socket_path)}.sock")
+    return acw_tmux.daemon_socket_file_for_scope(
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def daemon_runtime_file_for_thread(thread_id: str, socket_path: str | None = None) -> str:
-    scope = _tmux_scope_key(socket_path)
-    token = _tmux_scope_token(socket_path)
-    return f"{state_db_file()}#runtime:{token}:{scope}:{thread_id.lower()}"
+    return acw_tmux.daemon_runtime_file_for_thread(
+        state_db_file(),
+        thread_id,
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def daemon_runtime_glob_for_scope(socket_path: str | None = None) -> str:
-    scope = _tmux_scope_key(socket_path)
-    token = _tmux_scope_token(socket_path)
-    return f"{state_db_file()}#runtime:{token}:{scope}:*"
+    return acw_tmux.daemon_runtime_glob_for_scope(
+        state_db_file(),
+        socket_path,
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+    )
 
 
 def _write_runtime_state(thread_id: str, data: dict, socket_path: str | None = None) -> None:
@@ -409,302 +377,82 @@ def _write_daemon_scope_state(
 
 
 def _tmux_client_env_healthy() -> bool:
-    """Return True when TMUX points to a live current client/server."""
-    if not os.environ.get("TMUX", ""):
-        return False
-    try:
-        subprocess.check_output(
-            ["tmux", "display-message", "-p", "#{session_name}"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    return acw_tmux.tmux_client_env_healthy(
+        check_output_fn=subprocess.check_output,
+    )
 
 
 def _tmux_server_pids() -> list[str]:
-    sock = _preferred_tmux_socket()
-    try:
-        ps_out = subprocess.check_output(
-            ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-
-    socket_matches: list[str] = []
-    pids: list[str] = []
-    for line in ps_out.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        pid_str, args = parts
-        if not pid_str.isdigit() or "tmux" not in args:
-            continue
-        if sock and sock in args:
-            socket_matches.append(pid_str)
-            continue
-        pids.append(pid_str)
-    if socket_matches:
-        return socket_matches
-    return pids
+    return acw_tmux.tmux_server_pids(
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+        check_output_fn=subprocess.check_output,
+    )
 
 
 def _tmux_socket_recovery_hint() -> str:
-    sock = _preferred_tmux_socket()
-    if not sock or os.path.exists(sock):
-        return ""
-
-    pids = _tmux_server_pids()
-    if not pids:
-        return ""
-    if len(pids) == 1:
-        return (
-            f"hint: tmux socket '{sock}' is unreachable; "
-            f"recreate it with `kill -USR1 {pids[0]}`"
-        )
-    joined = ", ".join(pids)
-    return (
-        f"hint: tmux socket '{sock}' is unreachable; "
-        f"if the right server is still running, recreate its socket with "
-        f"`kill -USR1 <pid>` (tmux pids: {joined})"
+    return acw_tmux.tmux_socket_recovery_hint(
+        preferred_tmux_socket_fn=_preferred_tmux_socket,
+        tmux_server_pids_fn=_tmux_server_pids,
     )
 
 
 def _print_tmux_unavailable_hint(target: str) -> None:
-    print(
-        f"error: tmux server is unavailable; cannot resolve window target '{target}'",
+    acw_tmux.print_tmux_unavailable_hint(
+        target,
+        tmux_socket_recovery_hint_fn=_tmux_socket_recovery_hint,
         file=sys.stderr,
     )
-    print(
-        "hint: start/reconnect tmux, or use a pane id if you already know it (for example '%6')",
-        file=sys.stderr,
-    )
-    recovery = _tmux_socket_recovery_hint()
-    if recovery:
-        print(recovery, file=sys.stderr)
 
 
 def resolve_pane_from_window_target(target: str, quiet: bool = False) -> str | None:
-    """Resolve a window index or session:window to a pane id."""
-    m = re.fullmatch(r"(\d+)", target)
-    if m:
-        requested_session = ""
-        requested_window = m.group(1)
-    else:
-        m = re.fullmatch(r"([^:]+):(\d+)", target)
-        if m:
-            requested_session = m.group(1)
-            requested_window = m.group(2)
-        else:
-            return None
-
-    fmt = "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{pane_index}"
-    listing = run_tmux("list-panes", "-a", "-F", fmt)
-    if listing is None:
-        if not quiet:
-            _print_tmux_unavailable_hint(target)
-        return None
-
-    rows: list[dict[str, str]] = []
-    session_seen: set[str] = set()
-    for line in listing.splitlines():
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) < 6:
-            continue
-        sess, widx, pid_, pactive, wactive, pidx = parts[:6]
-        if not pid_ or widx != requested_window:
-            continue
-        if requested_session and sess != requested_session:
-            continue
-        rows.append(
-            dict(
-                session=sess,
-                window_index=widx,
-                pane_id=pid_,
-                pane_active=pactive,
-                window_active=wactive,
-                pane_index=pidx,
-            )
-        )
-        session_seen.add(sess)
-
-    if not rows:
-        return None
-
-    if not requested_session and len(session_seen) > 1:
-        active_session = ""
-        active_conflict = False
-        for r in rows:
-            if r["window_active"] != "1":
-                continue
-            if not active_session:
-                active_session = r["session"]
-            elif active_session != r["session"]:
-                active_conflict = True
-                break
-
-        if active_session and not active_conflict:
-            requested_session = active_session
-        else:
-            csv = ",".join(sorted(session_seen))
-            if not quiet:
-                print(
-                    f"error: window '{requested_window}' is ambiguous across tmux sessions: {csv}",
-                    file=sys.stderr,
-                )
-                print(
-                    f"hint: use 'session:window' (for example '0:{requested_window}') or a pane id (for example '%6')",
-                    file=sys.stderr,
-                )
-            return None
-
-    selected = ""
-    fallback = ""
-    for r in rows:
-        if requested_session and r["session"] != requested_session:
-            continue
-        if not fallback:
-            fallback = r["pane_id"]
-        if r["pane_active"] == "1":
-            selected = r["pane_id"]
-            break
-
-    if not selected:
-        selected = fallback
-
-    return selected if is_pane_id(selected) else None
+    return acw_tmux.resolve_pane_from_window_target(
+        target,
+        run_tmux_fn=run_tmux,
+        is_pane_id_fn=is_pane_id,
+        print_tmux_unavailable_hint_fn=_print_tmux_unavailable_hint,
+        quiet=quiet,
+    )
 
 
 def resolve_pane_from_window_name(name: str, quiet: bool = False) -> str | None:
-    """Resolve a window name to a pane id.  Returns None if not found or ambiguous."""
-    fmt = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_active}"
-    listing = run_tmux("list-panes", "-a", "-F", fmt)
-    if not listing:
-        return None
-
-    matches: list[tuple[str, str, str, str]] = []  # (session, window_index, pane_id, pane_active)
-    for line in listing.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        sess, widx, wname, pid_, pactive = parts[:5]
-        if wname == name:
-            matches.append((sess, widx, pid_, pactive))
-
-    if not matches:
-        return None
-    if len(matches) == 1:
-        return matches[0][2] if is_pane_id(matches[0][2]) else None
-
-    # Multiple panes across windows with the same name — ambiguous.
-    unique_windows = {(s, w) for s, w, _, _ in matches}
-    if len(unique_windows) > 1:
-        labels = ", ".join(f"{s}:{w}" for s, w in sorted(unique_windows))
-        if not quiet:
-            print(
-                f"error: window name '{name}' is ambiguous across windows: {labels}",
-                file=sys.stderr,
-            )
-        return None
-
-    # Multiple panes in the same window — pick the active one, else first.
-    for s, w, p, pa in matches:
-        if pa == "1" and is_pane_id(p):
-            return p
-    return matches[0][2] if is_pane_id(matches[0][2]) else None
+    return acw_tmux.resolve_pane_from_window_name(
+        name,
+        run_tmux_fn=run_tmux,
+        is_pane_id_fn=is_pane_id,
+        quiet=quiet,
+    )
 
 
 def resolve_pane_target(target: str) -> str:
-    """Resolve any pane/window target to a tmux pane id (%N).
-
-    Tries, in order: pane id, window index, then exact tmux window name.
-    """
-    if is_pane_id(target):
-        return target
-
-    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
-        pane = resolve_pane_from_window_target(target)
-        if pane and is_pane_id(pane):
-            return pane
-        print(f"error: could not resolve window target '{target}'", file=sys.stderr)
-        sys.exit(1)
-
-    # Try resolving as a tmux window name.
-    pane = resolve_pane_from_window_name(target)
-    if pane and is_pane_id(pane):
-        return pane
-
-    if _tmux_socket_recovery_hint():
-        _print_tmux_unavailable_hint(target)
-        sys.exit(1)
-
-    print(f"error: no managed session or window found for '{target}'", file=sys.stderr)
-    print(
-        "hint: use a pane id ('%6'), window name, or window index ('2')",
-        file=sys.stderr,
+    return acw_tmux.resolve_pane_target(
+        target,
+        is_pane_id_fn=is_pane_id,
+        resolve_pane_from_window_target_fn=resolve_pane_from_window_target,
+        resolve_pane_from_window_name_fn=resolve_pane_from_window_name,
+        tmux_socket_recovery_hint_fn=_tmux_socket_recovery_hint,
+        print_tmux_unavailable_hint_fn=_print_tmux_unavailable_hint,
     )
-    sys.exit(1)
 
 
 def _resolve_live_pane_target(target: str) -> str:
-    """Best-effort live tmux target resolution without exiting on failure."""
-    if is_pane_id(target):
-        return target
-    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
-        pane = resolve_pane_from_window_target(target)
-        return pane if pane and is_pane_id(pane) else ""
-    pane = resolve_pane_from_window_name(target, quiet=True)
-    return pane if pane and is_pane_id(pane) else ""
+    return acw_tmux.resolve_live_pane_target(
+        target,
+        is_pane_id_fn=is_pane_id,
+        resolve_pane_from_window_target_fn=resolve_pane_from_window_target,
+        resolve_pane_from_window_name_fn=resolve_pane_from_window_name,
+    )
 
 
 def resolve_start_pane_target(target: str) -> str:
-    """Resolve only the canonical tmux targets accepted by `start`.
-
-    Supported forms: pane id, window index, session:window, or exact tmux
-    window name. Thread ids are intentionally rejected here because the second
-    positional argument is reserved for the explicit Codex thread id.
-    """
-    if is_pane_id(target):
-        return target
-
-    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
-        pane = resolve_pane_from_window_target(target)
-        if pane and is_pane_id(pane):
-            return pane
-        print(f"error: could not resolve window target '{target}'", file=sys.stderr)
-        sys.exit(1)
-
-    if is_thread_id(target):
-        print(
-            "error: start target must be a pane id, window index, session:window, or tmux window name",
-            file=sys.stderr,
-        )
-        print(
-            "hint: pass the thread id as the second positional argument: "
-            "acw start <target> <thread-id>",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    pane = resolve_pane_from_window_name(target)
-    if pane and is_pane_id(pane):
-        return pane
-
-    if _tmux_socket_recovery_hint():
-        _print_tmux_unavailable_hint(target)
-        sys.exit(1)
-
-    print(f"error: could not resolve start target '{target}'", file=sys.stderr)
-    print(
-        "hint: use a pane id ('%6'), window name, or window index ('2')",
-        file=sys.stderr,
+    return acw_tmux.resolve_start_pane_target(
+        target,
+        is_pane_id_fn=is_pane_id,
+        is_thread_id_fn=is_thread_id,
+        resolve_pane_from_window_target_fn=resolve_pane_from_window_target,
+        resolve_pane_from_window_name_fn=resolve_pane_from_window_name,
+        tmux_socket_recovery_hint_fn=_tmux_socket_recovery_hint,
+        print_tmux_unavailable_hint_fn=_print_tmux_unavailable_hint,
     )
-    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

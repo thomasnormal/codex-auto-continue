@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted tmux/scope/path and target-resolution helpers into `bin/acw_tmux.py`. `watchd` now keeps compatibility wrappers for `run_tmux`, tmux-scope naming, socket recovery hints, and pane/window target resolution so the CLI surface and existing regression patch points stay stable while the tmux-specific logic lives in one place.
 - Change: extracted the daemon/control-plane orchestration into `bin/acw_control.py`. Daemon process supervision, daemon RPC transport/mutations, daemon reconcile/wait helpers, and in-pane Codex restart control now live behind explicit callback contexts, while `auto_continue_watchd.py` keeps compatibility wrappers so the existing CLI and regression tests still patch the same names.
 - Change: extracted the runtime identity/model layer into `bin/acw_runtime.py`. The `SavedSessionRecord` / `LiveWatcherRecord` / `LivePaneRecord` data model plus runtime snapshot building, strict pane-thread validation, anomaly detection, and status-entry construction now live behind an explicit runtime context, while `auto_continue_watchd.py` keeps thin compatibility wrappers for the existing command/test surface.
 - Change: extracted status/doctor orchestration into `bin/acw_observe.py`. `watchd` now delegates the high-level status filtering, shared-daemon reporting, doctor report building, and doctor/status command flow through an explicit observe context, while the lower-level runtime snapshot and row helpers stay local for now.

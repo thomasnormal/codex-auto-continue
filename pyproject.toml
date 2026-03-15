@@ -50,5 +50,6 @@ py-modules = [
   "acw_rpc",
   "acw_runtime",
   "acw_state",
+  "acw_tmux",
   "acw_ui",
 ]
