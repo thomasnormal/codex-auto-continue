@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: added shared mock/real coverage for no-target `acw resume`. The shared manager scenario suite now proves the “pause all, then resume all via restart” behavior on both backends instead of leaving that path only in the patched unit suite.
 - Change: expanded the shared manager scenario suite with two more daemon-era recovery cases: `restart` with no target now has shared mock/real coverage for recovering after a dead shared daemon, and private tmux-socket recreation is no longer real-only because the mock backend can now simulate a missing tmux socket plus the recovery hint path.
 - Change: extracted the high-level manager behavior tests into one shared scenario suite in `test/support/manager_scenarios.py`. The same `start` / `resume` / `restart --restart-codex` / `edit` / `status` / `doctor` / daemon-repair behaviors now run against both a mock backend and the real tmux+Codex harness instead of living in two separate test files.
 - Change: added `test/support/mock_manager_harness.py` as a mock backend that still drives the real `acw` CLI entrypoint and SQLite state model, but replaces tmux/Codex with a small fake runtime model. That keeps the fast manager scenarios high-level without relying on per-test patch scaffolding.

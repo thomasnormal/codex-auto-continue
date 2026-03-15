@@ -99,6 +99,46 @@ class ManagerScenarioMixin:
             str(self.harness.manager_runtime_row_for_pane(aot_pane).get("runtime_id", "")),
         )
 
+    def test_manager_resume_without_target_resumes_all_paused_sessions(self):
+        self.harness.rename_window("formal")
+        self.harness.start_codex("say exactly FORMALALLDONE and nothing else")
+        formal_turn = self.harness.wait_for_first_completed_turn()
+        formal_pane = self.harness.pane_id
+
+        self.harness.new_window("aot")
+        self.harness.start_codex("say exactly AOTALLDONE and nothing else")
+        aot_turn = self.harness.wait_for_first_completed_turn()
+        aot_pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "formal", "--message", "continue formal")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.run_manager("start", "aot", "--message", "continue aot")
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        self.harness.run_manager("pause")
+        self.harness.wait_for_manager_watcher_paused_in_pane(formal_pane)
+        self.harness.wait_for_manager_watcher_paused_in_pane(aot_pane)
+        formal_id_before = str(
+            self.harness.manager_runtime_row_for_pane(formal_pane).get("runtime_id", "")
+        )
+        aot_id_before = str(
+            self.harness.manager_runtime_row_for_pane(aot_pane).get("runtime_id", "")
+        )
+
+        resume = self.harness.run_manager("resume")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        self.assertIn("resuming 2 paused managed session(s) via restart", resume.stdout, self.harness.diagnostics())
+        self.assertNotEqual(
+            formal_id_before,
+            str(self.harness.manager_runtime_row_for_pane(formal_pane).get("runtime_id", "")),
+        )
+        self.assertNotEqual(
+            aot_id_before,
+            str(self.harness.manager_runtime_row_for_pane(aot_pane).get("runtime_id", "")),
+        )
+
     def test_manager_restart_restart_codex_reuses_same_thread(self):
         self.harness.rename_window("bugs")
         self.harness.start_codex("say exactly BUGSDONE and nothing else")
