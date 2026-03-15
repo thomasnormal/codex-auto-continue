@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted pane/session/thread target resolution into `bin/acw_targets.py`. Strict `resolve_thread_id`, saved-session pane lookup, restart target selection, and doctor target resolution now live behind an explicit target context, while `auto_continue_watchd.py` keeps thin wrapper names for CLI and regression-test compatibility.
 - Change: extracted the top-level bootstrap helpers into `bin/acw_bootstrap.py`. Project-cwd detection, CLI help text, `print_help`, and `main` subcommand dispatch now live in a small entrypoint-focused module while `auto_continue_watchd.py` keeps compatibility wrappers for `build_help_text()` and `main()`.
 - Change: deduplicated the daemon/control wiring that remained in `auto_continue_watchd.py`. Repeated `acw_control.*Context(...)` construction now goes through small local context-builder helpers, which makes the remaining entrypoint glue shorter and keeps daemon dependency wiring in one place.
 - Change: finished moving the remaining status/detail assembly into `bin/acw_status.py`. The per-row detail selection, status recommendation printing, summary-table row assembly, and `status --details` text output now live with the rest of the status/state helpers instead of staying inline in `auto_continue_watchd.py`.

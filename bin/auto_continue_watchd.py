@@ -31,6 +31,7 @@ import acw_repair
 import acw_runtime
 import acw_runtime_store
 import acw_tmux
+import acw_targets
 import acw_ui
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
@@ -399,21 +400,12 @@ def resolve_start_pane_target(target: str) -> str:
 
 
 def resolve_thread_id(pane: str, requested: str = "", *, model: RuntimeModel | None = None) -> str:
-    if requested and requested != "auto":
-        if is_thread_id(requested):
-            return requested.lower()
-        print(f"error: invalid thread_id '{requested}'", file=sys.stderr)
-        sys.exit(1)
-
-    if model is None:
-        model = _build_runtime_model()
-    tid, thread_error = _strict_thread_for_pane(model, pane)
-    if tid and is_thread_id(tid):
-        return tid
-
-    error_text = thread_error or f"could not determine thread_id for pane={pane}; start requires a concrete thread id"
-    print(f"error: {error_text}", file=sys.stderr)
-    sys.exit(1)
+    return acw_targets.resolve_thread_id(
+        pane,
+        requested,
+        model=model,
+        context=_target_context(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1336,6 +1328,42 @@ def _runtime_context() -> acw_runtime.RuntimeContext:
     )
 
 
+def _saved_session_target_context() -> acw_targets.TargetContext:
+    return acw_targets.TargetContext(
+        is_pane_id=is_pane_id,
+        is_thread_id=is_thread_id,
+        build_runtime_model=_build_runtime_model,
+        strict_thread_for_pane=_strict_thread_for_pane,
+        runtime_session_for_thread=_runtime_session_for_thread,
+        runtime_panes_for_thread=_runtime_panes_for_thread,
+        saved_session_panes_for_target=None,
+        resolve_pane_from_window_name=resolve_pane_from_window_name,
+        resolve_pane_from_window_name_quiet=lambda target: resolve_pane_from_window_name(target, quiet=True),
+        resolve_pane_from_window_target=resolve_pane_from_window_target,
+        tmux_socket_recovery_hint=_tmux_socket_recovery_hint,
+        print_tmux_unavailable_hint=_print_tmux_unavailable_hint,
+        current_tmux_pane=current_tmux_pane,
+    )
+
+
+def _target_context() -> acw_targets.TargetContext:
+    return acw_targets.TargetContext(
+        is_pane_id=is_pane_id,
+        is_thread_id=is_thread_id,
+        build_runtime_model=_build_runtime_model,
+        strict_thread_for_pane=_strict_thread_for_pane,
+        runtime_session_for_thread=_runtime_session_for_thread,
+        runtime_panes_for_thread=_runtime_panes_for_thread,
+        saved_session_panes_for_target=_saved_session_panes_for_target,
+        resolve_pane_from_window_name=resolve_pane_from_window_name,
+        resolve_pane_from_window_name_quiet=lambda target: resolve_pane_from_window_name(target, quiet=True),
+        resolve_pane_from_window_target=resolve_pane_from_window_target,
+        tmux_socket_recovery_hint=_tmux_socket_recovery_hint,
+        print_tmux_unavailable_hint=_print_tmux_unavailable_hint,
+        current_tmux_pane=current_tmux_pane,
+    )
+
+
 def _load_session_records() -> list[SavedSessionRecord]:
     return acw_runtime.load_session_records(context=_runtime_context())
 
@@ -1620,66 +1648,19 @@ def _load_sessions(socket_path: str | None = None) -> list[dict[str, str]]:
 
 
 def _saved_session_panes_for_target(target: str, model: RuntimeModel | None = None) -> list[str]:
-    if model is None:
-        model = _build_runtime_model()
-    panes: list[str] = []
-    seen: set[str] = set()
-    if is_thread_id(target):
-        sessions: tuple[SavedSessionRecord, ...] = tuple(
-            [session] if (session := _runtime_session_for_thread(model, target)) else []
-        )
-    else:
-        sessions = model.sessions_by_name.get(target, ())
-
-    for session in sessions:
-        thread_id = session.thread_id
-        if is_thread_id(target):
-            if thread_id != target.lower():
-                continue
-        for pane in _runtime_panes_for_thread(model, thread_id):
-            if not is_pane_id(pane.pane_id) or pane.pane_id in seen:
-                continue
-            seen.add(pane.pane_id)
-            panes.append(pane.pane_id)
-    return panes
+    return acw_targets.saved_session_panes_for_target(
+        target,
+        model=model,
+        context=_saved_session_target_context(),
+    )
 
 
 def _resolve_restart_pane_target(target: str, model: RuntimeModel | None = None) -> str:
-    if is_pane_id(target):
-        return target
-
-    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
-        pane = resolve_pane_from_window_target(target)
-        if pane and is_pane_id(pane):
-            return pane
-        print(f"error: could not resolve window target '{target}'", file=sys.stderr)
-        sys.exit(1)
-
-    saved_panes = _saved_session_panes_for_target(target, model=model)
-    if len(saved_panes) == 1:
-        return saved_panes[0]
-    if len(saved_panes) > 1:
-        joined = ", ".join(saved_panes)
-        print(
-            f"error: saved session target '{target}' is ambiguous across live panes: {joined}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    pane = resolve_pane_from_window_name(target, quiet=True)
-    if pane and is_pane_id(pane):
-        return pane
-
-    if _tmux_socket_recovery_hint():
-        _print_tmux_unavailable_hint(target)
-        sys.exit(1)
-
-    print(f"error: no managed session, window, or live Codex pane found for '{target}'", file=sys.stderr)
-    print(
-        "hint: use a pane id ('%6'), window name, window index ('2'), or a saved session name with a live Codex pane",
-        file=sys.stderr,
+    return acw_targets.resolve_restart_pane_target(
+        target,
+        model=model,
+        context=_target_context(),
     )
-    sys.exit(1)
 
 
 def cmd_status(argv: list[str]) -> None:
@@ -1709,37 +1690,11 @@ def _codex_auth_state_available() -> tuple[bool, str]:
 
 
 def _doctor_resolve_target(target: str, model: RuntimeModel | None = None) -> tuple[str, str]:
-    if model is None:
-        model = _build_runtime_model()
-    if not target:
-        pane = current_tmux_pane()
-        if pane:
-            return pane, ""
-        return "", ""
-
-    if is_pane_id(target):
-        return target, ""
-
-    if re.fullmatch(r"\d+", target) or re.fullmatch(r"[^:]+:\d+", target):
-        pane = resolve_pane_from_window_target(target)
-        if pane and is_pane_id(pane):
-            return pane, ""
-        return "", f"could not resolve window target '{target}'"
-
-    saved_panes = _saved_session_panes_for_target(target, model=model)
-    if len(saved_panes) == 1:
-        return saved_panes[0], ""
-    if len(saved_panes) > 1:
-        joined = ", ".join(saved_panes)
-        return "", f"saved session target '{target}' is ambiguous across live panes: {joined}"
-
-    pane = resolve_pane_from_window_name(target)
-    if pane and is_pane_id(pane):
-        return pane, ""
-
-    if _tmux_socket_recovery_hint():
-        return "", _tmux_socket_recovery_hint()
-    return "", f"could not resolve target '{target}'"
+    return acw_targets.doctor_resolve_target(
+        target,
+        model=model,
+        context=_target_context(),
+    )
 
 
 DoctorReport = acw_observe.DoctorReport
@@ -1864,16 +1819,6 @@ def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
         pane,
         context=_repair_context(),
     )
-
-
-def _doctor_recommendation_target(target: str, pane: str, rows: list[dict[str, str]]) -> str:
-    if target:
-        return target
-    if rows:
-        name = _read_session_state(rows[0].get("thread", "")).get("name", "").strip()
-        if name:
-            return name
-    return pane
 
 
 def _doctor_report(target: str = "") -> DoctorReport:
