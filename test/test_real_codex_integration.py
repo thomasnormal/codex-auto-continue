@@ -198,6 +198,32 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
         state_text = json.dumps(state_row or {}, sort_keys=True)
         self.assertIn("updated continue", state_text, self.harness.diagnostics())
 
+    def test_manager_status_details_reads_live_sqlite_state_ref(self):
+        self.harness.rename_window("details")
+        self.harness.start_codex("say exactly DETAILSOK and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        self.harness.run_manager("start", "details", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(first_turn.thread_id)
+
+        runtime_row = self.harness.manager_runtime_row(first_turn.thread_id)
+        self.assertIsNotNone(runtime_row, self.harness.diagnostics())
+        self.assertEqual(
+            f"sqlite:session:{first_turn.thread_id}",
+            str(runtime_row.get("state_ref", "")),
+            self.harness.diagnostics(),
+        )
+
+        status = self.harness.run_manager("status", "--details")
+
+        self.assertIn("=== Entry 1/1 ===", status.stdout, self.harness.diagnostics())
+        self.assertIn(f"THREAD_ID:       {first_turn.thread_id}", status.stdout, self.harness.diagnostics())
+        self.assertIn(
+            f"STATE_REF:       sqlite:session:{first_turn.thread_id}",
+            status.stdout,
+            self.harness.diagnostics(),
+        )
+        self.assertIn("STATE:           running", status.stdout, self.harness.diagnostics())
+
     def test_manager_doctor_reports_healthy_current_pane(self):
         self.harness.start_codex("say the word hello and nothing else")
         self.harness.wait_for_pane_contains("• hello", timeout=60.0)
@@ -259,6 +285,48 @@ class RealCodexWatcherIntegrationTests(unittest.TestCase):
 
         self.assertIn("--- restarting", restart.stdout, self.harness.diagnostics())
         self.assertNotEqual(watcher_pid_before, self.harness._read_manager_pid_for_pane(self.harness.pane_id))
+
+    def test_manager_repair_all_recovers_shared_daemon_for_multiple_live_panes(self):
+        self.harness.rename_window("formal")
+        self.harness.start_codex("say exactly FORMALREAL and nothing else")
+        formal_turn = self.harness.wait_for_first_completed_turn()
+        formal_pane = self.harness.pane_id
+
+        self.harness.new_window("aot")
+        self.harness.start_codex("say exactly AOTREAL and nothing else")
+        aot_turn = self.harness.wait_for_first_completed_turn()
+        aot_pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "formal", "--message", "continue formal")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.run_manager("start", "aot", "--message", "continue aot")
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        daemon_pid_before = self.harness._read_manager_daemon_pid()
+        self.assertIsNotNone(daemon_pid_before, self.harness.diagnostics())
+
+        self.harness.stop_manager_watcher()
+        status = self.harness.run_manager("status")
+        self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
+        self.assertIn(
+            "2 managed live Codex pane(s) currently have no runtime",
+            status.stdout,
+            self.harness.diagnostics(),
+        )
+
+        repair = self.harness.run_manager("repair", "--all")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        daemon_pid_after = self.harness._read_manager_daemon_pid()
+        self.assertIsNotNone(daemon_pid_after, self.harness.diagnostics())
+        self.assertNotEqual(daemon_pid_before, daemon_pid_after, self.harness.diagnostics())
+        self.assertIn("repair:", repair.stdout, self.harness.diagnostics())
+
+        recovered = self.harness.run_manager("status")
+        self.assertNotIn("Shared daemon error:", recovered.stdout, self.harness.diagnostics())
+        self.assertIn("formal", recovered.stdout, self.harness.diagnostics())
+        self.assertIn("aot", recovered.stdout, self.harness.diagnostics())
 
     def test_manager_status_summary_shows_recent_last_agent_text(self):
         token = "CONTROLPANELTOKEN"

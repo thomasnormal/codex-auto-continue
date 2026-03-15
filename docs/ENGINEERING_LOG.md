@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: expanded the real-Codex integration coverage with two daemon-backed manager cases: `status --details` now has a real test that reads a live `sqlite:session:` state ref, and `repair --all` now has a real multi-pane recovery test that kills the shared daemon and proves live runtimes come back without restarting the Codex panes.
 - Fix: `acw status` was broken for real SQLite-backed session refs because `acw_status.read_state_json()` called `acw_state.read_state_ref()` positionally after the refactor, but that helper now requires `state_dir=` as a keyword-only argument. Added a direct regression that exercises `_read_state_json()` on a real `sqlite:session:` ref instead of mocking the state reader away.
 - Change: extracted shared defaults and state-root configuration into `bin/acw_config.py`. `watchd` and `logwatch` now share one source for the Codex state dir, Codex log path, default continue message, send delays, and known shell-command set.
 - Change: extracted housekeeping into `bin/acw_housekeeping.py`. The `cleanup` implementation plus state-dir writability and Codex auth-file checks now live outside `auto_continue_watchd.py`, while the CLI keeps the same wrapper surface for `doctor` and cleanup regressions.
