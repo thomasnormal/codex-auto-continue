@@ -1448,13 +1448,7 @@ def _unresolved_live_pane_anomalies(pane: LivePaneRecord) -> list[str]:
 
 
 def _status_row_detail(row: dict[str, str], sj: dict[str, str]) -> str:
-    detail = row.get("anomaly_detail", "").strip()
-    if detail:
-        return detail
-    runtime_detail = row.get("runtime_detail", "").strip()
-    if runtime_detail:
-        return runtime_detail
-    return sj.get("health_detail", "").strip()
+    return acw_status.status_row_detail(row, sj)
 
 
 def _build_status_entries_from_snapshot(
@@ -1619,50 +1613,30 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
 
 
 def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    commands = _status_recommendations(resolved)
-    for cmd in commands:
-        print(f"Recommendation: run {cmd}")
-    for message in _status_invariant_messages(resolved):
-        print(message)
+    acw_status.print_status_recommendations(
+        resolved,
+        status_recommendations_fn=_status_recommendations,
+        status_invariant_messages_fn=_status_invariant_messages,
+    )
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    # Precompute row data to estimate column widths.
-    # (window_pane, state, started, last_acw, last_agent, msg_raw)
-    rows_data: list[tuple[str, str, str, str, str, str]] = []
-    for r, current_pane, window_label in resolved:
-        sj = _read_state_json(r["state"])
-        state_value = _compute_state(r, sj)
-        state_detail = _status_row_detail(r, sj)
-        started, _last_activity = _thread_times(r["thread"], compact=True)
-        last_acw = sj.get("last_continue_at", "")
-        if last_acw:
-            try:
-                epoch = time.mktime(time.strptime(last_acw, "%Y-%m-%d %H:%M:%S"))
-                last_acw = _format_age(epoch, compact=True)
-            except (ValueError, OverflowError):
-                pass
-        if not last_acw:
-            last_acw = "-"
-        last_agent = _last_agent_snippet_for_pane(current_pane, r["thread"]) or "-"
-        msg_raw = _message_summary_for_row(r)
-        window_pane = _status_window_pane_cell(
-            window_label,
-            current_pane,
-            r["thread"],
-            r.get("runtime_id") or r.get("pid", ""),
-        )
-        rows_data.append((
-            window_pane,
-            _state_summary(state_value, {"health_detail": state_detail}),
-            started,
-            last_acw,
-            last_agent,
-            msg_raw,
-        ))
-
-    acw_ui.render_status_table(
-        rows_data,
+    acw_status.status_table(
+        resolved,
+        read_state_json_fn=_read_state_json,
+        compute_state_fn=_compute_state,
+        status_row_detail_fn=_status_row_detail,
+        thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
+        format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
+        last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
+        message_summary_for_row_fn=_message_summary_for_row,
+        status_window_pane_cell_fn=_status_window_pane_cell,
+        state_summary_fn=_state_summary,
+        render_status_table_fn=lambda rows_data, section_every, max_msg_lines: acw_ui.render_status_table(
+            rows_data,
+            section_every=section_every,
+            max_msg_lines=max_msg_lines,
+        ),
         section_every=_STATUS_SECTION_EVERY,
         max_msg_lines=_MAX_MSG_LINES,
     )
@@ -1674,66 +1648,18 @@ def _status_details(
 ) -> None:
     if model is None:
         model = _build_runtime_model()
-    total = len(resolved)
-    for idx, (r, current_pane, window_label) in enumerate(resolved, 1):
-        if idx > 1:
-            print()
-
-        sj = _read_state_json(r["state"])
-        state_value = _compute_state(r, sj)
-        state_detail = _status_row_detail(r, sj)
-
-        last_event = "-"
-        if r["watch"]:
-            try:
-                with open(r["watch"]) as f:
-                    lines = f.readlines()
-                if lines:
-                    last_event = lines[-1].rstrip("\n")
-            except OSError:
-                pass
-            if not last_event:
-                last_event = "-"
-
-        mode, value = _resolve_message(r)
-        if mode == "inline" and value:
-            msg_full = value
-        else:
-            msg_full = "-"
-
-        started, last_activity = _thread_times(r["thread"])
-        last_agent = _last_agent_snippet_for_pane(current_pane, r["thread"]) or "-"
-
-        last_acw = sj.get("last_continue_at", "-")
-
-        print(f"=== Entry {idx}/{total} ===")
-        print(f"  {'WINDOW:':<16} {window_label}")
-        print(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
-        runtime_id = r.get("runtime_id") or r.get("pid", "")
-        print(f"  {'ID:':<16} {runtime_id or '-'}")
-        print(f"  {'THREAD_ID:':<16} {r['thread'] or 'unknown'}")
-        pane_record = model.panes_by_id.get(current_pane) if current_pane else None
-        provenance = _thread_provenance_text(pane_record.detected_thread_source) if pane_record else ""
-        if provenance:
-            print(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
-        print(f"  {'STATE:':<16} {state_value}")
-        print(f"  {'STARTED:':<16} {started}")
-        print(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
-        print(f"  {'LAST_ACW:':<16} {last_acw}")
-        print(f"  {'LAST_AGENT:':<16} {last_agent}")
-        if state_detail:
-            label = "ANOMALY" if r.get("anomalies") else "HEALTH_DETAIL"
-            print(f"  {f'{label}:':<16} {state_detail}")
-        hts = sj.get("health_ts", "")
-        if hts:
-            print(f"  {'HEALTH_SINCE:':<16} {hts}")
-        print(f"  {'LAST_EVENT:':<16} {last_event}")
-        print(f"  {'MESSAGE:':<16} {msg_full}")
-        if r["watch"]:
-            print(f"  {'WATCH_LOG:':<16} {r['watch']}")
-        if r["state"]:
-            print(f"  {'STATE_REF:':<16} {r['state']}")
-    _print_status_recommendations(resolved)
+    acw_status.status_details(
+        resolved,
+        model=model,
+        read_state_json_fn=_read_state_json,
+        compute_state_fn=_compute_state,
+        status_row_detail_fn=_status_row_detail,
+        resolve_message_fn=_resolve_message,
+        thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
+        last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
+        thread_provenance_text_fn=_thread_provenance_text,
+        print_status_recommendations_fn=_print_status_recommendations,
+    )
 
 
 def _load_sessions(socket_path: str | None = None) -> list[dict[str, str]]:

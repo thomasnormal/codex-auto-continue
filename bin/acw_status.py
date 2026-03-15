@@ -4,6 +4,7 @@ from collections import defaultdict
 import json
 import os
 from pathlib import Path
+import time
 from typing import Callable
 
 
@@ -467,3 +468,151 @@ def status_invariant_messages(
             messages.append(msg)
 
     return messages
+
+
+def status_row_detail(row: dict[str, str], session_json: dict[str, str]) -> str:
+    detail = row.get("anomaly_detail", "").strip()
+    if detail:
+        return detail
+    runtime_detail = row.get("runtime_detail", "").strip()
+    if runtime_detail:
+        return runtime_detail
+    return session_json.get("health_detail", "").strip()
+
+
+def print_status_recommendations(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    status_recommendations_fn: Callable[[list[tuple[dict[str, str], str, str]]], list[str]],
+    status_invariant_messages_fn: Callable[[list[tuple[dict[str, str], str, str]]], list[str]],
+    print_fn: Callable[[str], None] = print,
+) -> None:
+    for command in status_recommendations_fn(resolved):
+        print_fn(f"Recommendation: run {command}")
+    for message in status_invariant_messages_fn(resolved):
+        print_fn(message)
+
+
+def status_table(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    read_state_json_fn: Callable[[str], dict[str, str]],
+    compute_state_fn: Callable[[dict[str, str], dict[str, str]], str],
+    status_row_detail_fn: Callable[[dict[str, str], dict[str, str]], str],
+    thread_times_fn: Callable[[str, bool], tuple[str, str]],
+    format_age_fn: Callable[[float, bool], str],
+    last_agent_snippet_for_pane_fn: Callable[[str, str], str],
+    message_summary_for_row_fn: Callable[[dict[str, str]], str],
+    status_window_pane_cell_fn: Callable[[str, str, str, str], str],
+    state_summary_fn: Callable[[str, dict[str, str]], str],
+    render_status_table_fn: Callable[[list[tuple[str, str, str, str, str, str]], int, int], None],
+    section_every: int,
+    max_msg_lines: int,
+) -> None:
+    rows_data: list[tuple[str, str, str, str, str, str]] = []
+    for row, current_pane, window_label in resolved:
+        session_json = read_state_json_fn(row["state"])
+        state_value = compute_state_fn(row, session_json)
+        state_detail = status_row_detail_fn(row, session_json)
+        started, _last_activity = thread_times_fn(row["thread"], True)
+        last_acw = session_json.get("last_continue_at", "")
+        if last_acw:
+            try:
+                epoch = time.mktime(time.strptime(last_acw, "%Y-%m-%d %H:%M:%S"))
+                last_acw = format_age_fn(epoch, True)
+            except (ValueError, OverflowError):
+                pass
+        if not last_acw:
+            last_acw = "-"
+        last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
+        msg_raw = message_summary_for_row_fn(row)
+        window_pane = status_window_pane_cell_fn(
+            window_label,
+            current_pane,
+            row["thread"],
+            row.get("runtime_id") or row.get("pid", ""),
+        )
+        rows_data.append(
+            (
+                window_pane,
+                state_summary_fn(state_value, {"health_detail": state_detail}),
+                started,
+                last_acw,
+                last_agent,
+                msg_raw,
+            )
+        )
+
+    render_status_table_fn(rows_data, section_every, max_msg_lines)
+
+
+def status_details(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    model,
+    read_state_json_fn: Callable[[str], dict[str, str]],
+    compute_state_fn: Callable[[dict[str, str], dict[str, str]], str],
+    status_row_detail_fn: Callable[[dict[str, str], dict[str, str]], str],
+    resolve_message_fn: Callable[[dict[str, str]], tuple[str, str]],
+    thread_times_fn: Callable[[str, bool], tuple[str, str]],
+    last_agent_snippet_for_pane_fn: Callable[[str, str], str],
+    thread_provenance_text_fn: Callable[[str], str],
+    print_status_recommendations_fn: Callable[[list[tuple[dict[str, str], str, str]]], None],
+    print_fn: Callable[[str], None] = print,
+) -> None:
+    total = len(resolved)
+    for idx, (row, current_pane, window_label) in enumerate(resolved, 1):
+        if idx > 1:
+            print_fn("")
+
+        session_json = read_state_json_fn(row["state"])
+        state_value = compute_state_fn(row, session_json)
+        state_detail = status_row_detail_fn(row, session_json)
+
+        last_event = "-"
+        if row["watch"]:
+            try:
+                with open(row["watch"]) as handle:
+                    lines = handle.readlines()
+                if lines:
+                    last_event = lines[-1].rstrip("\n")
+            except OSError:
+                pass
+            if not last_event:
+                last_event = "-"
+
+        mode, value = resolve_message_fn(row)
+        msg_full = value if mode == "inline" and value else "-"
+
+        started, last_activity = thread_times_fn(row["thread"], False)
+        last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
+        last_acw = session_json.get("last_continue_at", "-")
+
+        print_fn(f"=== Entry {idx}/{total} ===")
+        print_fn(f"  {'WINDOW:':<16} {window_label}")
+        print_fn(f"  {'PANE:':<16} {current_pane or '(no live pane)'}")
+        runtime_id = row.get("runtime_id") or row.get("pid", "")
+        print_fn(f"  {'ID:':<16} {runtime_id or '-'}")
+        print_fn(f"  {'THREAD_ID:':<16} {row['thread'] or 'unknown'}")
+        pane_record = model.panes_by_id.get(current_pane) if current_pane else None
+        provenance = thread_provenance_text_fn(pane_record.detected_thread_source) if pane_record else ""
+        if provenance:
+            print_fn(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
+        print_fn(f"  {'STATE:':<16} {state_value}")
+        print_fn(f"  {'STARTED:':<16} {started}")
+        print_fn(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
+        print_fn(f"  {'LAST_ACW:':<16} {last_acw}")
+        print_fn(f"  {'LAST_AGENT:':<16} {last_agent}")
+        if state_detail:
+            label = "ANOMALY" if row.get("anomalies") else "HEALTH_DETAIL"
+            print_fn(f"  {f'{label}:':<16} {state_detail}")
+        health_ts = session_json.get("health_ts", "")
+        if health_ts:
+            print_fn(f"  {'HEALTH_SINCE:':<16} {health_ts}")
+        print_fn(f"  {'LAST_EVENT:':<16} {last_event}")
+        print_fn(f"  {'MESSAGE:':<16} {msg_full}")
+        if row["watch"]:
+            print_fn(f"  {'WATCH_LOG:':<16} {row['watch']}")
+        if row["state"]:
+            print_fn(f"  {'STATE_REF:':<16} {row['state']}")
+    print_status_recommendations_fn(resolved)
