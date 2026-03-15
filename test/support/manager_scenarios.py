@@ -207,6 +207,45 @@ class ManagerScenarioMixin:
         self.assertNotIn("stopcase", status.stdout, self.harness.diagnostics())
         self.assertNotIn(first_turn.thread_id, status.stdout, self.harness.diagnostics())
 
+    def test_manager_stop_without_target_forgets_all_managed_sessions(self):
+        self.harness.rename_window("formal")
+        self.harness.start_codex("say exactly STOPFORMAL and nothing else")
+        formal_turn = self.harness.wait_for_first_completed_turn()
+        formal_pane = self.harness.pane_id
+
+        self.harness.new_window("aot")
+        self.harness.start_codex("say exactly STOPAOT and nothing else")
+        aot_turn = self.harness.wait_for_first_completed_turn()
+        aot_pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "formal", "--message", "continue formal")
+        self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
+        self.harness.run_manager("start", "aot", "--message", "continue aot")
+        self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
+
+        stop = self.harness.run_manager("stop")
+        self.harness.wait_for_manager_watcher_stopped_in_pane(formal_pane)
+        self.harness.wait_for_manager_watcher_stopped_in_pane(aot_pane)
+
+        self.assertIn(
+            f"stopped: pane={formal_pane} thread_id={formal_turn.thread_id}",
+            stop.stdout,
+            self.harness.diagnostics(),
+        )
+        self.assertIn(
+            f"stopped: pane={aot_pane} thread_id={aot_turn.thread_id}",
+            stop.stdout,
+            self.harness.diagnostics(),
+        )
+        self.assertIsNone(self.harness.manager_session_row(formal_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNone(self.harness.manager_session_row(aot_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNone(self.harness.manager_runtime_row(formal_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNone(self.harness.manager_runtime_row(aot_turn.thread_id), self.harness.diagnostics())
+
+        status = self.harness.run_manager("status")
+        self.assertNotIn("formal", status.stdout, self.harness.diagnostics())
+        self.assertNotIn("aot", status.stdout, self.harness.diagnostics())
+
     def test_manager_status_details_reads_live_sqlite_state_ref(self):
         self.harness.rename_window("details")
         self.harness.start_codex("say exactly DETAILSOK and nothing else")
