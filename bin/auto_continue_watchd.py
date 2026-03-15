@@ -28,6 +28,7 @@ import acw_observe
 import acw_probe
 import acw_repair
 import acw_runtime
+import acw_runtime_store
 import acw_tmux
 import acw_ui
 from auto_continue_logwatch import thread_times_from_state_db
@@ -203,15 +204,15 @@ def is_thread_id(s: str) -> bool:
 
 
 def watch_log_for_key(key: str) -> str:
-    return os.path.join(STATE_DIR, f"auto_continue_logwatch.{key}.log")
+    return acw_runtime_store.watch_log_for_key(STATE_DIR, key)
 
 
 def state_file_for_thread(thread_id: str) -> str:
-    return acw_state.session_state_ref(thread_id)
+    return acw_runtime_store.state_file_for_thread(thread_id)
 
 
 def state_db_file() -> str:
-    return acw_state.state_db_path(STATE_DIR)
+    return acw_runtime_store.state_db_file(STATE_DIR)
 
 
 def _read_session_state(thread_id: str) -> dict:
@@ -325,7 +326,7 @@ def daemon_runtime_glob_for_scope(socket_path: str | None = None) -> str:
 
 
 def _write_runtime_state(thread_id: str, data: dict, socket_path: str | None = None) -> None:
-    acw_state.write_runtime_state(
+    acw_runtime_store.write_runtime_state(
         thread_id,
         data,
         state_dir=STATE_DIR,
@@ -334,7 +335,7 @@ def _write_runtime_state(thread_id: str, data: dict, socket_path: str | None = N
 
 
 def _remove_runtime_state(thread_id: str, socket_path: str | None = None) -> None:
-    acw_state.remove_runtime_state(
+    acw_runtime_store.remove_runtime_state(
         thread_id,
         state_dir=STATE_DIR,
         scope=_tmux_scope_key(socket_path),
@@ -342,7 +343,7 @@ def _remove_runtime_state(thread_id: str, socket_path: str | None = None) -> Non
 
 
 def _read_runtime_rows(socket_path: str | None = None) -> list[dict[str, str]]:
-    rows = acw_state.read_runtime_rows(
+    rows = acw_runtime_store.read_runtime_rows(
         state_dir=STATE_DIR,
         scope=_tmux_scope_key(socket_path),
     )
@@ -350,11 +351,10 @@ def _read_runtime_rows(socket_path: str | None = None) -> list[dict[str, str]]:
 
 
 def _read_daemon_scope_state(socket_path: str | None = None) -> dict[str, str]:
-    row = acw_state.read_daemon_scope_state(
+    return acw_runtime_store.read_daemon_scope_state(
         state_dir=STATE_DIR,
         scope=_tmux_scope_key(socket_path),
     )
-    return {str(key): str(value) for key, value in row.items()}
 
 
 def _write_daemon_scope_state(
@@ -365,7 +365,7 @@ def _write_daemon_scope_state(
     started_ts: str = "",
     scope: str | None = None,
 ) -> None:
-    acw_state.write_daemon_scope_state(
+    acw_runtime_store.write_daemon_scope_state(
         state_dir=STATE_DIR,
         scope=_tmux_scope_key(scope),
         daemon_pid=daemon_pid,
@@ -548,34 +548,24 @@ def cmd_window_renamed(argv: list[str]) -> None:
 
 
 def watcher_rows(pane_filter: str = "") -> list[dict[str, str]]:
-    """Return daemon-managed runtime rows for the current tmux socket scope."""
-    rows = _read_runtime_rows()
-    if pane_filter:
-        rows = [row for row in rows if row.get("pane", "") == pane_filter]
-    deduped: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
-        key = (
-            row.get("pid", ""),
-            row.get("pane", ""),
-            row.get("thread", ""),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped
+    return acw_runtime_store.watcher_rows(
+        pane_filter,
+        read_runtime_rows_fn=_read_runtime_rows,
+    )
 
 
 def watcher_pids_for_pane(pane: str) -> list[str]:
-    return [r["pid"] for r in watcher_rows(pane)]
+    return acw_runtime_store.watcher_pids_for_pane(
+        pane,
+        watcher_rows_fn=watcher_rows,
+    )
 
 
 def _watcher_row_for_pane(pane: str) -> dict[str, str] | None:
-    rows = watcher_rows(pane)
-    if len(rows) == 1:
-        return rows[0]
-    return None
+    return acw_runtime_store.watcher_row_for_pane(
+        pane,
+        watcher_rows_fn=watcher_rows,
+    )
 
 
 def _system_exit_detail(exc: SystemExit, stderr_text: str = "") -> str:
@@ -583,15 +573,12 @@ def _system_exit_detail(exc: SystemExit, stderr_text: str = "") -> str:
 
 
 def _other_watcher_for_thread(pane: str, thread_id: str) -> dict[str, str] | None:
-    if not is_thread_id(thread_id):
-        return None
-    for row in watcher_rows():
-        if row.get("pane", "") == pane:
-            continue
-        row_tid = row.get("thread", "")
-        if row_tid and row_tid.lower() == thread_id.lower():
-            return row
-    return None
+    return acw_runtime_store.other_watcher_for_thread(
+        pane,
+        thread_id,
+        is_thread_id_fn=is_thread_id,
+        watcher_rows_fn=watcher_rows,
+    )
 
 
 def _is_pid_stopped(pid: int) -> bool:
@@ -609,13 +596,11 @@ def _is_pid_stopped(pid: int) -> bool:
 
 
 def thread_from_running_watcher_for_pane(pane: str) -> str | None:
-    rows = watcher_rows(pane)
-    if len(rows) != 1:
-        return None
-    tid = rows[0]["thread"]
-    if is_thread_id(tid):
-        return tid.lower()
-    return None
+    return acw_runtime_store.thread_from_running_watcher_for_pane(
+        pane,
+        watcher_rows_fn=watcher_rows,
+        is_thread_id_fn=is_thread_id,
+    )
 
 
 # ---------------------------------------------------------------------------
