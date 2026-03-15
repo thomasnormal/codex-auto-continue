@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted the runtime identity/model layer into `bin/acw_runtime.py`. The `SavedSessionRecord` / `LiveWatcherRecord` / `LivePaneRecord` data model plus runtime snapshot building, strict pane-thread validation, anomaly detection, and status-entry construction now live behind an explicit runtime context, while `auto_continue_watchd.py` keeps thin compatibility wrappers for the existing command/test surface.
 - Change: extracted status/doctor orchestration into `bin/acw_observe.py`. `watchd` now delegates the high-level status filtering, shared-daemon reporting, doctor report building, and doctor/status command flow through an explicit observe context, while the lower-level runtime snapshot and row helpers stay local for now.
 - Change: extracted the mutating command layer into `bin/acw_commands.py`. `start/stop/pause/resume/restart/edit/repair` plus their argument parsing and restart/repair orchestration now live behind an explicit command context, while `auto_continue_watchd.py` keeps thin wrappers for the existing API surface.
 - Change: extracted the repair planner into `bin/acw_repair.py`. `watchd` now keeps the CLI-side repair command orchestration, but the actual pane/runtime repair policy and `RepairStep` data model live in a dedicated module with an explicit callback context. That makes the daemon/runtime model easier to reason about and keeps repair policy separate from tmux/Codex command glue.
