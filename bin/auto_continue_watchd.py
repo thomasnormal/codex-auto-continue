@@ -25,6 +25,7 @@ import acw_state
 import acw_rpc
 import acw_daemon
 import acw_probe
+import acw_repair
 import acw_ui
 from auto_continue_logwatch import thread_times_from_state_db
 from auto_continue_logwatch import thread_from_codex_pid as _thread_from_codex_pid
@@ -3864,319 +3865,53 @@ class DoctorReport:
     recommendations: list[str]
 
 
-@dataclass(frozen=True)
-class RepairStep:
-    kind: str
-    target: str
-    summary: str
-    auto_apply: bool
-    thread_id: str = ""
-    message: str = ""
+RepairStep = acw_repair.RepairStep
+
+
+def _repair_context() -> acw_repair.RepairContext:
+    return acw_repair.RepairContext(
+        is_pane_id=is_pane_id,
+        is_thread_id=is_thread_id,
+        short_thread_id=_short_thread_id,
+        message_text=_message_text,
+        runtime_watchers_for_pane=_runtime_watchers_for_pane,
+        runtime_watchers_for_thread=_runtime_watchers_for_thread,
+        runtime_panes_for_thread=_runtime_panes_for_thread,
+        runtime_session_for_thread=_runtime_session_for_thread,
+        runtime_session_name_conflict=_runtime_session_name_conflict,
+    )
 
 
 def _pane_numeric_sort_key(pane: str) -> tuple[int, str]:
-    if is_pane_id(pane):
-        try:
-            return int(pane[1:]), pane
-        except ValueError:
-            pass
-    return 10**9, pane
+    return acw_repair.pane_numeric_sort_key(pane, context=_repair_context())
 
 
 def _repair_message_for_pane(model: RuntimeModel, pane: str, live_thread: str) -> str:
-    session = _runtime_session_for_thread(model, live_thread)
-    if session and session.message:
-        return session.message
-    for watcher in _runtime_watchers_for_pane(model, pane):
-        if watcher.thread_id != live_thread:
-            continue
-        if watcher.message_inline:
-            return _message_text(watcher.message_inline)
-    return ""
-
-
-def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
-    pane_record = model.panes_by_id.get(pane)
-    watchers = list(_runtime_watchers_for_pane(model, pane))
-
-    if not pane_record:
-        if watchers:
-            return [
-                RepairStep(
-                    kind="stop_watchers_keep_session",
-                    target=pane,
-                    summary=f"pane {pane} is missing from tmux; stop its runtime entries but keep any saved session",
-                    auto_apply=True,
-                )
-            ]
-        return []
-
-    if not pane_record.has_codex_process:
-        if watchers:
-            return [
-                RepairStep(
-                    kind="stop_watchers_keep_session",
-                    target=pane,
-                    summary=f"pane {pane} has no live Codex agent; stop its runtime entries but keep any saved session",
-                    auto_apply=True,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="manual",
-                target=pane,
-                summary=f"pane {pane} has no live Codex agent; restart Codex there manually before repairing runtime state",
-                auto_apply=False,
-            )
-        ]
-
-    if not is_thread_id(pane_record.detected_thread):
-        detail = pane_record.detected_thread_detail or f"could not determine thread_id for pane={pane} from the live Codex process"
-        return [
-            RepairStep(
-                kind="manual",
-                target=pane,
-                summary=f"pane {pane} is unresolved: {detail}",
-                auto_apply=False,
-            )
-        ]
-
-    live_thread = pane_record.detected_thread.lower()
-    related_panes = sorted(
-        {
-            row.pane_id
-            for row in _runtime_panes_for_thread(model, live_thread)
-            if row.pane_id
-        },
-        key=_pane_numeric_sort_key,
+    return acw_repair.repair_message_for_pane(
+        model,
+        pane,
+        live_thread,
+        context=_repair_context(),
     )
-    if len(related_panes) > 1:
-        return [
-            RepairStep(
-                kind="manual",
-                target=pane,
-                summary=(
-                    f"thread {_short_thread_id(live_thread)} is active across panes {', '.join(related_panes)}; "
-                    "choose one pane to keep and repair the others manually"
-                ),
-                auto_apply=False,
-                thread_id=live_thread,
-            )
-        ]
-
-    watched_panes = sorted(
-        {
-            row.pane
-            for row in _runtime_watchers_for_thread(model, live_thread)
-            if row.pane
-        },
-        key=_pane_numeric_sort_key,
-    )
-    if len(watched_panes) > 1:
-        return [
-            RepairStep(
-                kind="manual",
-                target=pane,
-                summary=(
-                    f"thread {_short_thread_id(live_thread)} is watched across panes {', '.join(watched_panes)}; "
-                    "choose one pane to keep and repair the others manually"
-                ),
-                auto_apply=False,
-                thread_id=live_thread,
-            )
-        ]
-
-    session = _runtime_session_for_thread(model, live_thread)
-    if session:
-        conflict = _runtime_session_name_conflict(model, session)
-        if conflict:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=f"pane {pane} is blocked: {conflict}",
-                    auto_apply=False,
-                    thread_id=live_thread,
-                )
-            ]
-
-    message = _repair_message_for_pane(model, pane, live_thread)
-    if not watchers:
-        if not session or not message:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=(
-                        f"pane {pane} has live thread {_short_thread_id(live_thread)} but no runtime and no saved continue message; "
-                        "start it manually with an explicit --message"
-                    ),
-                    auto_apply=False,
-                    thread_id=live_thread,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="start_watcher",
-                target=pane,
-                summary=f"start one managed runtime on pane {pane} for thread {_short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
-
-    if len(watchers) > 1:
-        if not message:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=(
-                        f"pane {pane} has duplicate runtime entries but no saved continue message for thread "
-                        f"{_short_thread_id(live_thread)}; repair it manually"
-                    ),
-                    auto_apply=False,
-                    thread_id=live_thread,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="restart_watcher",
-                target=pane,
-                summary=f"replace duplicate runtime entries on pane {pane} with one managed runtime for thread {_short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
-
-    watcher = watchers[0]
-    if not is_thread_id(watcher.thread_id):
-        if not message:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=f"pane {pane} has a runtime with an invalid thread id and no saved continue message; repair it manually",
-                    auto_apply=False,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="restart_watcher",
-                target=pane,
-                summary=f"restart the runtime on pane {pane} with the live thread {_short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
-
-    if watcher.thread_id != live_thread:
-        if not message:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=(
-                        f"pane {pane} runtime is bound to {_short_thread_id(watcher.thread_id)}, but the live pane is "
-                        f"{_short_thread_id(live_thread)} and no saved continue message is available; repair it manually"
-                    ),
-                    auto_apply=False,
-                    thread_id=live_thread,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="restart_watcher",
-                target=pane,
-                summary=f"rebind the runtime on pane {pane} to the live thread {_short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
-
-    if not session:
-        if not message:
-            return [
-                RepairStep(
-                    kind="manual",
-                    target=pane,
-                    summary=f"pane {pane} has no saved session and no recoverable continue message; repair it manually",
-                    auto_apply=False,
-                    thread_id=live_thread,
-                )
-            ]
-        return [
-            RepairStep(
-                kind="recreate_session",
-                target=pane,
-                summary=f"recreate the missing saved session for pane {pane} and thread {_short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
-
-    if pane_record.window_name and session.name and pane_record.window_name != session.name:
-        return [
-            RepairStep(
-                kind="sync_session_name",
-                target=pane,
-                summary=f"sync the saved session name for pane {pane} to the current window name '{pane_record.window_name}'",
-                auto_apply=True,
-                thread_id=live_thread,
-            )
-        ]
-
-    return []
 
 
 def _build_repair_plan(
     model: RuntimeModel,
     target_panes: tuple[str, ...] | None = None,
 ) -> list[RepairStep]:
-    if target_panes is None:
-        candidate_panes_set = set(model.watchers_by_pane)
-        for pane in model.snapshot.panes:
-            if not pane.pane_id or not is_thread_id(pane.detected_thread):
-                continue
-            if _runtime_session_for_thread(model, pane.detected_thread):
-                candidate_panes_set.add(pane.pane_id)
-        candidate_panes = sorted(candidate_panes_set, key=_pane_numeric_sort_key)
-    else:
-        candidate_panes = list(target_panes)
+    return acw_repair.build_repair_plan(
+        model,
+        target_panes=target_panes,
+        context=_repair_context(),
+    )
 
-    steps: list[RepairStep] = []
-    seen: set[tuple[object, ...]] = set()
-    for pane in candidate_panes:
-        for step in _repair_steps_for_pane(model, pane):
-            key = (step.kind, step.summary) if not step.auto_apply else (step.kind, step.target, step.thread_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            steps.append(step)
 
-    if target_panes is None:
-        live_threads = set(model.panes_by_thread) | set(model.watchers_by_thread)
-        dead_sessions = [
-            session
-            for session in model.snapshot.sessions
-            if session.thread_id not in live_threads
-        ]
-        if dead_sessions:
-            steps.append(
-                RepairStep(
-                    kind="cleanup_dead_sessions",
-                    target="",
-                    summary=f"run acw cleanup to remove {len(dead_sessions)} dead saved session(s)",
-                    auto_apply=False,
-                )
-            )
-
-    return steps
+def _repair_steps_for_pane(model: RuntimeModel, pane: str) -> list[RepairStep]:
+    return acw_repair.repair_steps_for_pane(
+        model,
+        pane,
+        context=_repair_context(),
+    )
 
 
 def _doctor_recommendation_target(target: str, pane: str, rows: list[dict[str, str]]) -> str:
