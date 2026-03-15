@@ -2,6 +2,7 @@
 
 ## 2026-03-15
 
+- Change: extracted shared defaults and state-root configuration into `bin/acw_config.py`. `watchd` and `logwatch` now share one source for the Codex state dir, Codex log path, default continue message, send delays, and known shell-command set.
 - Change: extracted housekeeping into `bin/acw_housekeeping.py`. The `cleanup` implementation plus state-dir writability and Codex auth-file checks now live outside `auto_continue_watchd.py`, while the CLI keeps the same wrapper surface for `doctor` and cleanup regressions.
 - Change: centralized pane/thread identity parsing in `bin/acw_ids.py`. `watchd`, `logwatch`, SQLite state, probe, and UI code now share one `is_thread_id` / `is_pane_id` / `short_thread_id` definition instead of each carrying its own regex copy.
 - Change: extracted pane/session/thread target resolution into `bin/acw_targets.py`. Strict `resolve_thread_id`, saved-session pane lookup, restart target selection, and doctor target resolution now live behind an explicit target context, while `auto_continue_watchd.py` keeps thin wrapper names for CLI and regression-test compatibility.

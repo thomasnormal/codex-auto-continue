@@ -17,6 +17,7 @@ import traceback
 from pathlib import Path
 
 import acw_bootstrap
+import acw_config
 import acw_state
 import acw_session
 import acw_status
@@ -53,7 +54,7 @@ from auto_continue_logwatch import tmux_send as _watch_tmux_send
 
 DAEMON_POLL_INTERVAL_SECS = 0.2
 DAEMON_IDLE_EXIT_SECS = 2.0
-DAEMON_CODEX_LOG_PATH = Path.home() / ".codex" / "log" / "codex-tui.log"
+DAEMON_CODEX_LOG_PATH = acw_config.codex_log_path()
 _DAEMON_RUNTIME_ID_SEQ = 0
 
 
@@ -64,35 +65,18 @@ def _next_daemon_runtime_id() -> str:
 
 
 def resolve_project_cwd() -> str:
-    return acw_bootstrap.resolve_project_cwd()
+    return acw_config.resolve_project_cwd()
 
 
 PROJECT_CWD = resolve_project_cwd()
 # State dir is always ~/.codex/ regardless of CWD.  Pane IDs are tmux-global,
 # so per-project state dirs cause fragmentation: the same pane gets different
 # message/pid/state files depending on which directory `acw` was invoked from.
-STATE_DIR = os.path.join(os.path.expanduser("~"), ".codex")
-SEND_DELAY_SECS = os.environ.get("AUTO_CONTINUE_SEND_DELAY_SECS", "0.25")
-ENTER_DELAY_SECS = os.environ.get("AUTO_CONTINUE_ENTER_DELAY_SECS", "0.15")
-DEFAULT_MESSAGE_TEXT = (
-    "please continue with the workstream.\n\n"
-    "Keep momentum, validate changes, and move to the next highest-value task.\n"
-)
-KNOWN_SHELL_COMMANDS = frozenset(
-    command
-    for command in {
-        os.path.basename(os.environ.get("SHELL", "")).strip().lower(),
-        "bash",
-        "sh",
-        "dash",
-        "zsh",
-        "fish",
-        "ksh",
-        "tcsh",
-        "csh",
-    }
-    if command
-)
+STATE_DIR = acw_config.state_dir()
+SEND_DELAY_SECS = acw_config.send_delay_secs()
+ENTER_DELAY_SECS = acw_config.enter_delay_secs()
+DEFAULT_MESSAGE_TEXT = acw_config.DEFAULT_MESSAGE_TEXT
+KNOWN_SHELL_COMMANDS = acw_config.known_shell_commands()
 
 os.makedirs(STATE_DIR, exist_ok=True)
 

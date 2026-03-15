@@ -23,6 +23,7 @@ from pathlib import Path
 import threading
 from typing import Callable, Literal, Optional
 
+import acw_config
 from acw_ids import is_thread_id
 from acw_ids import THREAD_ID_RE
 
@@ -62,7 +63,7 @@ INTERRUPT_RE = re.compile(
     r"codex_core::codex: interrupt received: abort current task, if any\b"
 )
 
-STATE_DIR = Path.home() / ".codex"
+STATE_DIR = acw_config.state_dir_path()
 
 
 def _session_state_path(thread_id: str) -> Path:
