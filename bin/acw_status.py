@@ -22,13 +22,13 @@ def read_state_json(
     *,
     state_dir: str,
     session_ref_prefix: str,
-    read_state_ref_fn: Callable[[str, str], dict[str, object]],
+    read_state_ref_fn: Callable[..., dict[str, object]],
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     if not state_path:
         return result
     if state_path.startswith(session_ref_prefix):
-        data = read_state_ref_fn(state_path, state_dir)
+        data = read_state_ref_fn(state_path, state_dir=state_dir)
         for key in ("health", "health_detail", "health_ts", "last_continue_at", "thread_id"):
             if key in data:
                 result[key] = str(data[key])

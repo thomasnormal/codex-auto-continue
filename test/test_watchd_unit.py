@@ -617,6 +617,31 @@ class WatchdUnitTests(unittest.TestCase):
         with patch.object(acw, "_read_session_state", return_value={"message": "continue by docs/DDR3_PLAN.md"}):
             self.assertEqual("continue by docs/DDR3_PLAN.md", acw._message_summary_for_row(row))
 
+    def test_read_state_json_reads_sqlite_session_ref(self):
+        acw._write_session_state(
+            THREAD,
+            {
+                "thread_id": THREAD,
+                "health": "warn",
+                "health_detail": "codex log missing",
+                "health_ts": "2026-03-15 12:00:00",
+                "last_continue_at": "2026-03-15 12:34:56",
+            },
+        )
+
+        data = acw._read_state_json(acw_state.session_state_ref(THREAD))
+
+        self.assertEqual(
+            {
+                "health": "warn",
+                "health_detail": "codex log missing",
+                "health_ts": "2026-03-15 12:00:00",
+                "last_continue_at": "2026-03-15 12:34:56",
+                "thread_id": THREAD,
+            },
+            data,
+        )
+
     def test_status_summary_reports_shared_daemon_failure_once(self):
         snapshot = _snapshot(
             panes=(
