@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import glob
 import io
 import os
 import re
@@ -26,6 +25,7 @@ import acw_daemon
 import acw_control
 import acw_commands
 import acw_ids
+import acw_housekeeping
 import acw_observe
 import acw_probe
 import acw_repair
@@ -1669,20 +1669,11 @@ def cmd_status(argv: list[str]) -> None:
 
 
 def _state_dir_is_writable() -> tuple[bool, str]:
-    try:
-        fd, tmp = tempfile.mkstemp(prefix="acw_doctor_", dir=STATE_DIR)
-        os.close(fd)
-        os.unlink(tmp)
-        return True, STATE_DIR
-    except OSError as exc:
-        return False, f"{STATE_DIR} ({exc})"
+    return acw_housekeeping.state_dir_is_writable(STATE_DIR)
 
 
 def _codex_auth_state_available() -> tuple[bool, str]:
-    auth = Path(STATE_DIR) / "auth.json"
-    if auth.is_file():
-        return True, str(auth)
-    return False, str(auth)
+    return acw_housekeeping.codex_auth_state_available(STATE_DIR)
 
 
 def _doctor_resolve_target(target: str, model: RuntimeModel | None = None) -> tuple[str, str]:
@@ -1856,54 +1847,22 @@ def cmd_cleanup(argv: list[str]) -> None:
 
 
 def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
-    """Remove files and DB rows for managed runtimes that are no longer live."""
-    daemon_pid_file = daemon_pid_file_for_scope()
-    daemon_socket_file = daemon_socket_file_for_scope()
-    if daemon_pid_file and os.path.exists(daemon_pid_file) and not _daemon_pid_alive(daemon_pid_file):
-        Path(daemon_pid_file).unlink(missing_ok=True)
-        Path(daemon_socket_file).unlink(missing_ok=True)
-
-    # Build set of live watcher keys for watch logs.
-    live_keys: set[str] = set()
-    live_runtime_threads: set[str] = set()
-    for r in watcher_rows():
-        k = key_from_pane(r["pane"])
-        if k:
-            live_keys.add(k)
-        tid = r.get("thread", "")
-        if is_thread_id(tid):
-            live_runtime_threads.add(tid.lower())
-
-    # Watch logs for dead sessions.
-    keep_logs: set[str] = set()
-    for k in live_keys:
-        keep_logs.add(watch_log_for_key(k))
-    for pat in (os.path.join(STATE_DIR, "auto_continue_logwatch*.log"),):
-        for lf in glob.glob(pat):
-            if lf not in keep_logs:
-                Path(lf).unlink(missing_ok=True)
-
-    if not remove_dead_sessions:
-        return
-
-    model = _build_runtime_model()
-    live_thread_panes = {tid.lower() for tid in model.panes_by_thread}
-    active_threads = live_runtime_threads | live_thread_panes
-
-    def _daemon_pid_is_alive(pid_str: str) -> bool:
-        if not pid_str.isdigit():
-            return False
-        try:
-            os.kill(int(pid_str), 0)
-            return True
-        except OSError:
-            return False
-
-    acw_state.cleanup_rows(
-        state_dir=STATE_DIR,
-        scope=_tmux_scope_key(),
-        active_threads=active_threads,
-        daemon_pid_alive=_daemon_pid_is_alive,
+    acw_housekeeping.cleanup_stale_files(
+        remove_dead_sessions,
+        context=acw_housekeeping.CleanupContext(
+            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+            daemon_pid_alive=_daemon_pid_alive,
+            watcher_rows=lambda: watcher_rows(),
+            key_from_pane=key_from_pane,
+            is_thread_id=is_thread_id,
+            watch_log_for_key=watch_log_for_key,
+            state_dir=STATE_DIR,
+            build_runtime_model=_build_runtime_model,
+            tmux_scope_key=_tmux_scope_key,
+            cleanup_rows=acw_state.cleanup_rows,
+            os_kill=os.kill,
+        ),
     )
 
 
