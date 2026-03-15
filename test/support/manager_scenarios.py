@@ -185,6 +185,28 @@ class ManagerScenarioMixin:
         state_text = json.dumps(state_row or {}, sort_keys=True)
         self.assertIn("updated continue", state_text, self.harness.diagnostics())
 
+    def test_manager_stop_forgets_managed_session(self):
+        self.harness.rename_window("stopcase")
+        self.harness.start_codex("say exactly STOPCASE and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "stopcase", "--message", "stop me")
+        self.harness.wait_for_manager_watcher_started_in_pane(pane, first_turn.thread_id)
+        self.assertIsNotNone(self.harness.manager_session_row(first_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNotNone(self.harness.manager_runtime_row(first_turn.thread_id), self.harness.diagnostics())
+
+        stop = self.harness.run_manager("stop", "stopcase")
+        self.harness.wait_for_manager_watcher_stopped_in_pane(pane)
+
+        self.assertIn(f"stopped: pane={pane} thread_id={first_turn.thread_id}", stop.stdout, self.harness.diagnostics())
+        self.assertIsNone(self.harness.manager_runtime_row(first_turn.thread_id), self.harness.diagnostics())
+        self.assertIsNone(self.harness.manager_session_row(first_turn.thread_id), self.harness.diagnostics())
+
+        status = self.harness.run_manager("status")
+        self.assertNotIn("stopcase", status.stdout, self.harness.diagnostics())
+        self.assertNotIn(first_turn.thread_id, status.stdout, self.harness.diagnostics())
+
     def test_manager_status_details_reads_live_sqlite_state_ref(self):
         self.harness.rename_window("details")
         self.harness.start_codex("say exactly DETAILSOK and nothing else")

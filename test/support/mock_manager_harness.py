@@ -257,6 +257,12 @@ class MockManagerHarness:
 
         self._wait_for(_started, timeout=timeout, description="manager runtime startup")
 
+    def wait_for_manager_watcher_stopped_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
+        def _stopped() -> bool:
+            return self.manager_runtime_row_for_pane(pane_id) is None
+
+        self._wait_for(_stopped, timeout=timeout, description="manager runtime stopped")
+
     def wait_for_manager_watcher_paused_in_pane(self, pane_id: str, timeout: float = 15.0) -> None:
         def _paused() -> bool:
             row = self.manager_runtime_row_for_pane(pane_id)
