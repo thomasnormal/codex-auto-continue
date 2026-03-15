@@ -23,6 +23,7 @@ from pathlib import Path
 import acw_state
 import acw_rpc
 import acw_daemon
+import acw_control
 import acw_commands
 import acw_observe
 import acw_probe
@@ -904,107 +905,60 @@ def _daemon_scope_env(socket_path: str) -> dict[str, str]:
 
 
 def _daemon_pid_alive(pid_file: str) -> str:
-    pid_str = _read_pid_file(pid_file)
-    if not pid_str or not pid_str.isdigit():
-        return ""
-    try:
-        os.kill(int(pid_str), 0)
-    except OSError:
-        return ""
-    return pid_str
+    return acw_control.daemon_pid_alive(
+        pid_file,
+        context=acw_control.DaemonProcessContext(
+            read_pid_file=_read_pid_file,
+            current_scope_key=_tmux_scope_key,
+            current_scope_label=_tmux_scope_label,
+            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+            daemon_log_file_for_scope=daemon_log_file_for_scope,
+            daemon_scope_env=_daemon_scope_env,
+            daemon_entrypoint=str(Path(__file__).resolve()),
+        ),
+    )
 
 
 def _stop_existing_daemon(pid_str: str, pid_file: str, socket_file: str) -> None:
-    if pid_str.isdigit():
-        try:
-            os.kill(int(pid_str), signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.time() + 2.0
-    while time.time() < deadline:
-        if not _daemon_pid_alive(pid_file):
-            break
-        time.sleep(0.05)
-    Path(pid_file).unlink(missing_ok=True)
-    Path(socket_file).unlink(missing_ok=True)
+    acw_control.stop_existing_daemon(
+        pid_str,
+        pid_file,
+        socket_file,
+        context=acw_control.DaemonProcessContext(
+            read_pid_file=_read_pid_file,
+            current_scope_key=_tmux_scope_key,
+            current_scope_label=_tmux_scope_label,
+            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+            daemon_log_file_for_scope=daemon_log_file_for_scope,
+            daemon_scope_env=_daemon_scope_env,
+            daemon_entrypoint=str(Path(__file__).resolve()),
+        ),
+    )
 
 
 def _ensure_daemon_running() -> str:
-    socket_path = _tmux_scope_key()
-    pid_file = daemon_pid_file_for_scope(socket_path)
-    socket_file = daemon_socket_file_for_scope(socket_path)
-    pid_str = _daemon_pid_alive(pid_file)
-    if pid_str:
-        deadline = time.time() + 0.5
-        while time.time() < deadline:
-            if Path(socket_file).exists():
-                return pid_str
-            time.sleep(0.05)
-        _stop_existing_daemon(pid_str, pid_file, socket_file)
-
-    Path(pid_file).unlink(missing_ok=True)
-    Path(socket_file).unlink(missing_ok=True)
-    log_path = daemon_log_file_for_scope(socket_path)
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "_daemon",
-        *(["--tmux-socket", socket_path] if socket_path else []),
-    ]
-    log_fh = open(log_path, "a")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log_fh,
-        stderr=log_fh,
-        start_new_session=True,
-        env=_daemon_scope_env(socket_path),
+    return acw_control.ensure_daemon_running(
+        context=acw_control.DaemonProcessContext(
+            read_pid_file=_read_pid_file,
+            current_scope_key=_tmux_scope_key,
+            current_scope_label=_tmux_scope_label,
+            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+            daemon_log_file_for_scope=daemon_log_file_for_scope,
+            daemon_scope_env=_daemon_scope_env,
+            daemon_entrypoint=str(Path(__file__).resolve()),
+        )
     )
-    log_fh.close()
-
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        pid_str = _daemon_pid_alive(pid_file)
-        if pid_str and Path(socket_file).exists():
-            return pid_str
-        if proc.poll() is not None:
-            break
-        time.sleep(0.05)
-
-    print(
-        f"error: failed to start acw daemon for tmux socket {_tmux_scope_label(socket_path)}",
-        file=sys.stderr,
-    )
-    try:
-        with open(log_path) as f:
-            lines = f.readlines()
-        for line in lines[-40:]:
-            print(line, end="", file=sys.stderr)
-    except OSError:
-        pass
-    sys.exit(1)
 
 
 def _current_session_generation(data: dict) -> int:
-    try:
-        return int(data.get("generation", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    return acw_control.current_session_generation(data)
 
 
 def _normalize_runtime_row(data: dict[str, object] | None) -> dict[str, str]:
-    if not data:
-        return {}
-    normalized: dict[str, str] = {}
-    for key, value in data.items():
-        if key == "paused":
-            normalized[key] = "1" if value else ""
-        elif value is None:
-            normalized[key] = ""
-        else:
-            normalized[key] = str(value)
-    if not normalized.get("thread") and normalized.get("thread_id"):
-        normalized["thread"] = normalized["thread_id"].lower()
-    return normalized
+    return acw_control.normalize_runtime_row(data)
 
 
 def _daemon_rpc_call(
@@ -1013,31 +967,20 @@ def _daemon_rpc_call(
     *,
     timeout_secs: float,
 ) -> dict[str, object]:
-    daemon_pid = _ensure_daemon_running()
-    try:
-        payload = acw_rpc.call(
-            daemon_socket_file_for_scope(),
-            {"command": command, "params": params},
-            on_progress=_print_progress,
-            timeout_secs=timeout_secs + 1.0,
-        )
-    except acw_rpc.RpcError as exc:
-        print(f"error: daemon RPC '{command}' failed: {exc}", file=sys.stderr)
-        if exc.detail:
-            print(f"detail: {exc.detail}", file=sys.stderr)
-        print(
-            f"hint: inspect {daemon_log_file_for_scope()} for daemon control-path details",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    payload["daemon_pid"] = str(payload.get("daemon_pid", "")).strip() or daemon_pid
-    _write_daemon_scope_state(
-        daemon_pid=payload["daemon_pid"],
-        socket_path=daemon_socket_file_for_scope(),
-        heartbeat_ts=_watch_now_ts(),
-        scope=_tmux_scope_key(),
+    return acw_control.daemon_rpc_call(
+        command,
+        params,
+        timeout_secs=timeout_secs,
+        context=acw_control.DaemonRpcClientContext(
+            ensure_daemon_running=_ensure_daemon_running,
+            current_socket_file=daemon_socket_file_for_scope,
+            current_log_file=daemon_log_file_for_scope,
+            write_daemon_scope_state=_write_daemon_scope_state,
+            watch_now_ts=_watch_now_ts,
+            current_scope_key=_tmux_scope_key,
+            print_progress=_print_progress,
+        ),
     )
-    return payload
 
 
 def _daemon_rpc_upsert_session(
@@ -1051,36 +994,19 @@ def _daemon_rpc_upsert_session(
     extra_session: dict[str, object] | None = None,
     timeout_secs: float = 5.0,
 ) -> dict[str, str]:
-    session_payload = {
-        "thread_id": thread_id.lower(),
-        "pane": pane,
-        "name": name,
-        "message": _message_text(message),
-        "paused": bool(paused),
-        "generation": int(generation),
-        "tmux_socket": _tmux_scope_key(),
-    }
-    if extra_session:
-        session_payload.update(extra_session)
-    payload = _daemon_rpc_call(
-        "upsert_session",
-        {
-            "thread_id": thread_id.lower(),
-            "session": session_payload,
-            "wait": {
-                "kind": "runtime",
-                "pane": pane,
-                "generation": int(generation),
-                "paused": bool(paused),
-                "statuses": ["paused"] if paused else ["running", "paused"],
-            },
-            "timeout_secs": timeout_secs,
-        },
+    return acw_control.daemon_rpc_upsert_session(
+        thread_id,
+        pane=pane,
+        name=name,
+        message=message,
+        paused=paused,
+        generation=generation,
+        daemon_rpc_call_fn=_daemon_rpc_call,
+        message_text=_message_text,
+        tmux_scope_key=_tmux_scope_key,
+        extra_session=extra_session,
         timeout_secs=timeout_secs,
     )
-    row = _normalize_runtime_row(payload.get("row", {}))
-    row["daemon_pid"] = str(payload.get("daemon_pid", "")).strip()
-    return row
 
 
 def _daemon_rpc_patch_session(
@@ -1090,73 +1016,48 @@ def _daemon_rpc_patch_session(
     wait: dict[str, object] | None = None,
     timeout_secs: float = 5.0,
 ) -> dict[str, str]:
-    payload = _daemon_rpc_call(
-        "patch_session",
-        {
-            "thread_id": thread_id.lower(),
-            "changes": changes,
-            "wait": wait or {},
-            "timeout_secs": timeout_secs,
-        },
+    return acw_control.daemon_rpc_patch_session(
+        thread_id,
+        changes,
+        daemon_rpc_call_fn=_daemon_rpc_call,
+        wait=wait,
         timeout_secs=timeout_secs,
     )
-    row = _normalize_runtime_row(payload.get("row", {}))
-    row["daemon_pid"] = str(payload.get("daemon_pid", "")).strip()
-    return row
 
 
 def _daemon_rpc_remove_session(thread_id: str, *, timeout_secs: float = 2.0) -> None:
-    _daemon_rpc_call(
-        "remove_session",
-        {
-            "thread_id": thread_id.lower(),
-            "wait": {"kind": "absent"},
-            "timeout_secs": timeout_secs,
-        },
+    acw_control.daemon_rpc_remove_session(
+        thread_id,
+        daemon_rpc_call_fn=_daemon_rpc_call,
         timeout_secs=timeout_secs,
     )
 
 
 def _daemon_rpc_restart_codex(pane: str, thread_id: str, *, timeout_secs: float = 10.0) -> None:
-    _daemon_rpc_call(
-        "restart_codex",
-        {
-            "pane": pane,
-            "thread_id": thread_id.lower(),
-            "timeout_secs": timeout_secs,
-        },
+    acw_control.daemon_rpc_restart_codex(
+        pane,
+        thread_id,
+        daemon_rpc_call_fn=_daemon_rpc_call,
         timeout_secs=timeout_secs,
     )
 
 
 def _session_signature(session: SavedSessionRecord) -> tuple[str, str, int]:
-    return (session.pane, session.message, session.generation)
+    return acw_control.session_signature(session)
 
 
 def _load_scoped_session_records(socket_path: str | None = None) -> list[SavedSessionRecord]:
-    records: list[SavedSessionRecord] = []
-    for session in _load_sessions(socket_path):
-        records.append(
-            SavedSessionRecord(
-                thread_id=session["thread_id"].lower(),
-                name=session.get("name", ""),
-                message=session.get("message", ""),
-                pane=session.get("pane", ""),
-                tmux_socket=_tmux_scope_key(session.get("tmux_socket", "")),
-                paused=bool(session.get("paused", False)),
-                generation=int(session.get("generation", 0) or 0),
-                state_file=session.get("state_file", ""),
-                health=session.get("health", ""),
-                health_detail=session.get("health_detail", ""),
-                health_ts=session.get("health_ts", ""),
-                last_continue_at=session.get("last_continue_at", ""),
-            )
-        )
-    return records
+    return acw_control.load_scoped_session_records(
+        socket_path,
+        context=acw_control.ScopedSessionContext(
+            load_sessions=_load_sessions,
+            normalize_tmux_socket=_tmux_scope_key,
+        ),
+    )
 
 
 def _daemon_runtime_payload(runtime: _DaemonSessionRuntime) -> dict:
-    return acw_daemon.daemon_runtime_payload(runtime, now_ts=_watch_now_ts)
+    return acw_control.daemon_runtime_payload(runtime, now_ts=_watch_now_ts)
 
 
 def _drain_daemon_codex_log_events(tail: _DaemonCodexLogTail) -> list[_LogwatchCodexLogEvent]:
@@ -1266,12 +1167,10 @@ def _daemon_runtime_events(
 
 
 def _daemon_runtime_row(thread_id: str, runtime: _DaemonSessionRuntime | None) -> dict[str, str]:
-    if runtime is None:
-        return {}
-    row = _normalize_runtime_row(_daemon_runtime_payload(runtime))
-    row["thread"] = thread_id.lower()
-    row["thread_id"] = thread_id.lower()
-    return row
+    return acw_control.daemon_runtime_row(
+        thread_id,
+        _daemon_runtime_payload(runtime) if runtime is not None else None,
+    )
 
 
 def _daemon_reconcile_once(
@@ -1280,65 +1179,27 @@ def _daemon_reconcile_once(
     log_tail: _DaemonCodexLogTail,
     runtimes: dict[str, _DaemonSessionRuntime],
 ) -> int:
-    drained_events = _drain_daemon_codex_log_events(log_tail)
-    events_by_thread: dict[str, list[_LogwatchCodexLogEvent]] = defaultdict(list)
-    for event in drained_events:
-        events_by_thread[event.thread_id.lower()].append(event)
-
-    desired_sessions = {
-        session.thread_id: session
-        for session in _load_scoped_session_records(scope)
-        if session.pane and is_thread_id(session.thread_id)
-    }
-
-    for thread_id in sorted(set(runtimes) - set(desired_sessions)):
-        _remove_runtime_state(thread_id, scope)
-        del runtimes[thread_id]
-
-    for thread_id, desired in desired_sessions.items():
-        current = runtimes.get(thread_id)
-        if current is None or _session_signature(desired) != (
-            current.pane,
-            current.message,
-            current.generation,
-        ):
-            runtimes[thread_id] = _daemon_session_runtime(
-                desired,
-                codex_log_path=DAEMON_CODEX_LOG_PATH,
-            )
-            current = runtimes[thread_id]
-        current.paused = desired.paused
-        current.pane = desired.pane
-        current.message = _message_text(desired.message)
-        current.tmux_socket = desired.tmux_socket
-        current.generation = desired.generation
-        if current.paused:
-            current.runtime_status = "paused"
-        elif current.runtime_status != "error":
-            current.runtime_status = "running"
-            current.runtime_detail = ""
-
-    now = time.time()
-    for thread_id, runtime in runtimes.items():
-        try:
-            _daemon_process_session_events(runtime, _daemon_runtime_events(runtime, events_by_thread))
-            if not runtime.paused and now - runtime.last_health_check > 30.0:
-                runtime.last_health_check = now
-                _daemon_refresh_session_health(
-                    runtime,
-                    codex_log_exists=DAEMON_CODEX_LOG_PATH.exists(),
-                    now=now,
-                )
-        except Exception as exc:
-            runtime.runtime_status = "error"
-            runtime.runtime_detail = str(exc)
-            _watch_append_log(
-                Path(runtime.watch_log),
-                f"error: daemon session crashed: {exc}\n{traceback.format_exc()}",
-            )
-        _write_runtime_state(thread_id, _daemon_runtime_payload(runtime), scope)
-
-    return len(desired_sessions) + len(runtimes)
+    return acw_control.daemon_reconcile_once(
+        scope,
+        log_tail=log_tail,
+        runtimes=runtimes,
+        context=acw_control.DaemonReconcileContext(
+            drain_daemon_codex_log_events=_drain_daemon_codex_log_events,
+            load_scoped_session_records=_load_scoped_session_records,
+            remove_runtime_state=_remove_runtime_state,
+            daemon_session_runtime=_daemon_session_runtime,
+            message_text=_message_text,
+            daemon_process_session_events=_daemon_process_session_events,
+            daemon_runtime_events=_daemon_runtime_events,
+            daemon_refresh_session_health=_daemon_refresh_session_health,
+            daemon_runtime_payload=_daemon_runtime_payload,
+            write_runtime_state=_write_runtime_state,
+            append_log=_watch_append_log,
+            codex_log_path=DAEMON_CODEX_LOG_PATH,
+            is_thread_id=is_thread_id,
+            time_module=time,
+        ),
+    )
 
 
 def _daemon_wait_for_condition(
@@ -1351,98 +1212,45 @@ def _daemon_wait_for_condition(
     send_progress,
     timeout_secs: float,
 ) -> dict[str, str]:
-    kind = str(wait.get("kind", "")).strip()
-    if not kind:
-        _daemon_reconcile_once(scope, log_tail=log_tail, runtimes=runtimes)
-        return _daemon_runtime_row(thread_id, runtimes.get(thread_id))
-
-    if kind == "runtime":
-        pane = str(wait.get("pane", "")).strip()
-        send_progress(
-            f"daemon: waiting for runtime convergence for pane={pane or '?'} thread_id={thread_id}"
-        )
-    elif kind == "absent":
-        send_progress(f"daemon: waiting for runtime shutdown for thread_id={thread_id}")
-    else:
-        raise acw_rpc.RpcError("unsupported daemon wait condition", detail=kind)
-
-    deadline = time.time() + max(timeout_secs, 0.1)
-    last_row: dict[str, str] = {}
-    while time.time() < deadline:
-        _daemon_reconcile_once(scope, log_tail=log_tail, runtimes=runtimes)
-        last_row = _daemon_runtime_row(thread_id, runtimes.get(thread_id))
-        if _daemon_wait_matches(last_row, wait):
-            return last_row
-        time.sleep(0.05)
-
-    _daemon_reconcile_once(scope, log_tail=log_tail, runtimes=runtimes)
-    last_row = _daemon_runtime_row(thread_id, runtimes.get(thread_id))
-    if _daemon_wait_matches(last_row, wait):
-        return last_row
-
-    raise acw_rpc.RpcError(
-        f"daemon did not satisfy wait condition for thread_id={thread_id}",
-        detail=f"wait={wait} last_row={last_row}",
+    return acw_control.daemon_wait_for_condition(
+        scope,
+        thread_id=thread_id,
+        wait=wait,
+        log_tail=log_tail,
+        runtimes=runtimes,
+        send_progress=send_progress,
+        timeout_secs=timeout_secs,
+        context=acw_control.DaemonWaitContext(
+            daemon_reconcile_once=_daemon_reconcile_once,
+            daemon_runtime_row=_daemon_runtime_row,
+            current_session_generation=_current_session_generation,
+            time_module=time,
+        ),
     )
 
 
 def _daemon_wait_matches(row: dict[str, str], wait: dict[str, object]) -> bool:
-    kind = str(wait.get("kind", "")).strip()
-    if not kind:
-        return True
-    if kind == "absent":
-        return not row
-    if kind != "runtime":
-        return False
-    if not row:
-        return False
-
-    pane = str(wait.get("pane", "")).strip()
-    if pane and row.get("pane", "") != pane:
-        return False
-
-    generation = wait.get("generation", None)
-    if generation not in ("", None):
-        try:
-            if _current_session_generation(row) != int(generation):
-                return False
-        except (TypeError, ValueError):
-            return False
-
-    statuses = {str(item).strip() for item in wait.get("statuses", []) if str(item).strip()}
-    if statuses and row.get("runtime_status", "") not in statuses:
-        return False
-
-    if "paused" in wait and wait.get("paused", None) is not None:
-        if (row.get("paused", "") == "1") != bool(wait.get("paused", False)):
-            return False
-
-    return True
+    return acw_control.daemon_wait_matches(
+        row,
+        wait,
+        current_session_generation_fn=_current_session_generation,
+    )
 
 
 def _restart_codex_in_pane_result(pane: str, thread_id: str, *, progress) -> tuple[bool, str]:
-    at_shell, shell_error = _wait_for_shell_prompt(pane, attempts=1)
-    if not at_shell:
-        progress(f"restarting codex: terminating live Codex process in pane={pane}")
-        terminated, terminate_error = _terminate_codex_processes_in_pane(pane)
-        if not terminated:
-            return False, terminate_error
-        progress(f"restarting codex: waiting for shell prompt in pane={pane}")
-        at_shell, shell_error = _wait_for_shell_prompt(pane)
-        if not at_shell:
-            return False, shell_error
-    progress(f"restarting codex: launching codex resume in pane={pane}")
-    if run_tmux("send-keys", "-t", pane, "-l", f"codex resume {thread_id}") is None:
-        return False, f"tmux send-keys failed for pane={pane}"
-    if run_tmux("send-keys", "-t", pane, "C-m") is None:
-        return False, f"tmux send-keys failed for pane={pane}"
-    progress(f"restarting codex: waiting for Codex process in pane={pane}")
-    relaunched, relaunch_error = _wait_for_codex_process(pane)
-    if not relaunched:
-        return False, relaunch_error
-    progress(f"restarting codex: checking directory trust prompt in pane={pane}")
-    _accept_directory_trust_prompt_in_pane(pane, timeout_secs=2.0)
-    return True, ""
+    return acw_control.restart_codex_in_pane_result(
+        pane,
+        thread_id,
+        progress=progress,
+        context=acw_control.RestartCodexContext(
+            wait_for_shell_prompt=_wait_for_shell_prompt,
+            terminate_codex_processes_in_pane=_terminate_codex_processes_in_pane,
+            run_tmux=run_tmux,
+            wait_for_codex_process=_wait_for_codex_process,
+            accept_directory_trust_prompt_in_pane=_accept_directory_trust_prompt_in_pane,
+            print_progress=_print_progress,
+        ),
+    )
 
 
 def _daemon_handle_rpc_request(
@@ -1453,88 +1261,24 @@ def _daemon_handle_rpc_request(
     runtimes: dict[str, _DaemonSessionRuntime],
     send_progress,
 ) -> dict[str, object]:
-    command = str(request.get("command", "")).strip()
-    params = request.get("params", {})
-    if not isinstance(params, dict):
-        raise acw_rpc.RpcError("invalid daemon RPC params", detail="params must be a JSON object")
-
-    try:
-        timeout_secs = float(params.get("timeout_secs", 5.0) or 5.0)
-    except (TypeError, ValueError) as exc:
-        raise acw_rpc.RpcError("invalid daemon RPC timeout", detail=str(exc)) from exc
-    if command == "upsert_session":
-        thread_id = str(params.get("thread_id", "")).strip().lower()
-        session = params.get("session", {})
-        wait = params.get("wait", {})
-        if not is_thread_id(thread_id):
-            raise acw_rpc.RpcError("invalid thread_id for upsert_session", detail=thread_id)
-        if not isinstance(session, dict):
-            raise acw_rpc.RpcError("invalid upsert_session payload", detail="session must be a JSON object")
-        send_progress(f"daemon: updating managed session for pane={session.get('pane', '')}")
-        _write_session_state(thread_id, session)
-        row = _daemon_wait_for_condition(
-            scope,
-            thread_id=thread_id,
-            wait=wait if isinstance(wait, dict) else {},
-            log_tail=log_tail,
-            runtimes=runtimes,
-            send_progress=send_progress,
-            timeout_secs=timeout_secs,
-        )
-        return {"daemon_pid": str(os.getpid()), "row": row}
-
-    if command == "patch_session":
-        thread_id = str(params.get("thread_id", "")).strip().lower()
-        changes = params.get("changes", {})
-        wait = params.get("wait", {})
-        if not is_thread_id(thread_id):
-            raise acw_rpc.RpcError("invalid thread_id for patch_session", detail=thread_id)
-        if not isinstance(changes, dict):
-            raise acw_rpc.RpcError("invalid patch_session payload", detail="changes must be a JSON object")
-        send_progress(f"daemon: updating saved session state for thread_id={thread_id}")
-        _write_session_state(thread_id, changes)
-        row = _daemon_wait_for_condition(
-            scope,
-            thread_id=thread_id,
-            wait=wait if isinstance(wait, dict) else {},
-            log_tail=log_tail,
-            runtimes=runtimes,
-            send_progress=send_progress,
-            timeout_secs=timeout_secs,
-        )
-        return {"daemon_pid": str(os.getpid()), "row": row}
-
-    if command == "remove_session":
-        thread_id = str(params.get("thread_id", "")).strip().lower()
-        wait = params.get("wait", {})
-        if not is_thread_id(thread_id):
-            raise acw_rpc.RpcError("invalid thread_id for remove_session", detail=thread_id)
-        send_progress(f"daemon: removing managed session for thread_id={thread_id}")
-        _remove_session_state(thread_id)
-        row = _daemon_wait_for_condition(
-            scope,
-            thread_id=thread_id,
-            wait=wait if isinstance(wait, dict) else {"kind": "absent"},
-            log_tail=log_tail,
-            runtimes=runtimes,
-            send_progress=send_progress,
-            timeout_secs=timeout_secs,
-        )
-        return {"daemon_pid": str(os.getpid()), "row": row}
-
-    if command == "restart_codex":
-        pane = str(params.get("pane", "")).strip()
-        thread_id = str(params.get("thread_id", "")).strip().lower()
-        if not pane:
-            raise acw_rpc.RpcError("restart_codex requires a pane")
-        if not is_thread_id(thread_id):
-            raise acw_rpc.RpcError("invalid thread_id for restart_codex", detail=thread_id)
-        ok, detail = _restart_codex_in_pane_result(pane, thread_id, progress=send_progress)
-        if not ok:
-            raise acw_rpc.RpcError(f"failed to restart Codex in pane={pane}", detail=detail)
-        return {"daemon_pid": str(os.getpid())}
-
-    raise acw_rpc.RpcError("unknown daemon RPC command", detail=command)
+    return acw_control.daemon_handle_rpc_request(
+        request,
+        scope=scope,
+        log_tail=log_tail,
+        runtimes=runtimes,
+        send_progress=send_progress,
+        context=acw_control.DaemonRpcServerContext(
+            is_thread_id=is_thread_id,
+            write_session_state=_write_session_state,
+            remove_session_state=_remove_session_state,
+            daemon_wait_for_condition=_daemon_wait_for_condition,
+            restart_codex_in_pane_result=lambda pane, thread_id, progress_fn: _restart_codex_in_pane_result(
+                pane,
+                thread_id,
+                progress=progress_fn,
+            ),
+        ),
+    )
 
 
 def _daemon_process_rpc_requests(
@@ -1544,90 +1288,36 @@ def _daemon_process_rpc_requests(
     log_tail: _DaemonCodexLogTail,
     runtimes: dict[str, _DaemonSessionRuntime],
 ) -> int:
-    return acw_rpc.serve_pending(
+    return acw_control.daemon_process_rpc_requests(
         rpc_server,
-        handle_request=lambda request, send_progress: _daemon_handle_rpc_request(
-            request,
-            scope=scope,
-            log_tail=log_tail,
-            runtimes=runtimes,
-            send_progress=send_progress,
+        scope=scope,
+        log_tail=log_tail,
+        runtimes=runtimes,
+        context=acw_control.DaemonRpcServeContext(
+            daemon_handle_rpc_request=_daemon_handle_rpc_request,
         ),
     )
 
 
 def _daemon_main(argv: list[str]) -> None:
-    socket_path = ""
-    rest = list(argv)
-    while rest:
-        tok = rest.pop(0)
-        if tok == "--tmux-socket":
-            if not rest:
-                print("error: --tmux-socket requires a value", file=sys.stderr)
-                sys.exit(2)
-            socket_path = rest.pop(0)
-        else:
-            print(f"error: unknown daemon option '{tok}'", file=sys.stderr)
-            sys.exit(2)
-
-    scope = _tmux_scope_key(socket_path)
-    if scope:
-        os.environ["AUTO_CONTINUE_TMUX_SOCKET"] = scope
-    else:
-        os.environ.pop("AUTO_CONTINUE_TMUX_SOCKET", None)
-
-    pid_file = Path(daemon_pid_file_for_scope(scope))
-    socket_file = Path(daemon_socket_file_for_scope(scope))
-    socket_file.unlink(missing_ok=True)
-    rpc_server = acw_rpc.listen(str(socket_file))
-    pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    idle_since = 0.0
-    log_tail = _DaemonCodexLogTail(log_path=DAEMON_CODEX_LOG_PATH)
-    runtimes: dict[str, _DaemonSessionRuntime] = {}
-    started_ts = _watch_now_ts()
-    _write_daemon_scope_state(
-        daemon_pid=str(os.getpid()),
-        socket_path=str(socket_file),
-        heartbeat_ts=started_ts,
-        started_ts=started_ts,
-        scope=scope,
+    acw_control.daemon_main(
+        argv,
+        context=acw_control.DaemonMainContext(
+            normalize_tmux_socket=_tmux_scope_key,
+            daemon_pid_file_for_scope=daemon_pid_file_for_scope,
+            daemon_socket_file_for_scope=daemon_socket_file_for_scope,
+            daemon_log_tail_cls=_DaemonCodexLogTail,
+            codex_log_path=DAEMON_CODEX_LOG_PATH,
+            write_daemon_scope_state=_write_daemon_scope_state,
+            watch_now_ts=_watch_now_ts,
+            daemon_process_rpc_requests=_daemon_process_rpc_requests,
+            daemon_reconcile_once=_daemon_reconcile_once,
+            remove_runtime_state=_remove_runtime_state,
+            daemon_poll_interval_secs=DAEMON_POLL_INTERVAL_SECS,
+            daemon_idle_exit_secs=DAEMON_IDLE_EXIT_SECS,
+            time_module=time,
+        ),
     )
-
-    try:
-        while True:
-            _daemon_process_rpc_requests(rpc_server, scope=scope, log_tail=log_tail, runtimes=runtimes)
-            active_count = _daemon_reconcile_once(scope, log_tail=log_tail, runtimes=runtimes)
-            _daemon_process_rpc_requests(rpc_server, scope=scope, log_tail=log_tail, runtimes=runtimes)
-            _write_daemon_scope_state(
-                daemon_pid=str(os.getpid()),
-                socket_path=str(socket_file),
-                heartbeat_ts=_watch_now_ts(),
-                started_ts=started_ts,
-                scope=scope,
-            )
-
-            if active_count == 0:
-                if idle_since == 0.0:
-                    idle_since = time.time()
-                elif time.time() - idle_since >= DAEMON_IDLE_EXIT_SECS:
-                    return
-            else:
-                idle_since = 0.0
-
-            time.sleep(DAEMON_POLL_INTERVAL_SECS)
-    finally:
-        rpc_server.close()
-        socket_file.unlink(missing_ok=True)
-        log_tail.close()
-        for thread_id in list(runtimes):
-            try:
-                _remove_runtime_state(thread_id, scope)
-            except sqlite3.Error as exc:
-                print(
-                    f"warning: failed to remove runtime state for thread_id={thread_id}: {exc}",
-                    file=sys.stderr,
-                )
-        pid_file.unlink(missing_ok=True)
 
 
 def _edit_message_interactive(initial: str = "") -> str | None:
@@ -1722,52 +1412,28 @@ def _restart_panes(panes: list[str]) -> None:
 
 
 def _accept_directory_trust_prompt_in_pane(pane: str, timeout_secs: float = 2.0) -> bool:
-    deadline = time.time() + timeout_secs
-    while time.time() < deadline:
-        text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-80") or ""
-        if "Do you trust the contents of this directory?" in text:
-            if run_tmux("send-keys", "-t", pane, "C-m") is None:
-                print(f"error: tmux send-keys failed for pane={pane}", file=sys.stderr)
-                sys.exit(1)
-            return True
-        time.sleep(0.5)
-    return False
+    return acw_control.accept_directory_trust_prompt_in_pane(
+        pane,
+        timeout_secs=timeout_secs,
+        context=acw_control.TrustPromptContext(
+            run_tmux=run_tmux,
+            time_module=time,
+        ),
+    )
 
 
 def _command_name_for_pid(pid: str) -> str:
-    if not pid.isdigit():
-        return ""
-    proc_comm = Path("/proc") / pid / "comm"
-    try:
-        return proc_comm.read_text().strip().lower()
-    except OSError:
-        pass
-    try:
-        return subprocess.check_output(
-            ["ps", "-p", pid, "-o", "comm="],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip().lower()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+    return acw_control.command_name_for_pid(pid, check_output_fn=subprocess.check_output)
 
 
 def _pane_command_snapshot(pane: str) -> tuple[str, str, str, str]:
-    listing = run_tmux("list-panes", "-t", pane, "-F", "#{pane_current_command}\t#{pane_pid}")
-    if listing is None:
-        return "", "", "", f"tmux list-panes failed for pane={pane}"
-    line = next((entry for entry in listing.splitlines() if entry.strip()), "")
-    if not line:
-        return "", "", "", f"tmux pane {pane} is missing"
-    parts = line.split("\t")
-    current_command = parts[0].strip().lower() if parts else ""
-    pane_pid = parts[1].strip() if len(parts) > 1 else ""
-    if not pane_pid.isdigit():
-        return current_command, "", "", f"tmux pane {pane} did not report a valid pane pid"
-    shell_command = _command_name_for_pid(pane_pid)
-    if not shell_command:
-        return current_command, "", pane_pid, f"could not determine root shell command for pane={pane}"
-    return current_command, shell_command, pane_pid, ""
+    return acw_control.pane_command_snapshot(
+        pane,
+        context=acw_control.PaneCommandContext(
+            run_tmux=run_tmux,
+            command_name_for_pid=_command_name_for_pid,
+        ),
+    )
 
 
 def _wait_for_shell_prompt(
@@ -1776,25 +1442,15 @@ def _wait_for_shell_prompt(
     attempts: int = 30,
     poll_interval_secs: float = 0.1,
 ) -> tuple[bool, str]:
-    last_current = ""
-    last_shell = ""
-    for index in range(max(1, attempts)):
-        current_command, shell_command, _pane_pid, error = _pane_command_snapshot(pane)
-        if error:
-            return False, error
-        last_current = current_command
-        last_shell = shell_command
-        if shell_command not in KNOWN_SHELL_COMMANDS:
-            return False, f"pane {pane} root command is '{shell_command}', not a supported shell"
-        if current_command == shell_command:
-            return True, ""
-        if index + 1 < attempts:
-            time.sleep(poll_interval_secs)
-    current_label = last_current or "unknown"
-    shell_label = last_shell or "shell"
-    return (
-        False,
-        f"pane {pane} did not return to a shell prompt (current command '{current_label}', expected '{shell_label}')",
+    return acw_control.wait_for_shell_prompt(
+        pane,
+        attempts=attempts,
+        poll_interval_secs=poll_interval_secs,
+        context=acw_control.WaitForShellContext(
+            pane_command_snapshot=_pane_command_snapshot,
+            known_shell_commands=KNOWN_SHELL_COMMANDS,
+            time_module=time,
+        ),
     )
 
 
@@ -1804,45 +1460,44 @@ def _wait_for_codex_process(
     attempts: int = 30,
     poll_interval_secs: float = 0.1,
 ) -> tuple[bool, str]:
-    for index in range(max(1, attempts)):
-        _current_command, _shell_command, pane_pid, error = _pane_command_snapshot(pane)
-        if error:
-            return False, error
-        if _codex_pids_in_process_tree(pane_pid):
-            return True, ""
-        if index + 1 < attempts:
-            time.sleep(poll_interval_secs)
-    return False, f"Codex did not relaunch in pane {pane}"
+    return acw_control.wait_for_codex_process(
+        pane,
+        attempts=attempts,
+        poll_interval_secs=poll_interval_secs,
+        context=acw_control.WaitForCodexContext(
+            pane_command_snapshot=_pane_command_snapshot,
+            codex_pids_in_process_tree=_codex_pids_in_process_tree,
+            time_module=time,
+        ),
+    )
 
 
 def _terminate_codex_processes_in_pane(pane: str) -> tuple[bool, str]:
-    current_command, shell_command, pane_pid, error = _pane_command_snapshot(pane)
-    if error:
-        return False, error
-    if shell_command in KNOWN_SHELL_COMMANDS and current_command == shell_command:
-        return True, ""
-
-    top_level_pids = _codex_top_level_descendants(pane_pid)
-    if not top_level_pids:
-        current_label = current_command or "unknown"
-        return False, f"pane {pane} is running '{current_label}', but no live Codex process was found to restart"
-
-    for pid in top_level_pids:
-        try:
-            os.kill(int(pid), signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        except OSError as exc:
-            return False, f"failed to terminate Codex pid={pid} in pane {pane}: {exc}"
-    return True, ""
+    return acw_control.terminate_codex_processes_in_pane(
+        pane,
+        context=acw_control.TerminateCodexContext(
+            pane_command_snapshot=_pane_command_snapshot,
+            known_shell_commands=KNOWN_SHELL_COMMANDS,
+            codex_top_level_descendants=_codex_top_level_descendants,
+            os_kill=os.kill,
+            sigterm=signal.SIGTERM,
+        ),
+    )
 
 
 def _restart_codex_in_pane(pane: str, thread_id: str) -> None:
-    ok, detail = _restart_codex_in_pane_result(pane, thread_id, progress=_print_progress)
-    if ok:
-        return
-    print(f"error: {detail}", file=sys.stderr)
-    sys.exit(1)
+    acw_control.restart_codex_in_pane(
+        pane,
+        thread_id,
+        context=acw_control.RestartCodexContext(
+            wait_for_shell_prompt=_wait_for_shell_prompt,
+            terminate_codex_processes_in_pane=_terminate_codex_processes_in_pane,
+            run_tmux=run_tmux,
+            wait_for_codex_process=_wait_for_codex_process,
+            accept_directory_trust_prompt_in_pane=_accept_directory_trust_prompt_in_pane,
+            print_progress=_print_progress,
+        ),
+    )
 
 
 def _restart_one(target: str, pane: str, rest: list[str]) -> None:
