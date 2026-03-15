@@ -406,6 +406,32 @@ class ManagerScenarioMixin:
         self.assertIn("formal", recovered.stdout, self.harness.diagnostics())
         self.assertIn("aot", recovered.stdout, self.harness.diagnostics())
 
+    def test_manager_repair_dry_run_reports_plan_without_recreating_runtime(self):
+        self.harness.rename_window("repairdry")
+        self.harness.start_codex("say exactly REPAIRDRY and nothing else")
+        first_turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "repairdry", "--message", "repair continue")
+        self.harness.wait_for_manager_watcher_started_in_pane(pane, first_turn.thread_id)
+
+        self.harness.stop_manager_watcher()
+        broken = self.harness.run_manager("status")
+        self.assertIn("Shared daemon error:", broken.stdout, self.harness.diagnostics())
+
+        repair = self.harness.run_manager("repair", "--dry-run")
+
+        self.assertIn("repair: dry-run plan", repair.stdout, self.harness.diagnostics())
+        self.assertIn(
+            f"AUTO: start one managed runtime on pane {pane} for thread {first_turn.thread_id[:8]}",
+            repair.stdout,
+            self.harness.diagnostics(),
+        )
+        self.assertIn(f"run: acw repair {pane}", repair.stdout, self.harness.diagnostics())
+
+        status = self.harness.run_manager("status")
+        self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
+
     def test_manager_restart_without_target_recovers_dead_runtime(self):
         self.harness.rename_window("recoverdead")
         self.harness.start_codex("say exactly RECOVERDEAD and nothing else")
