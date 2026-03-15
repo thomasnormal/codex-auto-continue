@@ -41,6 +41,7 @@ package-dir = {"" = "bin"}
 py-modules = [
   "auto_continue_watchd",
   "auto_continue_logwatch",
+  "acw_bootstrap",
   "acw_daemon",
   "acw_control",
   "acw_commands",

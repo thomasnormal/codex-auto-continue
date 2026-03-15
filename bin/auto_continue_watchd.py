@@ -17,6 +17,7 @@ import time
 import traceback
 from pathlib import Path
 
+import acw_bootstrap
 import acw_state
 import acw_session
 import acw_status
@@ -65,28 +66,7 @@ def _next_daemon_runtime_id() -> str:
 
 
 def resolve_project_cwd() -> str:
-    env = os.environ.get("AUTO_CONTINUE_PROJECT_CWD", "")
-    if env:
-        if os.path.isdir(env):
-            return str(Path(env).resolve())
-        return env
-
-    pwd_real = str(Path.cwd().resolve())
-    try:
-        git_root = subprocess.check_output(
-            ["git", "-C", pwd_real, "rev-parse", "--show-toplevel"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        git_root = ""
-    if git_root:
-        return git_root
-
-    if os.path.basename(pwd_real) == ".codex":
-        return os.path.dirname(pwd_real)
-
-    return pwd_real
+    return acw_bootstrap.resolve_project_cwd()
 
 
 PROJECT_CWD = resolve_project_cwd()
@@ -119,48 +99,7 @@ KNOWN_SHELL_COMMANDS = frozenset(
 os.makedirs(STATE_DIR, exist_ok=True)
 
 def build_help_text(prog: str) -> str:
-    return f"""Usage:
-  {prog} status [target] [--details]
-  {prog} start <target> [thread-id] [--message TEXT]
-  {prog} stop [target]
-  {prog} pause [target]
-  {prog} resume [target ...]
-  {prog} restart [target]
-  {prog} edit <target>
-  {prog} repair [target] [--dry-run|--all]
-  {prog} cleanup
-  {prog} doctor [target]
-
-Commands:
-  status    Show managed session state. Default command when no subcommand is given.
-  start     Start managing a live tmux target. Auto-detect the Codex thread unless you pass one explicitly.
-  stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.
-  pause     Pause one managed session, or all managed sessions when no target is given.
-  resume    Restart one or more paused managed sessions, or all paused managed sessions, from current state.
-  restart   Restart one managed session or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
-  edit      Edit the stored continue message for a running managed session, then restart it.
-  repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.
-  cleanup   Remove dead saved sessions and stale daemon/runtime files.
-  doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
-
-Targets:
-  Commands with a target accept a tmux pane id (%6), window index (2), session:window (0:2), or exact tmux window name (uvm).
-  pause, resume, and restart act on all managed sessions when no target is given. resume also accepts multiple explicit targets.
-
-Examples:
-  {prog}
-  {prog} status --details
-  {prog} start %6 --message "continue"
-  {prog} start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
-  {prog} resume formal aot
-  {prog} restart bugs --restart-codex
-  {prog} edit %6
-  {prog} repair --dry-run
-  {prog} repair %6
-  {prog} repair --all
-  {prog} restart
-  {prog} doctor
-"""
+    return acw_bootstrap.build_help_text(prog)
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -2033,10 +1972,11 @@ def cleanup_stale_files(remove_dead_sessions: bool = False) -> None:
 
 
 def print_help(file=None) -> None:
-    if file is None:
-        file = sys.stdout
-    prog = os.path.basename(sys.argv[0]) or "acw"
-    print(build_help_text(prog), file=file)
+    acw_bootstrap.print_help(
+        argv0=sys.argv[0],
+        build_help_text_fn=build_help_text,
+        file=file,
+    )
 
 
 def _print_progress(message: str) -> None:
@@ -2044,23 +1984,6 @@ def _print_progress(message: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        subcmd = "status"
-        rest: list[str] = []
-    else:
-        subcmd = sys.argv[1]
-        rest = sys.argv[2:]
-
-    if subcmd in ("-h", "--help", "help"):
-        print_help()
-        raise SystemExit(0)
-
-    # Only clean up stale files on commands that mutate state.  Read-only
-    # commands (status, pause, resume) skip the cleanup overhead (ps scan +
-    # multiple globs).
-    if subcmd in ("start", "stop", "restart", "edit", "repair", "cleanup"):
-        cleanup_stale_files()
-
     commands = {
         "start": cmd_start,
         "stop": cmd_stop,
@@ -2075,12 +1998,12 @@ def main() -> None:
         "_window-renamed": cmd_window_renamed,
         "_daemon": _daemon_main,
     }
-
-    if subcmd in commands:
-        commands[subcmd](rest)
-    else:
-        print_help(file=sys.stderr)
-        sys.exit(2)
+    acw_bootstrap.main(
+        argv=sys.argv,
+        cleanup_stale_files_fn=cleanup_stale_files,
+        print_help_fn=print_help,
+        commands=commands,
+    )
 
 
 if __name__ == "__main__":
