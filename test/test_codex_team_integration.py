@@ -82,11 +82,9 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
         state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
         self.assertIsNotNone(state_match, self.harness.diagnostics())
         state_path = Path(state_match.group(1).strip())
-
         state = self.wait_for_team_state(
             state_path,
-            lambda data: bool(data.get("leader", {}).get("ready"))
-            and all(member.get("ready") for member in data.get("members", [])),
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
             timeout=60.0,
         )
 
@@ -110,6 +108,28 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
             lines=240,
         )
         self.assertIn("42", leader_text, self.harness.diagnostics())
+
+    def test_codex_team_returns_and_leader_finishes_booting_in_background(self):
+        proc = self.run_team("1")
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+
+        self.assertIn(
+            "leader will finish booting after this command returns",
+            proc.stdout,
+            self.harness.diagnostics(),
+        )
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=60.0,
+        )
+
+        self.assertTrue(state["leader"]["initial_prompt_sent"], self.harness.diagnostics())
+        self.assertTrue(state["leader"]["ready"], self.harness.diagnostics())
+        self.assertTrue(all(member["initial_prompt_sent"] for member in state["members"]), self.harness.diagnostics())
+        self.assertTrue(all(member["ready"] for member in state["members"]), self.harness.diagnostics())
 
     def test_codex_team_rejects_multi_pane_window(self):
         self.harness.tmux("split-window", "-t", self.harness.pane_id, "-P", "-F", "#{pane_id}")

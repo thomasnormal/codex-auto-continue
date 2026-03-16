@@ -1,6 +1,10 @@
 import unittest
 from pathlib import Path
+import shlex
 import sys
+import tempfile
+from unittest.mock import call
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
@@ -64,6 +68,137 @@ class CodexTeamUnitTests(unittest.TestCase):
     def test_validate_team_window_requires_single_pane(self):
         with self.assertRaisesRegex(ValueError, "current window already has 2 panes"):
             codex_team.validate_team_window("%1", ["%1", "%2"])
+
+    def test_pending_completion_for_thread_accepts_tuple_parser_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "codex-tui.log"
+            log_path.write_text("ignored\ncompletion line\n", encoding="utf-8")
+            with patch.object(
+                codex_team,
+                "parse_codex_log_event",
+                side_effect=[None, ("11111111-1111-1111-1111-111111111111", "turn-1", "false")],
+            ):
+                event = codex_team.pending_completion_for_thread(
+                    "11111111-1111-1111-1111-111111111111",
+                    "",
+                    "",
+                    log_path=log_path,
+                )
+
+        self.assertEqual(
+            codex_team.CodexLogEvent(
+                "completion",
+                "11111111-1111-1111-1111-111111111111",
+                "turn-1",
+                "false",
+            ),
+            event,
+        )
+
+    def test_bootstrap_agents_launches_codex_with_initial_prompt_before_thread_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = codex_team.TeamState(
+                team_id="team",
+                tmux_socket="",
+                window_id="@1",
+                created_at=0.0,
+                state_file=str(Path(tmpdir) / "state.json"),
+                log_file=str(Path(tmpdir) / "team.log"),
+                pid_file=str(Path(tmpdir) / "team.pid"),
+                leader=codex_team.TeamAgent(
+                    name="leader",
+                    pane="%1",
+                    role="leader",
+                ),
+                members=[
+                    codex_team.TeamAgent(
+                        name="agent1",
+                        pane="%2",
+                        role="member",
+                    )
+                ],
+            )
+
+            with patch.object(codex_team, "refresh_agent_threads", return_value=False), patch.object(
+                codex_team, "pane_exists", return_value=True
+            ), patch.object(
+                codex_team, "pane_current_command", return_value="bash"
+            ), patch.object(
+                codex_team, "tmux_send"
+            ) as mock_send:
+                mock_send.return_value.status = "ok"
+                mock_send.return_value.detail = ""
+                changed = codex_team.bootstrap_agents(state)
+
+        self.assertTrue(changed)
+        expected_calls = [
+            call(
+                "%1",
+                f"codex {shlex.quote(codex_team.leader_initial_prompt(['agent1']))}",
+                codex_team.ENTER_DELAY_SECS,
+            ),
+            call(
+                "%2",
+                f"codex {shlex.quote(codex_team.worker_initial_prompt('agent1'))}",
+                codex_team.ENTER_DELAY_SECS,
+            ),
+        ]
+        self.assertEqual(expected_calls, mock_send.call_args_list)
+        self.assertTrue(state.leader.initial_prompt_sent)
+        self.assertTrue(state.leader.ignore_next_completion)
+        self.assertTrue(state.leader.busy)
+        self.assertTrue(state.members[0].initial_prompt_sent)
+        self.assertTrue(state.members[0].ignore_next_completion)
+        self.assertTrue(state.members[0].busy)
+
+    def test_process_events_ignores_leader_bootstrap_completion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = codex_team.TeamState(
+                team_id="team",
+                tmux_socket="",
+                window_id="@1",
+                created_at=0.0,
+                state_file=str(Path(tmpdir) / "state.json"),
+                log_file=str(Path(tmpdir) / "team.log"),
+                pid_file=str(Path(tmpdir) / "team.pid"),
+                leader=codex_team.TeamAgent(
+                    name="leader",
+                    pane="%1",
+                    role="leader",
+                    thread_id="11111111-1111-1111-1111-111111111111",
+                    initial_prompt_sent=True,
+                    ignore_next_completion=True,
+                    busy=True,
+                ),
+                members=[
+                    codex_team.TeamAgent(
+                        name="agent1",
+                        pane="%2",
+                        role="member",
+                        thread_id="22222222-2222-2222-2222-222222222222",
+                        initial_prompt_sent=True,
+                    )
+                ],
+            )
+            event = codex_team.CodexLogEvent(
+                "completion",
+                "11111111-1111-1111-1111-111111111111",
+                "turn-1",
+                "false",
+            )
+
+            with patch.object(
+                codex_team,
+                "capture_pane_text",
+                return_value='[shell]$ codex\n\n• <message to="agent1">what is 40 + 2</message>\n',
+            ):
+                changed = codex_team.process_events(state, [event])
+
+        self.assertTrue(changed)
+        self.assertTrue(state.leader.ready)
+        self.assertFalse(state.leader.busy)
+        self.assertFalse(state.leader.ignore_next_completion)
+        self.assertEqual([], state.members[0].pending_messages)
 
 
 if __name__ == "__main__":

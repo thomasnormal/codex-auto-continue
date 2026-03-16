@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -16,14 +17,12 @@ from typing import Iterable
 from typing import Optional
 
 import acw_config
+import acw_probe
 import acw_tmux
-from acw_daemon import CodexLogTail
-from acw_daemon import drain_codex_log_events
 from acw_ids import current_tmux_pane
 from auto_continue_logwatch import CodexLogEvent
-from auto_continue_logwatch import discover_thread_for_pane
 from auto_continue_logwatch import parse_codex_log_event
-from auto_continue_logwatch import parse_codex_log_interrupt
+from auto_continue_logwatch import thread_from_codex_pid
 from auto_continue_logwatch import tmux_send
 
 
@@ -48,6 +47,8 @@ class TeamAgent:
     initial_prompt_sent: bool = False
     ignore_next_completion: bool = False
     pending_messages: list[str] = field(default_factory=list)
+    last_handled_turn: str = ""
+    last_handled_thread: str = ""
 
 
 @dataclass
@@ -147,6 +148,10 @@ def pane_exists(pane: str) -> bool:
 
 def pane_current_command(pane: str) -> str:
     return run_tmux_text("display-message", "-p", "-t", pane, "#{pane_current_command}").strip().lower()
+
+
+def pane_shell_pid(pane: str) -> str:
+    return run_tmux_text("display-message", "-p", "-t", pane, "#{pane_pid}").strip()
 
 
 def validate_team_window(leader_pane: str, panes: list[str]) -> None:
@@ -273,6 +278,11 @@ def worker_initial_prompt(name: str) -> str:
     )
 
 
+def initial_launch_command(agent: TeamAgent, member_names: Iterable[str]) -> str:
+    prompt = leader_initial_prompt(member_names) if agent.role == "leader" else worker_initial_prompt(agent.name)
+    return f"codex {shlex.quote(prompt)}"
+
+
 def extract_last_agent_block(text: str) -> str:
     if not text:
         return ""
@@ -328,6 +338,130 @@ def wait_for_daemon_start(pid_file: Path, timeout: float = 10.0) -> int:
             return int(text)
         time.sleep(0.1)
     raise RuntimeError("timed out waiting for codex-team monitor startup")
+
+
+def agent_setup_status(agent: TeamAgent) -> str:
+    if agent.ready:
+        return "ready"
+    if agent.initial_prompt_sent:
+        return "waiting for initial reply"
+    if agent.thread_id:
+        return f"thread detected ({agent.thread_id[:8]}…)"
+    if agent.launch_requested:
+        return "waiting for codex process"
+    return "starting codex"
+
+
+def team_is_ready(state: TeamState) -> bool:
+    agents = state.all_agents()
+    return bool(agents) and all(agent.initial_prompt_sent and agent.ready for agent in agents)
+
+
+def team_members_ready(state: TeamState) -> bool:
+    return all(agent.initial_prompt_sent and agent.ready for agent in state.members)
+
+
+def log_tail_text(path: Path, *, lines: int = 8) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(content[-lines:])
+
+
+def pending_completion_for_thread(
+    thread_id: str,
+    last_handled_turn: str,
+    last_handled_thread: str,
+    *,
+    log_path: Path,
+) -> CodexLogEvent | None:
+    if not thread_id:
+        return None
+    try:
+        file_size = log_path.stat().st_size
+    except OSError:
+        return None
+    if file_size <= 0:
+        return None
+
+    tail_bytes = min(file_size, 2 * 1024 * 1024)
+    try:
+        with log_path.open("rb") as fh:
+            if tail_bytes < file_size:
+                fh.seek(-tail_bytes, os.SEEK_END)
+            tail = fh.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    for line in reversed(tail.splitlines()):
+        event = parse_codex_log_event(line)
+        if not event:
+            continue
+        event_thread_id, turn_id, detail = event
+        if event_thread_id != thread_id:
+            continue
+        if detail != "false":
+            return None
+        if turn_id == last_handled_turn and thread_id == last_handled_thread:
+            return None
+        return CodexLogEvent("completion", event_thread_id, turn_id, detail)
+    return None
+
+
+def collect_pending_completion_events(state: TeamState) -> list[CodexLogEvent]:
+    log_path = Path(acw_config.codex_log_path())
+    events: list[CodexLogEvent] = []
+    for agent in state.all_agents():
+        if not agent.thread_id:
+            continue
+        event = pending_completion_for_thread(
+            agent.thread_id,
+            agent.last_handled_turn,
+            agent.last_handled_thread,
+            log_path=log_path,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def wait_for_team_ready(
+    state_path: Path,
+    *,
+    timeout: float = 60.0,
+    progress_file=None,
+    include_leader: bool = True,
+) -> TeamState:
+    if progress_file is None:
+        progress_file = sys.stdout
+    seen_status: dict[str, str] = {}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not state_path.exists():
+            time.sleep(0.1)
+            continue
+        state = load_team_state(state_path)
+        agents = state.all_agents() if include_leader else state.members
+        for agent in agents:
+            status = agent_setup_status(agent)
+            if seen_status.get(agent.name) != status:
+                print(f"setup: {agent.name} {status}", file=progress_file, flush=True)
+                seen_status[agent.name] = status
+        if (team_is_ready(state) if include_leader else team_members_ready(state)):
+            return state
+        if state.monitor_pid and not pid_is_alive(state.monitor_pid):
+            detail = log_tail_text(Path(state.log_file))
+            if detail:
+                raise RuntimeError(f"codex-team monitor exited during setup:\n{detail}")
+            raise RuntimeError("codex-team monitor exited during setup")
+        time.sleep(0.2)
+    detail = ""
+    if state_path.exists():
+        state = load_team_state(state_path)
+        agents = state.all_agents() if include_leader else state.members
+        detail = ", ".join(f"{agent.name}={agent_setup_status(agent)}" for agent in agents)
+    raise RuntimeError(f"timed out waiting for codex-team setup to finish ({detail})")
 
 
 def start_monitor(state: TeamState) -> int:
@@ -411,6 +545,15 @@ def setup_team(team_size: int) -> int:
     monitor_pid = start_monitor(state)
     state.monitor_pid = monitor_pid
     save_team_state(state)
+    print(
+        f"setup: waiting for {len(state.members)} workers to become ready",
+        flush=True,
+    )
+    state = wait_for_team_ready(state_path, include_leader=False)
+    print(
+        "setup: workers ready; leader will finish booting after this command returns",
+        flush=True,
+    )
 
     print(f"created codex team in window {window_id}")
     print(f"state: {state.state_file}")
@@ -457,10 +600,17 @@ def cmd_stop() -> int:
 
 def refresh_agent_threads(state: TeamState) -> bool:
     changed = False
+    process_snapshot = acw_probe.load_process_snapshot(subprocess.check_output)
     for agent in state.all_agents():
         if agent.thread_id:
             continue
-        tid = discover_thread_for_pane(agent.pane)
+        shell_pid = pane_shell_pid(agent.pane)
+        tid, _source, _detail, _had_codex = acw_probe.pane_thread_probe(
+            agent.pane,
+            shell_pid,
+            process_snapshot,
+            thread_from_codex_pid,
+        )
         if tid:
             agent.thread_id = tid
             changed = True
@@ -476,34 +626,26 @@ def bootstrap_agents(state: TeamState) -> bool:
     for agent in state.all_agents():
         if not pane_exists(agent.pane):
             raise RuntimeError(f"pane disappeared: {agent.pane}")
-        if agent.thread_id and not agent.initial_prompt_sent:
-            prompt = leader_initial_prompt(member_names) if agent.role == "leader" else worker_initial_prompt(agent.name)
-            result = tmux_send(agent.pane, prompt, ENTER_DELAY_SECS)
-            if result.status == "ok":
-                agent.initial_prompt_sent = True
-                agent.ignore_next_completion = True
-                agent.busy = True
-                append_log(
-                    log_path,
-                    f"prompt: sent initial prompt to {agent.name} pane={agent.pane} thread={agent.thread_id}",
-                )
-                changed = True
-            else:
-                append_log(
-                    log_path,
-                    f"prompt: failed to send initial prompt to {agent.name} pane={agent.pane}: {result.detail}",
-                )
-            continue
         if not agent.thread_id:
             current_cmd = pane_current_command(agent.pane)
             if current_cmd in KNOWN_SHELL_COMMANDS:
                 now = time.time()
                 if not agent.launch_requested or (now - agent.launch_requested_at) >= 5.0:
-                    result = tmux_send(agent.pane, "codex", ENTER_DELAY_SECS)
+                    result = tmux_send(
+                        agent.pane,
+                        initial_launch_command(agent, member_names),
+                        ENTER_DELAY_SECS,
+                    )
                     if result.status == "ok":
                         agent.launch_requested = True
                         agent.launch_requested_at = now
-                        append_log(log_path, f"launch: started codex in {agent.name} pane={agent.pane}")
+                        agent.initial_prompt_sent = True
+                        agent.ignore_next_completion = True
+                        agent.busy = True
+                        append_log(
+                            log_path,
+                            f"launch: started codex in {agent.name} pane={agent.pane} with initial prompt",
+                        )
                         changed = True
                     else:
                         append_log(
@@ -531,7 +673,15 @@ def deliver_pending(agent: TeamAgent, log_path: Path) -> bool:
     return True
 
 
-def process_events(state: TeamState, events: list[CodexLogEvent]) -> bool:
+def mark_completion_handled(agent: TeamAgent, event: CodexLogEvent) -> None:
+    agent.last_handled_turn = event.turn_id
+    agent.last_handled_thread = event.thread_id
+
+
+def process_events(
+    state: TeamState,
+    events: list[CodexLogEvent],
+) -> bool:
     if state.leader is None:
         return False
     changed = False
@@ -547,17 +697,19 @@ def process_events(state: TeamState, events: list[CodexLogEvent]) -> bool:
         agent = by_thread.get(event.thread_id)
         if agent is None:
             continue
+        block = extract_last_agent_block(capture_pane_text(agent.pane))
         if agent.ignore_next_completion:
             agent.ignore_next_completion = False
             agent.busy = False
             agent.ready = True
+            mark_completion_handled(agent, event)
             changed = True
             append_log(log_path, f"ready: {agent.name} initialized on thread={event.thread_id}")
             continue
 
         agent.busy = False
         agent.ready = True
-        block = extract_last_agent_block(capture_pane_text(agent.pane))
+        mark_completion_handled(agent, event)
         if agent.role == "leader":
             routed = parse_routed_messages(block)
             if not routed:
@@ -595,7 +747,6 @@ def monitor_loop(state_file: Path) -> int:
     stop_requested = False
     log_path = Path(state.log_file)
     pid_path = Path(state.pid_file)
-    tail = CodexLogTail(acw_config.codex_log_path())
 
     def _stop(_signum, _frame) -> None:
         nonlocal stop_requested
@@ -615,12 +766,7 @@ def monitor_loop(state_file: Path) -> int:
                 append_log(log_path, "monitor: leader pane disappeared; exiting")
                 return 0
             changed = bootstrap_agents(state)
-            events = drain_codex_log_events(
-                tail,
-                parse_interrupt=parse_codex_log_interrupt,
-                parse_event=parse_codex_log_event,
-                event_cls=CodexLogEvent,
-            )
+            events = collect_pending_completion_events(state)
             if events and process_events(state, events):
                 changed = True
             if state.leader is not None and deliver_pending(state.leader, log_path):
@@ -632,7 +778,6 @@ def monitor_loop(state_file: Path) -> int:
                 save_team_state(state)
             time.sleep(0.2)
     finally:
-        tail.close()
         pid_path.unlink(missing_ok=True)
         state.monitor_pid = 0
         try:
