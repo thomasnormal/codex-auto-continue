@@ -13,6 +13,34 @@ import codex_team
 
 
 class CodexTeamUnitTests(unittest.TestCase):
+    def test_initial_launch_command_uses_medium_reasoning_for_workers(self):
+        leader_cmd = codex_team.initial_launch_command(
+            codex_team.TeamAgent(name="leader", pane="%1", role="leader"),
+            ["agent1"],
+        )
+        worker_cmd = codex_team.initial_launch_command(
+            codex_team.TeamAgent(name="agent1", pane="%2", role="member"),
+            ["agent1"],
+        )
+
+        self.assertEqual(
+            f"codex {shlex.quote(codex_team.leader_initial_prompt(['agent1']))}",
+            leader_cmd,
+        )
+        self.assertEqual(
+            " ".join(
+                [
+                    "codex",
+                    "-c",
+                    "'model_reasoning_effort=\"medium\"'",
+                    "-c",
+                    "'plan_mode_reasoning_effort=\"medium\"'",
+                    shlex.quote(codex_team.worker_initial_prompt("agent1")),
+                ]
+            ),
+            worker_cmd,
+        )
+
     def test_extract_last_agent_block_returns_latest_block_between_prompts(self):
         text = (
             "OpenAI Codex\n"
@@ -139,7 +167,16 @@ class CodexTeamUnitTests(unittest.TestCase):
             ),
             call(
                 "%2",
-                f"codex {shlex.quote(codex_team.worker_initial_prompt('agent1'))}",
+                " ".join(
+                    [
+                        "codex",
+                        "-c",
+                        "'model_reasoning_effort=\"medium\"'",
+                        "-c",
+                        "'plan_mode_reasoning_effort=\"medium\"'",
+                        shlex.quote(codex_team.worker_initial_prompt("agent1")),
+                    ]
+                ),
                 codex_team.ENTER_DELAY_SECS,
             ),
         ]

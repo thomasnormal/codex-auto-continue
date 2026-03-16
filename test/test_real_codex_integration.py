@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 
 from test.support.manager_scenarios import ManagerScenarioMixin
 from test.support.manager_scenarios import manager_scenario_backend_enabled
@@ -210,6 +211,41 @@ class RealCodexTeamIntegrationTests(_RealCodexHarnessTestCase):
 
         self.assertIn("42", worker_text, self.harness.diagnostics())
         self.assertIn("42", leader_text, self.harness.diagnostics())
+
+    def test_codex_team_workers_use_medium_reasoning_effort(self):
+        proc = self.run_team("1")
+
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=90.0,
+        )
+
+        config = tomllib.loads((self.harness.codex_dir / "config.toml").read_text(encoding="utf-8"))
+        model = str(config.get("model", "")).strip()
+        default_effort = str(config.get("model_reasoning_effort", "")).strip()
+        leader_pane = str(state["leader"]["pane"])
+        worker_pane = str(state["members"][0]["pane"])
+
+        if model and default_effort:
+            leader_text = self.harness.wait_for_pane_contains_in_pane(
+                leader_pane,
+                f"{model} {default_effort}",
+                timeout=90.0,
+                lines=120,
+            )
+            self.assertIn(f"{model} {default_effort}", leader_text, self.harness.diagnostics())
+
+        worker_text = self.harness.wait_for_pane_contains_in_pane(
+            worker_pane,
+            f"{model} medium",
+            timeout=90.0,
+            lines=120,
+        )
+        self.assertIn(f"{model} medium", worker_text, self.harness.diagnostics())
 
     def test_codex_team_queues_second_message_for_busy_real_worker(self):
         proc = self.run_team("1")

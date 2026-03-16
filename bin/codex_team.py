@@ -32,6 +32,7 @@ PROMPT_LINE_RE = re.compile(r"^\s*›(?:\s|$)")
 STATE_DIR = acw_config.state_dir_path()
 ENTER_DELAY_SECS = float(acw_config.enter_delay_secs())
 KNOWN_SHELL_COMMANDS = acw_config.known_shell_commands()
+WORKER_REASONING_EFFORT = "medium"
 
 
 @dataclass
@@ -95,6 +96,7 @@ Notes:
   - Run {prog} from a single-pane tmux window.
   - The current pane becomes the leader pane.
   - The default layout keeps the leader on the left and stacks workers on the right.
+  - Workers launch with medium reasoning effort by default; the leader keeps the normal Codex config.
   - Worker names are agent1, agent2, ... and worker replies come back to the leader as
     <reply from="agentN">...</reply>.
 """
@@ -284,9 +286,24 @@ def worker_initial_prompt(name: str) -> str:
     )
 
 
+def shell_join(args: Iterable[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
 def initial_launch_command(agent: TeamAgent, member_names: Iterable[str]) -> str:
     prompt = leader_initial_prompt(member_names) if agent.role == "leader" else worker_initial_prompt(agent.name)
-    return f"codex {shlex.quote(prompt)}"
+    args = ["codex"]
+    if agent.role != "leader":
+        args.extend(
+            [
+                "-c",
+                f'model_reasoning_effort="{WORKER_REASONING_EFFORT}"',
+                "-c",
+                f'plan_mode_reasoning_effort="{WORKER_REASONING_EFFORT}"',
+            ]
+        )
+    args.append(prompt)
+    return shell_join(args)
 
 
 def extract_last_agent_block(text: str) -> str:
