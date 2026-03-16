@@ -59,6 +59,24 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertEqual(2, proc.returncode, self.harness.diagnostics())
         self.assertIn("use 'acw pause' with no target", proc.stderr, self.harness.diagnostics())
 
+    def test_resume_rejects_star_selector_via_real_cli(self):
+        proc = self.harness.run_manager("resume", "*", check=False)
+
+        self.assertEqual(2, proc.returncode, self.harness.diagnostics())
+        self.assertIn("use 'acw resume' with no target", proc.stderr, self.harness.diagnostics())
+
+    def test_restart_rejects_star_selector_via_real_cli(self):
+        proc = self.harness.run_manager("restart", "*", check=False)
+
+        self.assertEqual(2, proc.returncode, self.harness.diagnostics())
+        self.assertIn("use 'acw restart' with no target", proc.stderr, self.harness.diagnostics())
+
+    def test_doctor_rejects_explicit_dot_target_via_real_cli(self):
+        proc = self.harness.run_manager("doctor", ".", check=False)
+
+        self.assertEqual(1, proc.returncode, self.harness.diagnostics())
+        self.assertIn("could not resolve target '.'", proc.stdout, self.harness.diagnostics())
+
 
 if __name__ == "__main__":
     unittest.main()
