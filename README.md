@@ -190,7 +190,8 @@ codex-team 3
 
 That keeps the current pane as the leader, creates three worker panes
 (`agent1`, `agent2`, `agent3`), launches Codex in each pane, and starts a
-background monitor for that window.
+background monitor for that window. By default the leader stays on the left and
+the worker panes are stacked top-to-bottom on the right.
 
 The leader gets an initial prompt telling it to delegate work with tags like:
 

@@ -94,6 +94,7 @@ Commands:
 Notes:
   - Run {prog} from a single-pane tmux window.
   - The current pane becomes the leader pane.
+  - The default layout keeps the leader on the left and stacks workers on the right.
   - Worker names are agent1, agent2, ... and worker replies come back to the leader as
     <reply from="agentN">...</reply>.
 """
@@ -174,8 +175,10 @@ def split_team_panes(leader_pane: str, team_size: int) -> list[str]:
             raise RuntimeError("failed to create tmux pane for codex-team")
         created.append(pane)
     if team_size:
-        run_tmux("select-layout", "-t", leader_pane, "tiled")
-    run_tmux("select-pane", "-t", leader_pane)
+        run_tmux("select-pane", "-t", leader_pane)
+        run_tmux("select-layout", "-t", leader_pane, "main-vertical")
+    else:
+        run_tmux("select-pane", "-t", leader_pane)
     return created
 
 

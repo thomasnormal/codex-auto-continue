@@ -82,6 +82,25 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
 
         return self.harness._wait_for_value(_probe, timeout=timeout, description=f"team state {state_path.name}")
 
+    def pane_geometries(self) -> dict[str, dict[str, int]]:
+        rows = self.harness.tmux_stdout(
+            "list-panes",
+            "-t",
+            self.harness.session_name,
+            "-F",
+            "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+        ).splitlines()
+        geometries: dict[str, dict[str, int]] = {}
+        for row in rows:
+            pane_id, left, top, width, height = row.split()
+            geometries[pane_id] = {
+                "left": int(left),
+                "top": int(top),
+                "width": int(width),
+                "height": int(height),
+            }
+        return geometries
+
     def test_codex_team_creates_team_and_routes_worker_reply(self):
         proc = self.run_team("1")
 
@@ -209,6 +228,28 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
         status = self.run_team_from_pane(keep_pane, "status", check=False)
         self.assertEqual(1, status.returncode, self.harness.diagnostics())
         self.assertIn("no codex-team state", status.stderr, self.harness.diagnostics())
+
+    def test_codex_team_defaults_to_leader_left_worker_stack_right(self):
+        proc = self.run_team("3")
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=60.0,
+        )
+
+        geometries = self.pane_geometries()
+        leader = geometries[str(state["leader"]["pane"])]
+        workers = [geometries[str(member["pane"])] for member in state["members"]]
+
+        worker_lefts = {worker["left"] for worker in workers}
+        self.assertEqual(1, len(worker_lefts), self.harness.diagnostics())
+        worker_tops = [worker["top"] for worker in workers]
+        self.assertEqual(len(worker_tops), len(set(worker_tops)), self.harness.diagnostics())
+        self.assertLess(leader["left"], min(worker_lefts), self.harness.diagnostics())
+        self.assertGreater(leader["height"], max(worker["height"] for worker in workers), self.harness.diagnostics())
 
 
 if __name__ == "__main__":

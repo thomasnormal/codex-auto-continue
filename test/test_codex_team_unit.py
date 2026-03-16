@@ -224,6 +224,18 @@ class CodexTeamUnitTests(unittest.TestCase):
         self.assertFalse(agent.ready)
         mock_send.assert_called_once_with("%2", "say exactly 42 and nothing else", codex_team.ENTER_DELAY_SECS)
 
+    def test_split_team_panes_uses_main_vertical_layout(self):
+        with patch.object(
+            codex_team,
+            "run_tmux_text",
+            side_effect=["%2", "%3"],
+        ), patch.object(codex_team, "run_tmux") as mock_run_tmux:
+            panes = codex_team.split_team_panes("%1", 2)
+
+        self.assertEqual(["%2", "%3"], panes)
+        self.assertIn(call("select-layout", "-t", "%1", "main-vertical"), mock_run_tmux.call_args_list)
+        self.assertNotIn(call("select-layout", "-t", "%1", "tiled"), mock_run_tmux.call_args_list)
+
     def test_cmd_down_keeps_current_pane_and_kills_other_window_panes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "team.json"
