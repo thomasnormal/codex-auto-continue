@@ -15,7 +15,13 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Optional
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "bin"))
+
+import acw_state
 
 
 STALE_HARNESS_GRACE_SECS = 300.0
@@ -373,6 +379,22 @@ class RealCodexHarness:
             return [dict(row) for row in rows]
         finally:
             conn.close()
+
+    def mutate_manager_session_state(self, thread_id: str, **changes: object) -> None:
+        row = self.manager_session_row(thread_id)
+        if row is None:
+            raise AssertionError(f"no manager session row for thread {thread_id}\n{self.diagnostics()}")
+        payload = dict(row)
+        payload.update(changes)
+        acw_state.write_session_state(thread_id, payload, state_dir=str(self.codex_dir))
+
+    def mutate_manager_runtime_state(self, thread_id: str, **changes: object) -> None:
+        row = self.manager_runtime_row(thread_id)
+        if row is None:
+            raise AssertionError(f"no manager runtime row for thread {thread_id}\n{self.diagnostics()}")
+        payload = dict(row)
+        payload.update(changes)
+        acw_state.write_runtime_state(payload, state_dir=str(self.codex_dir), scope=str(self.tmux_socket))
 
     def manager_runtime_rows(self) -> list[dict[str, object]]:
         rows = self._manager_db_query(

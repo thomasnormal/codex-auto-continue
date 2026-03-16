@@ -397,5 +397,6 @@ Current real-Codex coverage includes:
 Current local-backend coverage includes the full shared manager scenario suite,
 including `start`, `stop`, `pause`, `resume`, `restart --restart-codex`,
 `status`, `doctor`, `repair`, daemon-death recovery, plus real CLI rejection
-checks for `pause *`, `resume *`, `restart *`, and `doctor .` against a real
-tmux/daemon/SQLite stack.
+checks for `pause *`, `resume *`, `restart *`, and `doctor .`, along with
+warn-path `status` / `doctor` recommendations driven from live SQLite session
+health, all against a real tmux/daemon/SQLite stack.

@@ -77,6 +77,41 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertEqual(1, proc.returncode, self.harness.diagnostics())
         self.assertIn("could not resolve target '.'", proc.stdout, self.harness.diagnostics())
 
+    def test_status_recommends_doctor_for_warn_runtime_via_real_cli(self):
+        self.harness.rename_window("warnpane")
+        self.harness.start_codex("say exactly WARNSTATUS and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+        self.harness.run_manager("start", "warnpane", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.mutate_manager_session_state(
+            turn.thread_id,
+            health="warn",
+            health_detail="codex log missing",
+        )
+
+        proc = self.harness.run_manager("status")
+
+        self.assertIn(f"Recommendation: run acw doctor {pane}", proc.stdout, self.harness.diagnostics())
+
+    def test_doctor_recommends_restart_for_warn_runtime_via_real_cli(self):
+        self.harness.rename_window("warnpane")
+        self.harness.start_codex("say exactly WARNDOCTOR and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        self.harness.run_manager("start", "warnpane", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.mutate_manager_session_state(
+            turn.thread_id,
+            health="warn",
+            health_detail="rollout channel closed",
+        )
+
+        proc = self.harness.run_manager("doctor", "warnpane")
+
+        self.assertEqual(0, proc.returncode, self.harness.diagnostics())
+        self.assertIn("runtime health: warn - rollout channel closed", proc.stdout, self.harness.diagnostics())
+        self.assertIn("Recommendation: run acw restart warnpane", proc.stdout, self.harness.diagnostics())
+
 
 if __name__ == "__main__":
     unittest.main()
