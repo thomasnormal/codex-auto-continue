@@ -656,7 +656,7 @@ def bootstrap_agents(state: TeamState) -> bool:
 
 
 def deliver_pending(agent: TeamAgent, log_path: Path) -> bool:
-    if agent.busy or not agent.pending_messages or not agent.initial_prompt_sent:
+    if not agent.pending_messages or not agent.initial_prompt_sent:
         return False
     message = agent.pending_messages.pop(0)
     result = tmux_send(agent.pane, normalize_injected_message(message), ENTER_DELAY_SECS)
@@ -669,7 +669,7 @@ def deliver_pending(agent: TeamAgent, log_path: Path) -> bool:
         return False
     agent.busy = True
     agent.ready = False
-    append_log(log_path, f"route: sent queued message to {agent.name} pane={agent.pane}")
+    append_log(log_path, f"route: queued message to {agent.name} pane={agent.pane}")
     return True
 
 

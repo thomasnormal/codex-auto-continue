@@ -184,5 +184,34 @@ class RealCodexTeamIntegrationTests(_RealCodexHarnessTestCase):
         self.assertIn("42", worker_text, self.harness.diagnostics())
         self.assertIn("42", leader_text, self.harness.diagnostics())
 
+    def test_codex_team_queues_second_message_for_busy_real_worker(self):
+        proc = self.run_team("1")
+
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=90.0,
+        )
+
+        leader_pane = str(state["leader"]["pane"])
+        self.harness.send_codex_prompt_to_pane(
+            leader_pane,
+            "Output exactly these two tags back to back and nothing else: "
+            '<message to="agent1">Write the numbers 1 through 400, one per line, and nothing else.</message>'
+            '<message to="agent1">say exactly SECONDDONE and nothing else</message>',
+        )
+
+        queued = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["members"][0]["busy"] and not payload["members"][0]["pending_messages"],
+            timeout=90.0,
+        )
+
+        self.assertTrue(queued["members"][0]["busy"], self.harness.diagnostics())
+        self.assertEqual([], queued["members"][0]["pending_messages"], self.harness.diagnostics())
+
 if __name__ == "__main__":
     unittest.main()

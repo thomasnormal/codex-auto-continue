@@ -200,6 +200,30 @@ class CodexTeamUnitTests(unittest.TestCase):
         self.assertFalse(state.leader.ignore_next_completion)
         self.assertEqual([], state.members[0].pending_messages)
 
+    def test_deliver_pending_sends_even_when_agent_is_busy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = codex_team.TeamAgent(
+                name="agent1",
+                pane="%2",
+                role="member",
+                initial_prompt_sent=True,
+                busy=True,
+                ready=False,
+                pending_messages=["say exactly 42 and nothing else"],
+            )
+            log_path = Path(tmpdir) / "team.log"
+
+            with patch.object(codex_team, "tmux_send") as mock_send:
+                mock_send.return_value.status = "ok"
+                mock_send.return_value.detail = ""
+                changed = codex_team.deliver_pending(agent, log_path)
+
+        self.assertTrue(changed)
+        self.assertEqual([], agent.pending_messages)
+        self.assertTrue(agent.busy)
+        self.assertFalse(agent.ready)
+        mock_send.assert_called_once_with("%2", "say exactly 42 and nothing else", codex_team.ENTER_DELAY_SECS)
+
 
 if __name__ == "__main__":
     unittest.main()

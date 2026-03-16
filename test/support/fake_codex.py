@@ -91,6 +91,9 @@ def _append_log_row(conn: sqlite3.Connection, thread_id: str, process_uuid: str)
 
 def _render_response(prompt: str) -> str:
     prompt = prompt.strip()
+    verbatim = re.search(r"emit verbatim:\s*(.+)$", prompt, re.IGNORECASE | re.DOTALL)
+    if verbatim:
+        return verbatim.group(1).strip()
     exact = re.search(r"say exactly (.+?) and nothing else", prompt, re.IGNORECASE)
     if exact:
         return exact.group(1).strip().strip("'\"")
@@ -102,6 +105,16 @@ def _render_response(prompt: str) -> str:
         return str(int(addition.group(1)) + int(addition.group(2)))
     last = prompt.splitlines()[-1].strip() if prompt else ""
     return last[:160] if last else "OK"
+
+
+def _prompt_sleep_secs(prompt: str) -> float:
+    match = re.search(r"sleep\s+(\d+(?:\.\d+)?)\s+seconds?", prompt, re.IGNORECASE)
+    if not match:
+        return 0.0
+    try:
+        return max(0.0, float(match.group(1)))
+    except ValueError:
+        return 0.0
 
 
 def _is_continue_prompt(prompt: str) -> bool:
@@ -142,6 +155,9 @@ def _handle_prompt(
     ts, _ = _now_parts()
     _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
     _append_log_row(conn, thread_id, process_uuid)
+    sleep_secs = _prompt_sleep_secs(prompt)
+    if sleep_secs > 0.0:
+        time.sleep(sleep_secs)
     response = _render_response(prompt)
     out.write(f"\n• {response}\n\n")
     out.flush()

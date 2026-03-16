@@ -131,6 +131,41 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
         self.assertTrue(all(member["initial_prompt_sent"] for member in state["members"]), self.harness.diagnostics())
         self.assertTrue(all(member["ready"] for member in state["members"]), self.harness.diagnostics())
 
+    def test_codex_team_queues_second_message_while_worker_is_busy(self):
+        proc = self.run_team("1")
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=60.0,
+        )
+
+        leader_pane = str(state["leader"]["pane"])
+        self.harness.send_codex_prompt_to_pane(
+            leader_pane,
+            "emit verbatim: "
+            '<message to="agent1">sleep 2 seconds then say exactly FIRSTDONE and nothing else</message>'
+            '<message to="agent1">say exactly SECONDDONE and nothing else</message>',
+        )
+
+        queued = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["members"][0]["busy"] and not payload["members"][0]["pending_messages"],
+            timeout=20.0,
+        )
+
+        self.assertTrue(queued["members"][0]["busy"], self.harness.diagnostics())
+        self.assertEqual([], queued["members"][0]["pending_messages"], self.harness.diagnostics())
+        leader_text = self.harness.wait_for_pane_contains_in_pane(
+            leader_pane,
+            "SECONDDONE",
+            timeout=60.0,
+            lines=240,
+        )
+        self.assertIn("SECONDDONE", leader_text, self.harness.diagnostics())
+
     def test_codex_team_rejects_multi_pane_window(self):
         self.harness.tmux("split-window", "-t", self.harness.pane_id, "-P", "-F", "#{pane_id}")
 
