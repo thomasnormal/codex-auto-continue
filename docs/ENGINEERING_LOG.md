@@ -1,5 +1,11 @@
 # Engineering Log
 
+## 2026-03-16
+
+- Change: added a new `codex-team` CLI. It creates a leader pane plus `n` worker panes inside the current single-pane tmux window, launches Codex in each pane, and starts a background per-window team monitor that routes leader `<message to="agentN">...</message>` tags to the named worker and routes worker replies back to the leader as `<reply from="agentN">...</reply>`.
+- Change: added real local-tmux integration coverage for `codex-team` using the fake-Codex backend. The new tests prove the full create-team flow and a real leader -> worker -> leader round trip on a private tmux socket instead of only unit-testing the parser.
+- Realization: `auto_continue_logwatch.discover_thread_for_pane()` had a real tmux targeting bug. It was using `list-panes -t %pane -F #{pane_pid}`, which returns every pane in the containing window rather than the exact target pane. The fix was to resolve the pane PID with `display-message -p -t %pane #{pane_pid}` so strict live thread discovery keeps working when a window has multiple panes.
+
 ## 2026-03-15
 
 - Change: added a third shared manager-scenario backend: `local`. `test/test_local_codex_integration.py` now runs the same manager scenario suite against the real CLI, real tmux server, real daemon, and real SQLite state, but with a stub `codex` process instead of the live service. That covers `status`, `doctor`, `repair`, restart/recovery flows, and a local CLI parsing check without requiring network or credentials.

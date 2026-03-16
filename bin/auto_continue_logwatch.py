@@ -978,7 +978,7 @@ def discover_thread_for_pane(pane: str) -> Optional[str]:
     a thread_id directly, return ``None`` rather than guessing from cwd or
     timing heuristics.
     """
-    rc = run_tmux(["list-panes", "-t", pane, "-F", "#{pane_pid}"])
+    rc = run_tmux(["display-message", "-p", "-t", pane, "#{pane_pid}"])
     if rc.returncode != 0 or not rc.stdout.strip():
         return None
     try:

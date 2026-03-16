@@ -35,6 +35,7 @@ CI = "https://github.com/thomasnormal/codex-auto-continue/actions/workflows/ci.y
 
 [project.scripts]
 acw = "auto_continue_watchd:main"
+codex-team = "codex_team:main"
 
 [tool.setuptools]
 package-dir = {"" = "bin"}
@@ -60,4 +61,5 @@ py-modules = [
   "acw_tmux",
   "acw_targets",
   "acw_ui",
+  "codex_team",
 ]

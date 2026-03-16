@@ -99,6 +99,27 @@ class LogwatchUnitTests(unittest.TestCase):
                 with patch.object(logwatch, "thread_from_codex_pid", return_value=None):
                     self.assertIsNone(logwatch.discover_thread_for_pane("%11"))
 
+    def test_discover_thread_for_pane_uses_exact_target_pane_pid(self):
+        tmux_calls: list[list[str]] = []
+
+        def fake_run_tmux(args, capture_output=True):
+            tmux_calls.append(list(args))
+            return subprocess.CompletedProcess(["tmux"], 0, "7777\n", "")
+
+        with patch.object(logwatch, "run_tmux", side_effect=fake_run_tmux):
+            with patch.object(
+                logwatch.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["pstree"], 0, "bash(7777)---codex(222)\n", ""),
+            ):
+                with patch.object(logwatch, "thread_from_codex_pid", side_effect=lambda pid: THREAD if pid == "222" else None):
+                    self.assertEqual(THREAD, logwatch.discover_thread_for_pane("%11"))
+
+        self.assertEqual(
+            ["display-message", "-p", "-t", "%11", "#{pane_pid}"],
+            tmux_calls[0],
+        )
+
     def test_thread_id_from_cmdline_fields_reads_resume_target(self):
         self.assertEqual(
             THREAD,

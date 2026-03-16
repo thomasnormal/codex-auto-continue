@@ -62,6 +62,7 @@ To try it without installing:
 
 ```bash
 uv tool run --from /path/to/codex-auto-continue acw --help
+uv tool run --from /path/to/codex-auto-continue codex-team --help
 ```
 
 ## Quick Start
@@ -175,6 +176,46 @@ acw resume formal aot
 acw restart bugs --restart-codex
 acw edit tests
 ```
+
+## codex-team
+
+`codex-team` is a separate tmux coordination tool built on the same tmux/socket
+and Codex-thread plumbing as `acw`.
+
+Run it from a single-pane tmux window:
+
+```bash
+codex-team 3
+```
+
+That keeps the current pane as the leader, creates three worker panes
+(`agent1`, `agent2`, `agent3`), launches Codex in each pane, and starts a
+background monitor for that window.
+
+The leader gets an initial prompt telling it to delegate work with tags like:
+
+```text
+<message to="agent1">investigate the failing parser tests</message>
+```
+
+The monitor sends the inner text to the named worker pane. When the worker
+finishes a turn, the monitor routes the worker's latest reply back to the
+leader as:
+
+```text
+<reply from="agent1">...</reply>
+```
+
+Useful commands:
+
+```text
+codex-team <n>  Create one leader plus n workers in the current window
+codex-team status
+codex-team stop
+```
+
+`codex-team` currently requires a single-pane tmux window when you create the
+team, and worker names are fixed to `agent1`, `agent2`, and so on.
 
 ## Status And Health
 
