@@ -40,8 +40,16 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
         self.harness.cleanup()
 
     def run_team(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.run_team_from_pane(self.harness.pane_id, *args, check=check)
+
+    def run_team_from_pane(
+        self,
+        pane_id: str,
+        *args: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         env = self.harness.process_env
-        env["TMUX_PANE"] = self.harness.pane_id
+        env["TMUX_PANE"] = pane_id
         proc = subprocess.run(
             ["python3", str(ROOT / "bin" / "codex_team.py"), *args],
             env=env,
@@ -173,6 +181,34 @@ class CodexTeamLocalIntegrationTests(unittest.TestCase):
 
         self.assertEqual(1, proc.returncode, self.harness.diagnostics())
         self.assertIn("current window already has 2 panes", proc.stderr, self.harness.diagnostics())
+
+    def test_codex_team_down_keeps_calling_pane_and_closes_the_rest(self):
+        proc = self.run_team("2")
+        state_match = re.search(r"^state:\s+(.+)$", proc.stdout, re.MULTILINE)
+        self.assertIsNotNone(state_match, self.harness.diagnostics())
+        state_path = Path(state_match.group(1).strip())
+        state = self.wait_for_team_state(
+            state_path,
+            lambda payload: payload["leader"]["ready"] and all(member["ready"] for member in payload["members"]),
+            timeout=60.0,
+        )
+
+        keep_pane = str(state["members"][0]["pane"])
+        other_panes = {str(state["leader"]["pane"]), str(state["members"][1]["pane"])}
+
+        down = self.run_team_from_pane(keep_pane, "down")
+
+        self.assertIn(f"kept pane: {keep_pane}", down.stdout, self.harness.diagnostics())
+        self.assertIn("closed panes: 2", down.stdout, self.harness.diagnostics())
+        self.assertFalse(state_path.exists(), self.harness.diagnostics())
+
+        panes = set(self.harness.tmux_stdout("list-panes", "-t", self.harness.session_name, "-F", "#{pane_id}").splitlines())
+        self.assertEqual({keep_pane}, panes, self.harness.diagnostics())
+        self.assertTrue(other_panes.isdisjoint(panes), self.harness.diagnostics())
+
+        status = self.run_team_from_pane(keep_pane, "status", check=False)
+        self.assertEqual(1, status.returncode, self.harness.diagnostics())
+        self.assertIn("no codex-team state", status.stderr, self.harness.diagnostics())
 
 
 if __name__ == "__main__":

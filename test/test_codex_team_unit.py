@@ -224,6 +224,50 @@ class CodexTeamUnitTests(unittest.TestCase):
         self.assertFalse(agent.ready)
         mock_send.assert_called_once_with("%2", "say exactly 42 and nothing else", codex_team.ENTER_DELAY_SECS)
 
+    def test_cmd_down_keeps_current_pane_and_kills_other_window_panes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "team.json"
+            pid_path = Path(tmpdir) / "team.pid"
+            state = codex_team.TeamState(
+                team_id="team",
+                tmux_socket="",
+                window_id="@1",
+                created_at=0.0,
+                state_file=str(state_path),
+                log_file=str(Path(tmpdir) / "team.log"),
+                pid_file=str(pid_path),
+                monitor_pid=1234,
+                leader=codex_team.TeamAgent(name="leader", pane="%1", role="leader"),
+                members=[
+                    codex_team.TeamAgent(name="agent1", pane="%2", role="member"),
+                    codex_team.TeamAgent(name="agent2", pane="%3", role="member"),
+                ],
+            )
+            codex_team.save_team_state(state)
+            pid_path.write_text("1234\n", encoding="utf-8")
+
+            with patch.object(codex_team, "current_tmux_pane", return_value="%2"), patch.object(
+                codex_team, "current_window_state_path", return_value=state_path
+            ), patch.object(
+                codex_team, "pid_is_alive", return_value=False
+            ), patch.object(
+                codex_team, "list_window_panes", return_value=["%1", "%2", "%3"]
+            ), patch.object(
+                codex_team, "run_tmux"
+            ) as mock_run_tmux:
+                rc = codex_team.cmd_down()
+
+        self.assertEqual(0, rc)
+        self.assertFalse(state_path.exists())
+        self.assertFalse(pid_path.exists())
+        self.assertEqual(
+            [
+                call("kill-pane", "-t", "%1"),
+                call("kill-pane", "-t", "%3"),
+            ],
+            mock_run_tmux.call_args_list,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

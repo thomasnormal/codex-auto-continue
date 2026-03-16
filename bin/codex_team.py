@@ -80,6 +80,7 @@ def build_help_text(prog: str) -> str:
   {prog} <team-size>
   {prog} status
   {prog} stop
+  {prog} down
 
 Commands:
   <team-size>  Create one leader pane plus <team-size> worker panes in the current tmux window,
@@ -87,6 +88,8 @@ Commands:
                <message to="agentN">...</message> tags to the named worker.
   status       Show the codex-team state for the current tmux window.
   stop         Stop the codex-team monitor for the current tmux window and forget its state.
+  down         Stop the codex-team monitor, keep the current pane, and close the other panes in the
+               current tmux window.
 
 Notes:
   - Run {prog} from a single-pane tmux window.
@@ -492,7 +495,21 @@ def stop_monitor(state: TeamState) -> None:
                 break
             time.sleep(0.1)
     Path(state.pid_file).unlink(missing_ok=True)
+    state.monitor_pid = 0
+
+
+def forget_team_state(state: TeamState) -> None:
     Path(state.state_file).unlink(missing_ok=True)
+
+
+def close_other_window_panes(window_id: str, keep_pane: str) -> int:
+    closed = 0
+    for pane in list_window_panes(window_id):
+        if pane == keep_pane:
+            continue
+        run_tmux("kill-pane", "-t", pane)
+        closed += 1
+    return closed
 
 
 def current_window_state_path() -> Path:
@@ -594,7 +611,25 @@ def cmd_stop() -> int:
         raise RuntimeError("no codex-team state for the current tmux window")
     state = load_team_state(state_path)
     stop_monitor(state)
+    forget_team_state(state)
     print(f"stopped codex-team for window {state.window_id}")
+    return 0
+
+
+def cmd_down() -> int:
+    keep_pane = current_tmux_pane()
+    if not keep_pane:
+        raise RuntimeError("codex-team down must be run from inside the pane you want to keep")
+    state_path = current_window_state_path()
+    if not state_path.exists():
+        raise RuntimeError("no codex-team state for the current tmux window")
+    state = load_team_state(state_path)
+    stop_monitor(state)
+    closed = close_other_window_panes(state.window_id, keep_pane)
+    forget_team_state(state)
+    print(f"stopped codex-team for window {state.window_id}")
+    print(f"kept pane: {keep_pane}")
+    print(f"closed panes: {closed}")
     return 0
 
 
@@ -804,6 +839,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return cmd_status()
     if args[0] == "stop":
         return cmd_stop()
+    if args[0] == "down":
+        return cmd_down()
 
     if len(args) != 1 or not re.fullmatch(r"\d+", args[0]):
         print_help(file=sys.stderr)

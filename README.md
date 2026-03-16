@@ -212,10 +212,18 @@ Useful commands:
 codex-team <n>  Create one leader plus n workers in the current window
 codex-team status
 codex-team stop
+codex-team down
 ```
 
 `codex-team` currently requires a single-pane tmux window when you create the
 team, and worker names are fixed to `agent1`, `agent2`, and so on.
+
+`codex-team stop` only stops the background monitor and forgets the saved team
+state. It leaves the tmux panes and Codex processes alone.
+
+`codex-team down` is the teardown command. Run it from the pane you want to
+keep; it stops the monitor, keeps the current pane alive, and closes the other
+panes in that tmux window.
 
 ## Status And Health
 
