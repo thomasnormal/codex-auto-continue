@@ -20,10 +20,10 @@ import acw_config
 import acw_probe
 import acw_tmux
 from acw_ids import current_tmux_pane
-from auto_continue_logwatch import CodexLogEvent
-from auto_continue_logwatch import parse_codex_log_event
-from auto_continue_logwatch import thread_from_codex_pid
-from auto_continue_logwatch import tmux_send
+from acw_codex import CodexLogEvent
+from acw_codex import parse_codex_log_event
+from acw_codex import thread_from_codex_pid
+from acw_codex import tmux_send
 
 
 MESSAGE_RE = re.compile(r"<message\s+to=\"([^\"]+)\">(.*?)</message>", re.IGNORECASE | re.DOTALL)

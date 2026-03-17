@@ -1,5 +1,10 @@
 # Engineering Log
 
+## 2026-03-17
+
+- Refactor: extracted the shared Codex runtime helpers out of `auto_continue_logwatch.py` into `bin/acw_codex.py`. `codex-team` now imports Codex log parsing, live thread discovery, and tmux send-key injection from the neutral helper module instead of depending on the watcher implementation file. Kept the old `auto_continue_logwatch` patch/test surface with thin wrappers so the refactor stays behavior-preserving while removing the backwards dependency.
+- Fix: `acw repair` and plain `acw restart` now recover a live pane from one uniquely matching dead saved session with the same tmux window name. When a stale saved session like `bugs/%5` is dead but a live unmanaged `bugs/%50` pane proves a different live thread, the manager now adopts the dead session's saved continue message onto the live thread, removes the stale thread row, and starts/restarts management on the live pane instead of blocking on “no saved continue message”. Real use also exposed one extra nuance: the dead session could still have a stale runtime row on a missing pane, so the recovery helper now ignores watcher rows whose panes are already gone. Added unit regressions for explicit-target repair planning, no-target repair discovery, and restart adoption/removal behavior.
+
 ## 2026-03-16
 
 - Change: `codex-team` now launches worker panes with explicit `model_reasoning_effort="medium"` and `plan_mode_reasoning_effort="medium"` overrides, while the leader keeps the operator's normal Codex config. Added a unit regression for the exact launch command and a real tmux+Codex integration test that proves the worker pane boots with the `medium` banner while the leader keeps the inherited default (`xhigh` on this machine).
