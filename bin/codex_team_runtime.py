@@ -12,6 +12,7 @@ from typing import TextIO
 
 from acw_codex import CodexLogEvent
 from codex_team_state import TeamAgent
+from codex_team_state import TeamAgentPhase
 from codex_team_state import TeamState
 
 
@@ -104,14 +105,16 @@ def collect_pending_completion_events(context: TeamRuntimeContext, state: TeamSt
 
 
 def agent_setup_status(agent: TeamAgent) -> str:
-    if agent.ready:
+    if agent.phase == TeamAgentPhase.READY:
         return "ready"
-    if agent.initial_prompt_sent:
-        return "waiting for initial reply"
+    if agent.phase == TeamAgentPhase.STARTING:
+        if agent.thread_id:
+            return "waiting for initial reply"
+        return "waiting for codex process"
+    if agent.phase == TeamAgentPhase.BUSY:
+        return "busy"
     if agent.thread_id:
         return f"thread detected ({agent.thread_id[:8]}…)"
-    if agent.launch_requested:
-        return "waiting for codex process"
     return "starting codex"
 
 
@@ -237,11 +240,8 @@ def bootstrap_agents(context: TeamRuntimeContext, state: TeamState) -> bool:
                         context.enter_delay_secs,
                     )
                     if result.status == "ok":
-                        agent.launch_requested = True
+                        agent.phase = TeamAgentPhase.STARTING
                         agent.launch_requested_at = now
-                        agent.initial_prompt_sent = True
-                        agent.ignore_next_completion = True
-                        agent.busy = True
                         context.append_log(
                             log_path,
                             f"launch: started codex in {agent.name} pane={agent.pane} with initial prompt",
@@ -271,8 +271,7 @@ def deliver_pending(context: TeamRuntimeContext, agent: TeamAgent, log_path: Pat
             f"route: failed to send queued message to {agent.name} pane={agent.pane}: {result.detail}",
         )
         return False
-    agent.busy = True
-    agent.ready = False
+    agent.phase = TeamAgentPhase.BUSY
     context.append_log(log_path, f"route: queued message to {agent.name} pane={agent.pane}")
     return True
 
@@ -299,17 +298,14 @@ def process_events(
         if agent is None:
             continue
         block = context.extract_last_agent_block(context.capture_pane_text(agent.pane))
-        if agent.ignore_next_completion:
-            agent.ignore_next_completion = False
-            agent.busy = False
-            agent.ready = True
+        if agent.phase == TeamAgentPhase.STARTING:
+            agent.phase = TeamAgentPhase.READY
             mark_completion_handled(agent, event)
             changed = True
             context.append_log(log_path, f"ready: {agent.name} initialized on thread={event.thread_id}")
             continue
 
-        agent.busy = False
-        agent.ready = True
+        agent.phase = TeamAgentPhase.READY
         mark_completion_handled(agent, event)
         if agent.role == "leader":
             routed = context.parse_routed_messages(block)

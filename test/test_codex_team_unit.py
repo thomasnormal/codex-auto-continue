@@ -13,6 +13,81 @@ import codex_team
 
 
 class CodexTeamUnitTests(unittest.TestCase):
+    def test_save_and_load_team_state_preserves_phase_and_derived_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "team.json"
+            state = codex_team.TeamState(
+                team_id="team",
+                tmux_socket="",
+                window_id="@1",
+                created_at=0.0,
+                state_file=str(state_path),
+                log_file=str(Path(tmpdir) / "team.log"),
+                pid_file=str(Path(tmpdir) / "team.pid"),
+                leader=codex_team.TeamAgent(
+                    name="leader",
+                    pane="%1",
+                    role="leader",
+                    phase=codex_team.TeamAgentPhase.READY,
+                ),
+                members=[
+                    codex_team.TeamAgent(
+                        name="agent1",
+                        pane="%2",
+                        role="member",
+                        phase=codex_team.TeamAgentPhase.BUSY,
+                    )
+                ],
+            )
+
+            codex_team.save_team_state(state)
+            payload = codex_team.read_json(state_path)
+            restored = codex_team.load_team_state(state_path)
+
+        self.assertEqual("ready", payload["leader"]["phase"])
+        self.assertTrue(payload["leader"]["ready"])
+        self.assertFalse(payload["leader"]["busy"])
+        self.assertEqual("busy", payload["members"][0]["phase"])
+        self.assertFalse(payload["members"][0]["ready"])
+        self.assertTrue(payload["members"][0]["busy"])
+        self.assertEqual(codex_team.TeamAgentPhase.READY, restored.leader.phase)
+        self.assertEqual(codex_team.TeamAgentPhase.BUSY, restored.members[0].phase)
+
+    def test_load_team_state_derives_phase_from_legacy_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "team.json"
+            codex_team.write_json(
+                state_path,
+                {
+                    "team_id": "team",
+                    "tmux_socket": "",
+                    "window_id": "@1",
+                    "created_at": 0.0,
+                    "state_file": str(state_path),
+                    "log_file": str(Path(tmpdir) / "team.log"),
+                    "pid_file": str(Path(tmpdir) / "team.pid"),
+                    "leader": {
+                        "name": "leader",
+                        "pane": "%1",
+                        "role": "leader",
+                        "ready": False,
+                        "busy": True,
+                        "launch_requested": True,
+                        "initial_prompt_sent": True,
+                        "ignore_next_completion": True,
+                    },
+                    "members": [],
+                },
+            )
+
+            state = codex_team.load_team_state(state_path)
+
+        self.assertEqual(codex_team.TeamAgentPhase.STARTING, state.leader.phase)
+        self.assertTrue(state.leader.busy)
+        self.assertTrue(state.leader.launch_requested)
+        self.assertTrue(state.leader.initial_prompt_sent)
+        self.assertTrue(state.leader.ignore_next_completion)
+
     def test_initial_launch_command_uses_medium_reasoning_for_workers(self):
         leader_cmd = codex_team.initial_launch_command(
             codex_team.TeamAgent(name="leader", pane="%1", role="leader"),
@@ -181,9 +256,11 @@ class CodexTeamUnitTests(unittest.TestCase):
             ),
         ]
         self.assertEqual(expected_calls, mock_send.call_args_list)
+        self.assertEqual(codex_team.TeamAgentPhase.STARTING, state.leader.phase)
         self.assertTrue(state.leader.initial_prompt_sent)
         self.assertTrue(state.leader.ignore_next_completion)
         self.assertTrue(state.leader.busy)
+        self.assertEqual(codex_team.TeamAgentPhase.STARTING, state.members[0].phase)
         self.assertTrue(state.members[0].initial_prompt_sent)
         self.assertTrue(state.members[0].ignore_next_completion)
         self.assertTrue(state.members[0].busy)
@@ -203,9 +280,7 @@ class CodexTeamUnitTests(unittest.TestCase):
                     pane="%1",
                     role="leader",
                     thread_id="11111111-1111-1111-1111-111111111111",
-                    initial_prompt_sent=True,
-                    ignore_next_completion=True,
-                    busy=True,
+                    phase=codex_team.TeamAgentPhase.STARTING,
                 ),
                 members=[
                     codex_team.TeamAgent(
@@ -213,7 +288,7 @@ class CodexTeamUnitTests(unittest.TestCase):
                         pane="%2",
                         role="member",
                         thread_id="22222222-2222-2222-2222-222222222222",
-                        initial_prompt_sent=True,
+                        phase=codex_team.TeamAgentPhase.READY,
                     )
                 ],
             )
@@ -232,6 +307,7 @@ class CodexTeamUnitTests(unittest.TestCase):
                 changed = codex_team.process_events(state, [event])
 
         self.assertTrue(changed)
+        self.assertEqual(codex_team.TeamAgentPhase.READY, state.leader.phase)
         self.assertTrue(state.leader.ready)
         self.assertFalse(state.leader.busy)
         self.assertFalse(state.leader.ignore_next_completion)
@@ -243,9 +319,7 @@ class CodexTeamUnitTests(unittest.TestCase):
                 name="agent1",
                 pane="%2",
                 role="member",
-                initial_prompt_sent=True,
-                busy=True,
-                ready=False,
+                phase=codex_team.TeamAgentPhase.BUSY,
                 pending_messages=["say exactly 42 and nothing else"],
             )
             log_path = Path(tmpdir) / "team.log"
@@ -257,6 +331,7 @@ class CodexTeamUnitTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual([], agent.pending_messages)
+        self.assertEqual(codex_team.TeamAgentPhase.BUSY, agent.phase)
         self.assertTrue(agent.busy)
         self.assertFalse(agent.ready)
         mock_send.assert_called_once_with("%2", "say exactly 42 and nothing else", codex_team.ENTER_DELAY_SECS)
