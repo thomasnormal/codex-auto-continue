@@ -446,6 +446,8 @@ class RealCodexHarness:
         try:
             self.tmux("kill-session", "-t", self.session_name, check=False)
             self.tmux("kill-server", check=False)
+            self._stop_pid_files(sorted(self.codex_dir.glob("acw_daemon.*.pid")))
+            self._stop_pid_files(sorted(self.codex_dir.glob("codex_team.*.pid")))
         finally:
             self._tmpdir.cleanup()
 
@@ -918,6 +920,42 @@ class RealCodexHarness:
             return True
         except OSError:
             return False
+
+    def _stop_pid_files(self, pid_files: list[Path], timeout: float = 10.0) -> None:
+        pids: list[int] = []
+        for pid_file in pid_files:
+            try:
+                text = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not text.isdigit():
+                continue
+            pid = int(text)
+            if self._pid_is_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+                pids.append(pid)
+
+        deadline = time.time() + timeout
+        while pids and time.time() < deadline:
+            alive = [pid for pid in pids if self._pid_is_alive(pid)]
+            if not alive:
+                break
+            pids = alive
+            time.sleep(0.1)
+
+        for pid in pids:
+            if not self._pid_is_alive(pid):
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
+
+        for pid_file in pid_files:
+            pid_file.unlink(missing_ok=True)
 
     def _pid_is_stopped(self, pid: int) -> bool:
         proc = subprocess.run(
