@@ -126,7 +126,7 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         status = self.harness.run_manager("status")
 
-        self.assertIn("waiting for input", status.stdout, self.harness.diagnostics())
+        self.assertIn("waiting", status.stdout, self.harness.diagnostics())
 
     def test_status_shows_thinking_working_for_paused_busy_runtime_via_real_cli(self):
         self.harness.rename_window("pausedbusy")

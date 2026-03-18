@@ -312,7 +312,7 @@ def paused_activity_from_pane_text(text: str) -> str:
         if "gpt-" in lowered and "left" in lowered and "·" in stripped:
             continue
         if stripped.startswith("›"):
-            return "waiting for input"
+            return "waiting"
         if _SHELL_PROMPT_RE.match(stripped):
             return ""
         return "thinking/working"

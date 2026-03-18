@@ -22,7 +22,7 @@ class AcwProbeUnitTests(unittest.TestCase):
             "  gpt-5.4 xhigh · 100% left · ~\n"
         )
 
-        self.assertEqual("waiting for input", acw_probe.paused_activity_from_pane_text(text))
+        self.assertEqual("waiting", acw_probe.paused_activity_from_pane_text(text))
 
     def test_paused_activity_from_pane_text_detects_thinking_working(self):
         text = (
