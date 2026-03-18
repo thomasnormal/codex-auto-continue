@@ -304,7 +304,7 @@ def paused_activity_from_pane_text(text: str) -> str:
             continue
 
         if _WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
-            return "thinking/working"
+            return "busy"
 
         lowered = stripped.lower()
         if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
@@ -326,7 +326,7 @@ def paused_activity_from_pane_text(text: str) -> str:
             return ""
         if prompt_seen:
             return "waiting"
-        return "thinking/working"
+        return "busy"
     if prompt_seen:
         return "waiting"
     return ""

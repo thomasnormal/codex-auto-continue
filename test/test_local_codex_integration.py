@@ -144,7 +144,7 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         status = self.harness.run_manager("status")
 
-        self.assertIn("thinking/working", status.stdout, self.harness.diagnostics())
+        self.assertIn("busy", status.stdout, self.harness.diagnostics())
         self.harness.wait_for_pane_contains("BUSYDONE", timeout=30.0)
 
 

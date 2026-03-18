@@ -33,7 +33,7 @@ class AcwProbeUnitTests(unittest.TestCase):
             "  gpt-5.4 xhigh · 99% left · ~\n"
         )
 
-        self.assertEqual("thinking/working", acw_probe.paused_activity_from_pane_text(text))
+        self.assertEqual("busy", acw_probe.paused_activity_from_pane_text(text))
 
     def test_paused_activity_prefers_working_over_queued_prompt(self):
         text = (
@@ -50,7 +50,7 @@ class AcwProbeUnitTests(unittest.TestCase):
             "  gpt-5.4 xhigh · 6% left · ~/circt\n"
         )
 
-        self.assertEqual("thinking/working", acw_probe.paused_activity_from_pane_text(text))
+        self.assertEqual("busy", acw_probe.paused_activity_from_pane_text(text))
 
 
 if __name__ == "__main__":
