@@ -1287,6 +1287,10 @@ def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
     return acw_probe.last_agent_snippet_for_pane(pane, thread_id, run_tmux, STATE_DIR)
 
 
+def _paused_activity_for_pane(pane: str) -> str:
+    return acw_probe.paused_activity_for_pane(pane, run_tmux)
+
+
 SavedSessionRecord = acw_runtime.SavedSessionRecord
 LiveWatcherRecord = acw_runtime.LiveWatcherRecord
 LivePaneRecord = acw_runtime.LivePaneRecord
@@ -1586,6 +1590,7 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
         format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
+        paused_activity_for_pane_fn=_paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
@@ -1614,6 +1619,7 @@ def _status_details(
         resolve_message_fn=_resolve_message,
         thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
+        paused_activity_for_pane_fn=_paused_activity_for_pane,
         thread_provenance_text_fn=_thread_provenance_text,
         print_status_recommendations_fn=_print_status_recommendations,
     )

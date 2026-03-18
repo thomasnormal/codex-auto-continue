@@ -1,5 +1,10 @@
 # Engineering Log
 
+## 2026-03-18
+
+- Change: `acw status` now distinguishes paused sessions that are still actively working from paused sessions that are idle and waiting for input. The status table shows that live pane activity inline for paused rows, and `status --details` prints a dedicated `PAUSED_ACTIVITY:` line. The implementation reads the current bottom-of-pane Codex chrome directly from `capture-pane` instead of guessing from saved watcher state.
+- Change: the local fake-Codex harness now behaves more like the real Codex CLI for idle/busy pane detection: it renders a visible `›` input prompt while waiting for input, clears that prompt once a message is submitted, emits a short `working...` marker while the request is in flight, then restores the prompt after replying. This makes the local tmux integration suite a much better proxy for pane-state UI work.
+
 ## 2026-03-17
 
 - Refactor: replaced `codex-team`'s ad hoc `ready` / `busy` / `launch_requested` / `initial_prompt_sent` / `ignore_next_completion` boolean pile with an explicit `TeamAgentPhase` model (`shell`, `starting`, `ready`, `busy`). The runtime now transitions on phase directly, while saved team JSON still includes the derived boolean fields for compatibility with existing status checks and harness assertions. `load_team_state()` also upgrades legacy boolean-only JSON into the new phase model automatically.

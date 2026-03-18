@@ -107,6 +107,16 @@ def _render_response(prompt: str) -> str:
     return last[:160] if last else "OK"
 
 
+def _show_prompt(out) -> None:
+    out.write("› ")
+    out.flush()
+
+
+def _clear_prompt(out) -> None:
+    out.write("\r   \r")
+    out.flush()
+
+
 def _prompt_sleep_secs(prompt: str) -> float:
     match = re.search(r"sleep\s+(\d+(?:\.\d+)?)\s+seconds?", prompt, re.IGNORECASE)
     if not match:
@@ -155,6 +165,8 @@ def _handle_prompt(
     ts, _ = _now_parts()
     _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
     _append_log_row(conn, thread_id, process_uuid)
+    out.write("\nworking...\n")
+    out.flush()
     sleep_secs = _prompt_sleep_secs(prompt)
     if sleep_secs > 0.0:
         time.sleep(sleep_secs)
@@ -213,11 +225,14 @@ def main(argv: list[str]) -> int:
         _log_line(log_path, f"session_init:shell_snapshot{{thread_id={thread_id}}}: codex_core::shell_snapshot: new")
         if prompt:
             _handle_prompt(prompt, conn=conn, log_path=log_path, thread_id=thread_id, process_uuid=process_uuid, out=sys.stdout)
+        _show_prompt(sys.stdout)
         while True:
             line = tty.readline()
             if line == "":
                 break
+            _clear_prompt(sys.stdout)
             _handle_prompt(line, conn=conn, log_path=log_path, thread_id=thread_id, process_uuid=process_uuid, out=sys.stdout)
+            _show_prompt(sys.stdout)
     finally:
         if tty is not None and tty_restore is not None:
             try:

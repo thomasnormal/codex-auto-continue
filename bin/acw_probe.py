@@ -288,3 +288,39 @@ def last_agent_snippet_for_pane(pane: str, thread_id: str, run_tmux, state_dir: 
         if snippet:
             return snippet
     return thread_title(thread_id, state_dir=state_dir)
+
+
+def paused_activity_from_pane_text(text: str) -> str:
+    if not text:
+        return ""
+    for raw in reversed(text.splitlines()):
+        stripped = raw.strip()
+        if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
+            continue
+
+        lowered = stripped.lower()
+        if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
+            continue
+        if stripped.startswith(("1. Yes", "2. No", "> You are in ", "Running scope as unit:")):
+            continue
+        if "do you trust the contents of this directory?" in lowered:
+            continue
+        if "? for shortcuts" in stripped:
+            continue
+        if stripped.startswith("OpenAI Codex"):
+            continue
+        if "gpt-" in lowered and "left" in lowered and "·" in stripped:
+            continue
+        if stripped.startswith("›"):
+            return "waiting for input"
+        if _SHELL_PROMPT_RE.match(stripped):
+            return ""
+        return "thinking/working"
+    return ""
+
+
+def paused_activity_for_pane(pane: str, run_tmux) -> str:
+    if not pane:
+        return ""
+    text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-40") or ""
+    return paused_activity_from_pane_text(text)

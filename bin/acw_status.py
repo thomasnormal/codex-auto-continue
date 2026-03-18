@@ -480,6 +480,14 @@ def status_row_detail(row: dict[str, str], session_json: dict[str, str]) -> str:
     return session_json.get("health_detail", "").strip()
 
 
+def paused_state_detail(activity: str, detail: str) -> str:
+    activity = activity.strip()
+    detail = detail.strip()
+    if activity and detail:
+        return f"{activity} · {detail}"
+    return activity or detail
+
+
 def print_status_recommendations(
     resolved: list[tuple[dict[str, str], str, str]],
     *,
@@ -502,6 +510,7 @@ def status_table(
     thread_times_fn: Callable[[str, bool], tuple[str, str]],
     format_age_fn: Callable[[float, bool], str],
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
+    paused_activity_for_pane_fn: Callable[[str], str],
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
     status_window_pane_cell_fn: Callable[[str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
@@ -514,6 +523,8 @@ def status_table(
         session_json = read_state_json_fn(row["state"])
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
+        if state_value == "paused":
+            state_detail = paused_state_detail(paused_activity_for_pane_fn(current_pane), state_detail)
         started, _last_activity = thread_times_fn(row["thread"], True)
         last_acw = session_json.get("last_continue_at", "")
         if last_acw:
@@ -556,6 +567,7 @@ def status_details(
     resolve_message_fn: Callable[[dict[str, str]], tuple[str, str]],
     thread_times_fn: Callable[[str, bool], tuple[str, str]],
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
+    paused_activity_for_pane_fn: Callable[[str], str],
     thread_provenance_text_fn: Callable[[str], str],
     print_status_recommendations_fn: Callable[[list[tuple[dict[str, str], str, str]]], None],
     print_fn: Callable[[str], None] = print,
@@ -568,6 +580,7 @@ def status_details(
         session_json = read_state_json_fn(row["state"])
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
+        paused_activity = paused_activity_for_pane_fn(current_pane) if state_value == "paused" else ""
 
         last_event = "-"
         if row["watch"]:
@@ -599,6 +612,8 @@ def status_details(
         if provenance:
             print_fn(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
         print_fn(f"  {'STATE:':<16} {state_value}")
+        if paused_activity:
+            print_fn(f"  {'PAUSED_ACTIVITY:':<16} {paused_activity}")
         print_fn(f"  {'STARTED:':<16} {started}")
         print_fn(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
         print_fn(f"  {'LAST_ACW:':<16} {last_acw}")

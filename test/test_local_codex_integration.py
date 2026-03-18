@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 
@@ -111,6 +112,40 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertEqual(0, proc.returncode, self.harness.diagnostics())
         self.assertIn("runtime health: warn - rollout channel closed", proc.stdout, self.harness.diagnostics())
         self.assertIn("Recommendation: run acw restart warnpane", proc.stdout, self.harness.diagnostics())
+
+    def test_status_shows_waiting_for_input_for_paused_runtime_via_real_cli(self):
+        self.harness.rename_window("pausedwait")
+        self.harness.start_codex("say exactly PAUSEDWAIT and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "pausedwait", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.run_manager("pause", "pausedwait")
+        self.harness.wait_for_manager_watcher_paused_in_pane(pane)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("waiting for input", status.stdout, self.harness.diagnostics())
+
+    def test_status_shows_thinking_working_for_paused_busy_runtime_via_real_cli(self):
+        self.harness.rename_window("pausedbusy")
+        self.harness.start_codex("say exactly PAUSEDBUSY and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "pausedbusy", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.send_codex_prompt("sleep 3 seconds then say exactly BUSYDONE and nothing else")
+        self.harness.wait_for_pane_contains("working...", timeout=10.0)
+        time.sleep(0.1)
+        self.harness.run_manager("pause", "pausedbusy")
+        self.harness.wait_for_manager_watcher_paused_in_pane(pane)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("thinking/working", status.stdout, self.harness.diagnostics())
+        self.harness.wait_for_pane_contains("BUSYDONE", timeout=30.0)
 
 
 if __name__ == "__main__":
