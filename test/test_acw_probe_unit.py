@@ -35,6 +35,23 @@ class AcwProbeUnitTests(unittest.TestCase):
 
         self.assertEqual("thinking/working", acw_probe.paused_activity_from_pane_text(text))
 
+    def test_paused_activity_prefers_working_over_queued_prompt(self):
+        text = (
+            "• The detached #0 tracker is green now on today’s CIRCT build.\n"
+            "\n"
+            "• Explored\n"
+            "  └ Read uvm-report-message-empty-elements-runtime.sv\n"
+            "\n"
+            "• Working (53m 10s • esc to interrupt)\n"
+            "\n"
+            "\n"
+            "› Explain this codebase\n"
+            "\n"
+            "  gpt-5.4 xhigh · 6% left · ~/circt\n"
+        )
+
+        self.assertEqual("thinking/working", acw_probe.paused_activity_from_pane_text(text))
+
 
 if __name__ == "__main__":
     unittest.main()

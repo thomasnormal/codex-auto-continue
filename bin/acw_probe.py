@@ -11,6 +11,10 @@ from acw_ids import is_thread_id
 
 _PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
 _SHELL_PROMPT_RE = re.compile(r"^\[[^\]]+\]\$\s*$")
+_WORKING_STATUS_RE = re.compile(
+    r"^(?:[•◦]\s*)?(?:working(?:\.\.\.)?|messages to be submitted after next tool call)\b",
+    re.IGNORECASE,
+)
 
 
 def _freeze_multimap(mapping: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
@@ -293,10 +297,14 @@ def last_agent_snippet_for_pane(pane: str, thread_id: str, run_tmux, state_dir: 
 def paused_activity_from_pane_text(text: str) -> str:
     if not text:
         return ""
+    prompt_seen = False
     for raw in reversed(text.splitlines()):
         stripped = raw.strip()
         if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
             continue
+
+        if _WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
+            return "thinking/working"
 
         lowered = stripped.lower()
         if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
@@ -312,10 +320,15 @@ def paused_activity_from_pane_text(text: str) -> str:
         if "gpt-" in lowered and "left" in lowered and "·" in stripped:
             continue
         if stripped.startswith("›"):
-            return "waiting"
+            prompt_seen = True
+            continue
         if _SHELL_PROMPT_RE.match(stripped):
             return ""
+        if prompt_seen:
+            return "waiting"
         return "thinking/working"
+    if prompt_seen:
+        return "waiting"
     return ""
 
 
