@@ -58,11 +58,17 @@ def _observe_context(*, status_table, status_details=None):
 
 
 class AcwObserveUnitTests(unittest.TestCase):
-    def test_watch_status_loop_refreshes_multiple_times_on_tty(self):
+    def test_watch_status_loop_repaints_only_when_content_changes(self):
         rendered: list[int] = []
-        cleared: list[int] = []
+        frames: list[tuple[bool, str]] = []
         slept: list[float] = []
-        output = io.StringIO()
+        statuses = iter(
+            [
+                "Sessions: 1\nrow one\n",
+                "Sessions: 1\nrow one\n",
+                "Sessions: 1\nrow two\n",
+            ]
+        )
 
         context = _observe_context(status_table=lambda resolved: rendered.append(len(resolved)))
 
@@ -71,21 +77,26 @@ class AcwObserveUnitTests(unittest.TestCase):
                 context,
                 [],
                 stdout_isatty_fn=lambda: True,
-                clear_screen_fn=lambda: cleared.append(1),
                 sleep_fn=lambda seconds: slept.append(seconds),
                 refresh_secs=0.5,
-                stop_after_iterations=2,
-                print_fn=lambda text="": output.write(text + "\n"),
+                stop_after_iterations=3,
+                render_status_text_fn=lambda _context, _argv: next(statuses),
+                write_frame_fn=lambda text, first_frame: frames.append((first_frame, text)),
             )
 
-        self.assertEqual([1, 1], rendered)
-        self.assertEqual([1, 1], cleared)
-        self.assertEqual([0.5], slept)
-        self.assertIn("Watching acw status", output.getvalue())
+        self.assertEqual([], rendered)
+        self.assertEqual([0.5, 0.5], slept)
+        self.assertEqual(2, len(frames))
+        self.assertEqual(
+            [
+                (True, "Watching acw status. Press Ctrl-C to exit.\n\nSessions: 1\nrow one\n"),
+                (False, "Watching acw status. Press Ctrl-C to exit.\n\nSessions: 1\nrow two\n"),
+            ],
+            frames,
+        )
 
     def test_watch_status_loop_falls_back_to_single_status_when_not_tty(self):
         rendered: list[int] = []
-        cleared: list[int] = []
         slept: list[float] = []
 
         context = _observe_context(status_table=lambda resolved: rendered.append(len(resolved)))
@@ -95,13 +106,10 @@ class AcwObserveUnitTests(unittest.TestCase):
                 context,
                 [],
                 stdout_isatty_fn=lambda: False,
-                clear_screen_fn=lambda: cleared.append(1),
                 sleep_fn=lambda seconds: slept.append(seconds),
-                print_fn=lambda text="": None,
             )
 
         self.assertEqual([1], rendered)
-        self.assertEqual([], cleared)
         self.assertEqual([], slept)
 
 

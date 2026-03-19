@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import time
 from dataclasses import dataclass
@@ -108,8 +110,24 @@ def render_status_once(
         context.print_status_recommendations(resolved)
 
 
-def _clear_screen() -> None:
-    sys.stdout.write("\x1b[2J\x1b[H")
+def render_status_text(
+    context: ObserveContext,
+    argv: list[str],
+) -> str:
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        render_status_once(context, argv)
+    return buffer.getvalue()
+
+
+def _write_watch_frame(text: str, *, first_frame: bool) -> None:
+    if first_frame:
+        sys.stdout.write("\x1b[2J\x1b[H")
+    else:
+        sys.stdout.write("\x1b[H\x1b[J")
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
+        sys.stdout.write("\n")
     sys.stdout.flush()
 
 
@@ -118,23 +136,30 @@ def watch_status_loop(
     argv: list[str],
     *,
     stdout_isatty_fn: Callable[[], bool] = lambda: sys.stdout.isatty(),
-    clear_screen_fn: Callable[[], None] = _clear_screen,
     sleep_fn: Callable[[float], None] = time.sleep,
     refresh_secs: float = 1.0,
     stop_after_iterations: int | None = None,
-    print_fn: Callable[[str], None] = print,
+    render_status_text_fn: Callable[[ObserveContext, list[str]], str] = render_status_text,
+    write_frame_fn: Callable[[str, bool], None] = lambda text, first_frame: _write_watch_frame(
+        text,
+        first_frame=first_frame,
+    ),
 ) -> None:
     if not stdout_isatty_fn():
         render_status_once(context, argv)
         return
 
     iterations = 0
+    last_frame = ""
+    first_frame = True
     try:
         while True:
-            clear_screen_fn()
-            print_fn("Watching acw status. Press Ctrl-C to exit.")
-            print_fn("")
-            render_status_once(context, argv)
+            frame = "Watching acw status. Press Ctrl-C to exit.\n\n"
+            frame += render_status_text_fn(context, argv)
+            if frame != last_frame:
+                write_frame_fn(frame, first_frame)
+                last_frame = frame
+                first_frame = False
             iterations += 1
             if stop_after_iterations is not None and iterations >= stop_after_iterations:
                 return
