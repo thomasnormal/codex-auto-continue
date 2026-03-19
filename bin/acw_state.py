@@ -27,6 +27,7 @@ _AGENT_DEFAULTS: dict[str, object] = {
     "health_detail": "",
     "health_ts": "",
     "last_continue_at": "",
+    "continue_count": 0,
     "last_handled_turn": "",
     "last_handled_thread": "",
 }
@@ -106,6 +107,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             health_detail TEXT NOT NULL DEFAULT '',
             health_ts TEXT NOT NULL DEFAULT '',
             last_continue_at TEXT NOT NULL DEFAULT '',
+            continue_count INTEGER NOT NULL DEFAULT 0,
             last_handled_turn TEXT NOT NULL DEFAULT '',
             last_handled_thread TEXT NOT NULL DEFAULT '',
             CHECK(agent_id <> ''),
@@ -152,6 +154,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_column(conn, "agents", "continue_count", "INTEGER NOT NULL DEFAULT 0")
 
 
 def _coerce_int(value: object) -> int:
@@ -159,6 +162,20 @@ def _coerce_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
+    return {
+        str(row[1]).strip()
+        for row in conn.execute(f"PRAGMA table_info({name})").fetchall()
+        if len(row) > 1 and str(row[1]).strip()
+    }
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if column in _table_columns(conn, table):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _meta_value(conn: sqlite3.Connection, key: str) -> str:
@@ -229,6 +246,7 @@ def _agent_from_row(row: sqlite3.Row | None) -> dict[str, object]:
             "health_detail": str(row["health_detail"]).strip() if "health_detail" in keys else "",
             "health_ts": str(row["health_ts"]).strip() if "health_ts" in keys else "",
             "last_continue_at": str(row["last_continue_at"]).strip() if "last_continue_at" in keys else "",
+            "continue_count": _coerce_int(row["continue_count"]) if "continue_count" in keys else 0,
             "last_handled_turn": str(row["last_handled_turn"]).strip() if "last_handled_turn" in keys else "",
             "last_handled_thread": str(row["last_handled_thread"]).strip()
             if "last_handled_thread" in keys
@@ -288,7 +306,7 @@ def _daemon_scope_from_row(row: sqlite3.Row | None) -> dict[str, object]:
 def _agent_query() -> str:
     return """
         SELECT agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
-               health, health_detail, health_ts, last_continue_at,
+               health, health_detail, health_ts, last_continue_at, continue_count,
                last_handled_turn, last_handled_thread
         FROM agents
     """
@@ -320,9 +338,9 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
         """
         INSERT INTO agents(
             agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
-            health, health_detail, health_ts, last_continue_at,
+            health, health_detail, health_ts, last_continue_at, continue_count,
             last_handled_turn, last_handled_thread
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             pane = excluded.pane,
@@ -335,6 +353,7 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             health_detail = excluded.health_detail,
             health_ts = excluded.health_ts,
             last_continue_at = excluded.last_continue_at,
+            continue_count = excluded.continue_count,
             last_handled_turn = excluded.last_handled_turn,
             last_handled_thread = excluded.last_handled_thread
         """,
@@ -351,6 +370,7 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             str(data["health_detail"]).strip(),
             str(data["health_ts"]).strip(),
             str(data["last_continue_at"]).strip(),
+            _coerce_int(data["continue_count"]),
             str(data["last_handled_turn"]).strip(),
             str(data["last_handled_thread"]).strip(),
         ),
@@ -465,6 +485,7 @@ def _migrate_session_payload(conn: sqlite3.Connection, payload: dict[str, object
             "health_detail": str(payload.get("health_detail", "")).strip(),
             "health_ts": str(payload.get("health_ts", "")).strip(),
             "last_continue_at": str(payload.get("last_continue_at", "")).strip(),
+            "continue_count": _coerce_int(payload.get("continue_count", 0)),
             "last_handled_turn": str(payload.get("last_handled_turn", "")).strip(),
             "last_handled_thread": str(payload.get("last_handled_thread", "")).strip(),
         }

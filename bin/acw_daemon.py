@@ -35,6 +35,7 @@ class SessionRuntime:
     runtime_detail: str = ""
     last_handled_turn: str = ""
     last_handled_thread: str = ""
+    continue_count: int = 0
     last_send_time: float = 0.0
     health: str = "ok"
     health_detail: str = ""
@@ -42,6 +43,26 @@ class SessionRuntime:
     watcher_start: float = 0.0
     interrupt_skip_armed: bool = False
     pending_startup_event: object | None = None
+
+
+def continue_count_for_watch_log(watch_log: str) -> int:
+    if not watch_log:
+        return 0
+    path = Path(watch_log)
+    if not path.is_file():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            return sum(1 for line in handle if "continue: sent" in line)
+    except OSError:
+        return 0
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def daemon_runtime_payload(runtime: SessionRuntime, *, now_ts) -> dict:
@@ -115,6 +136,9 @@ def daemon_session_runtime(
     next_runtime_id,
 ) -> SessionRuntime:
     state = read_session_state(session.thread_id)
+    continue_count = _coerce_int(state.get("continue_count", 0))
+    if continue_count <= 0:
+        continue_count = continue_count_for_watch_log(watch_log)
     runtime = SessionRuntime(
         thread_id=session.thread_id,
         pane=session.pane,
@@ -132,6 +156,7 @@ def daemon_session_runtime(
         last_handled_thread=str(
             state.get("last_handled_thread", state.get("last_sent_thread", state.get("thread_id", "")))
         ),
+        continue_count=continue_count,
         watcher_start=time.time(),
     )
     write_session_state(
@@ -144,6 +169,7 @@ def daemon_session_runtime(
             "paused": session.paused,
             "generation": session.generation,
             "tmux_socket": session.tmux_socket,
+            "continue_count": runtime.continue_count,
         },
     )
     append_log(Path(runtime.watch_log), f"watch: pane={runtime.pane} thread_id={runtime.thread_id}")
@@ -320,12 +346,14 @@ def daemon_process_session_events(
         )
         if send_result.status == "ok":
             runtime.last_send_time = time_module.time()
+            runtime.continue_count += 1
             daemon_mark_handled(runtime, event.turn_id, event.thread_id, write_session_state=write_session_state)
             write_session_state(
                 runtime.thread_id,
                 {
                     "thread_id": runtime.thread_id,
                     "last_continue_at": now_ts(),
+                    "continue_count": runtime.continue_count,
                     "health": runtime.health,
                     "health_detail": runtime.health_detail,
                 },

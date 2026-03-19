@@ -174,6 +174,23 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertIn("busy", status.stdout, self.harness.diagnostics())
         self.harness.wait_for_pane_contains("RUNBUSYDONE", timeout=30.0)
 
+    def test_status_shows_average_time_per_continue_via_real_cli(self):
+        self.harness.rename_window("avgacw")
+        self.harness.start_codex("say exactly AVGACW and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "avgacw", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.mutate_manager_session_state(
+            turn.thread_id,
+            last_continue_at="2026-03-19 12:34:56",
+            continue_count=1,
+        )
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("/acw", status.stdout, self.harness.diagnostics())
+
 
 if __name__ == "__main__":
     unittest.main()

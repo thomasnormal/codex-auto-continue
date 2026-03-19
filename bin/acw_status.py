@@ -31,7 +31,7 @@ def read_state_json(
         return result
     if state_path.startswith(session_ref_prefix):
         data = read_state_ref_fn(state_path, state_dir=state_dir)
-        for key in ("health", "health_detail", "health_ts", "last_continue_at", "thread_id"):
+        for key in ("health", "health_detail", "health_ts", "last_continue_at", "continue_count", "thread_id"):
             if key in data:
                 result[key] = str(data[key])
         return result
@@ -40,12 +40,59 @@ def read_state_json(
     try:
         with open(state_path) as handle:
             data = json.load(handle)
-        for key in ("health", "health_detail", "health_ts", "last_continue_at", "window_name", "thread_id"):
+        for key in (
+            "health",
+            "health_detail",
+            "health_ts",
+            "last_continue_at",
+            "continue_count",
+            "window_name",
+            "thread_id",
+        ):
             if key in data:
                 result[key] = str(data[key])
     except (OSError, json.JSONDecodeError):
         pass
     return result
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def continue_count_for_watch_log(watch_log: str) -> int:
+    if not watch_log or not os.path.isfile(watch_log):
+        return 0
+    try:
+        with open(watch_log, encoding="utf-8", errors="ignore") as handle:
+            return sum(1 for line in handle if "continue: sent" in line)
+    except OSError:
+        return 0
+
+
+def average_continue_label(
+    row: dict[str, str],
+    session_json: dict[str, str],
+    *,
+    thread_started_at_fn: Callable[[str], float | int | None],
+    continue_count_for_watch_log_fn: Callable[[str], int],
+    format_age_fn: Callable[[float, bool], str],
+    now_fn: Callable[[], float] = time.time,
+) -> str:
+    now = now_fn()
+    continue_count = _coerce_int(session_json.get("continue_count", "0"))
+    if continue_count <= 0:
+        continue_count = continue_count_for_watch_log_fn(row.get("watch", ""))
+    if continue_count <= 0:
+        return ""
+    started_at = thread_started_at_fn(row.get("thread", ""))
+    if not started_at:
+        return ""
+    average_secs = max(1, (now - float(started_at)) / continue_count)
+    return f"{format_age_fn(now - average_secs, True)}/acw"
 
 
 def resolve_message(
@@ -517,6 +564,7 @@ def status_table(
     compute_state_fn: Callable[[dict[str, str], dict[str, str]], str],
     status_row_detail_fn: Callable[[dict[str, str], dict[str, str]], str],
     thread_times_fn: Callable[[str, bool], tuple[str, str]],
+    average_continue_label_fn: Callable[[dict[str, str], dict[str, str]], str],
     format_age_fn: Callable[[float, bool], str],
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
     paused_activity_for_pane_fn: Callable[[str], str],
@@ -546,6 +594,9 @@ def status_table(
                 pass
         if not last_acw:
             last_acw = "-"
+        average_continue = average_continue_label_fn(row, session_json)
+        if average_continue:
+            last_acw = f"{last_acw}\n[dim]{average_continue}[/dim]"
         last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
         msg_raw = message_summary_for_row_fn(row)
         window_pane = status_window_pane_cell_fn(

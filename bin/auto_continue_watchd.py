@@ -1267,6 +1267,11 @@ def _thread_times(thread_id: str, compact: bool = False) -> tuple[str, str]:
     )
 
 
+def _thread_started_at(thread_id: str) -> int | None:
+    started_at, _last_activity_at = thread_times_from_state_db(thread_id)
+    return started_at
+
+
 def _thread_title(thread_id: str) -> str:
     return acw_probe.thread_title(thread_id, state_dir=STATE_DIR)
 
@@ -1588,6 +1593,13 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         compute_state_fn=_compute_state,
         status_row_detail_fn=_status_row_detail,
         thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
+        average_continue_label_fn=lambda row, session_json: acw_status.average_continue_label(
+            row,
+            session_json,
+            thread_started_at_fn=_thread_started_at,
+            continue_count_for_watch_log_fn=acw_status.continue_count_for_watch_log,
+            format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
+        ),
         format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
         paused_activity_for_pane_fn=_paused_activity_for_pane,
