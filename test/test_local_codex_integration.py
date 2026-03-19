@@ -147,6 +147,33 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertIn("busy", status.stdout, self.harness.diagnostics())
         self.harness.wait_for_pane_contains("BUSYDONE", timeout=30.0)
 
+    def test_status_shows_waiting_for_running_idle_runtime_via_real_cli(self):
+        self.harness.rename_window("runningwait")
+        self.harness.start_codex("say exactly RUNWAIT and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "runningwait", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("waiting", status.stdout, self.harness.diagnostics())
+
+    def test_status_shows_busy_for_running_busy_runtime_via_real_cli(self):
+        self.harness.rename_window("runningbusy")
+        self.harness.start_codex("say exactly RUNBUSY and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "runningbusy", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.send_codex_prompt("sleep 3 seconds then say exactly RUNBUSYDONE and nothing else")
+        self.harness.wait_for_pane_contains("working...", timeout=10.0)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("busy", status.stdout, self.harness.diagnostics())
+        self.harness.wait_for_pane_contains("RUNBUSYDONE", timeout=30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

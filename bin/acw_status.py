@@ -10,6 +10,8 @@ from typing import Callable
 
 _STATE_STYLES = {
     "running": "green",
+    "busy": "green",
+    "waiting": "cyan",
     "paused": "yellow",
     "warn": "dark_orange",
     "error": "bold red",
@@ -488,6 +490,13 @@ def paused_state_detail(activity: str, detail: str) -> str:
     return activity or detail
 
 
+def display_state(base_state: str, activity: str) -> str:
+    activity = activity.strip()
+    if base_state == "running" and activity in {"busy", "waiting"}:
+        return activity
+    return base_state
+
+
 def print_status_recommendations(
     resolved: list[tuple[dict[str, str], str, str]],
     *,
@@ -523,8 +532,10 @@ def status_table(
         session_json = read_state_json_fn(row["state"])
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
+        activity = paused_activity_for_pane_fn(current_pane) if state_value in {"running", "paused"} else ""
         if state_value == "paused":
-            state_detail = paused_state_detail(paused_activity_for_pane_fn(current_pane), state_detail)
+            state_detail = paused_state_detail(activity, state_detail)
+        rendered_state = display_state(state_value, activity)
         started, _last_activity = thread_times_fn(row["thread"], True)
         last_acw = session_json.get("last_continue_at", "")
         if last_acw:
@@ -546,7 +557,7 @@ def status_table(
         rows_data.append(
             (
                 window_pane,
-                state_summary_fn(state_value, {"health_detail": state_detail}),
+                state_summary_fn(rendered_state, {"health_detail": state_detail}),
                 started,
                 last_acw,
                 last_agent,
@@ -580,7 +591,7 @@ def status_details(
         session_json = read_state_json_fn(row["state"])
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
-        paused_activity = paused_activity_for_pane_fn(current_pane) if state_value == "paused" else ""
+        activity = paused_activity_for_pane_fn(current_pane) if state_value in {"running", "paused"} else ""
 
         last_event = "-"
         if row["watch"]:
@@ -612,8 +623,9 @@ def status_details(
         if provenance:
             print_fn(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
         print_fn(f"  {'STATE:':<16} {state_value}")
-        if paused_activity:
-            print_fn(f"  {'PAUSED_ACTIVITY:':<16} {paused_activity}")
+        if activity:
+            label = "PAUSED_ACTIVITY:" if state_value == "paused" else "ACTIVITY:"
+            print_fn(f"  {label:<16} {activity}")
         print_fn(f"  {'STARTED:':<16} {started}")
         print_fn(f"  {'LAST_ACTIVITY:':<16} {last_activity}")
         print_fn(f"  {'LAST_ACW:':<16} {last_acw}")
