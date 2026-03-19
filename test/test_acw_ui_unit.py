@@ -9,6 +9,12 @@ import acw_ui  # noqa: E402
 
 
 class AcwUiUnitTests(unittest.TestCase):
+    def test_status_time_markup_dims_labels_and_average_line(self):
+        self.assertEqual(
+            "[dim]s:[/dim] 1d\n[dim]l:[/dim] 5m\n[dim]a: 20m[/dim]",
+            acw_ui.status_time_markup("s: 1d\nl: 5m\na: 20m"),
+        )
+
     def test_build_status_table_renderable_uses_combined_time_column(self):
         from rich.console import Console
 
@@ -30,6 +36,10 @@ class AcwUiUnitTests(unittest.TestCase):
         text = console.export_text(styles=False)
 
         self.assertIn("TIME", text)
+        self.assertIn("LAST AGENT MESSAGE", text)
+        self.assertIn("CONTINUE MESSAGE", text)
+        self.assertNotIn("LAST_AGENT", text)
+        self.assertNotIn("\nMESSAGE\n", text)
         self.assertNotIn("STARTED", text)
         self.assertNotIn("LAST_ACW", text)
         self.assertIn("s: 1d", text)

@@ -50,12 +50,29 @@ def strip_rich_markup(text: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", text)
 
 
+def status_time_markup(time_cell: str) -> str:
+    lines: list[str] = []
+    for raw_line in time_cell.splitlines():
+        line = raw_line.strip()
+        if not line:
+            lines.append(line)
+            continue
+        if line.startswith("a:"):
+            lines.append(f"[dim]{line}[/dim]")
+            continue
+        if len(line) >= 2 and line[1] == ":":
+            lines.append(f"[dim]{line[:2]}[/dim]{line[2:]}")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def status_table_plain(
     rows_data: list[tuple[str, ...]],
     *,
     section_every: int,
 ) -> None:
-    headers = ("WINDOW/PANE", "STATE", "TIME", "LAST_AGENT", "MESSAGE")
+    headers = ("WINDOW/PANE", "STATE", "TIME", "LAST AGENT MESSAGE", "CONTINUE MESSAGE")
     plain_rows: list[tuple[str, str, str, str, str]] = []
     for row in rows_data:
         plain_rows.append(
@@ -127,15 +144,15 @@ def build_status_table_renderable(
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
     table.add_column("TIME", no_wrap=True)
-    table.add_column("LAST_AGENT", ratio=2, max_width=last_agent_col_w)
-    table.add_column("MESSAGE", ratio=1, max_width=msg_col_w)
+    table.add_column("LAST AGENT MESSAGE", ratio=2, max_width=last_agent_col_w)
+    table.add_column("CONTINUE MESSAGE", ratio=1, max_width=msg_col_w)
 
     for idx, row in enumerate(rows_data, 1):
         window_pane, state_value, time_cell, last_agent, msg_raw = _normalize_status_row(row)
         table.add_row(
             Text.from_markup(window_pane),
             Text.from_markup(state_value),
-            Text.from_markup(time_cell),
+            Text.from_markup(status_time_markup(time_cell)),
             Text.from_markup(clamp_visual_lines(last_agent, max_msg_lines, last_agent_col_w)),
             Text.from_markup(clamp_visual_lines(msg_raw, max_msg_lines, msg_col_w)),
         )
