@@ -52,6 +52,32 @@ class AcwProbeUnitTests(unittest.TestCase):
 
         self.assertEqual("busy", acw_probe.paused_activity_from_pane_text(text))
 
+    def test_paused_activity_keeps_scanning_above_prompt_for_busy_indicator(self):
+        text = (
+            "• Both phase-hopper locals are already stale on today’s build.\n"
+            "\n"
+            "◦ Waiting for background terminal (1h 17m 17s • esc to interrupt) · "
+            "1 background terminal running · /ps to view · /clean to close\n"
+            "  └ set -euo pipefail…\n"
+            "\n"
+            "› Explain this codebase\n"
+            "\n"
+            "  gpt-5.4 xhigh · 45% left · ~/circt\n"
+        )
+
+        self.assertEqual("busy", acw_probe.paused_activity_from_pane_text(text))
+
+    def test_paused_activity_ignores_stale_working_line_once_prompt_returns(self):
+        text = (
+            "working...\n"
+            "\n"
+            "• RUNWAIT\n"
+            "\n"
+            "›\n"
+        )
+
+        self.assertEqual("waiting", acw_probe.paused_activity_from_pane_text(text))
+
 
 if __name__ == "__main__":
     unittest.main()

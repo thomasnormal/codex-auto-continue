@@ -11,8 +11,12 @@ from acw_ids import is_thread_id
 
 _PANE_CHROME_ONLY_RE = re.compile(r"^[\s─━╭╮╰╯│┌┐└┘═]+$")
 _SHELL_PROMPT_RE = re.compile(r"^\[[^\]]+\]\$\s*$")
-_WORKING_STATUS_RE = re.compile(
-    r"^(?:[•◦]\s*)?(?:working(?:\.\.\.)?|messages to be submitted after next tool call)\b",
+_SOFT_WORKING_STATUS_RE = re.compile(
+    r"^(?:[•◦]\s*)?working(?:\.\.\.)?\b",
+    re.IGNORECASE,
+)
+_HARD_WORKING_STATUS_RE = re.compile(
+    r"^(?:[•◦]\s*)?(?:messages to be submitted after next tool call|waiting for background terminal)\b",
     re.IGNORECASE,
 )
 
@@ -298,12 +302,13 @@ def paused_activity_from_pane_text(text: str) -> str:
     if not text:
         return ""
     prompt_seen = False
+    shell_prompt_seen = False
     for raw in reversed(text.splitlines()):
         stripped = raw.strip()
         if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
             continue
 
-        if _WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
+        if _HARD_WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
             return "busy"
 
         lowered = stripped.lower()
@@ -323,12 +328,18 @@ def paused_activity_from_pane_text(text: str) -> str:
             prompt_seen = True
             continue
         if _SHELL_PROMPT_RE.match(stripped):
-            return ""
-        if prompt_seen:
-            return "waiting"
-        return "busy"
+            shell_prompt_seen = True
+            continue
+        if _SOFT_WORKING_STATUS_RE.match(stripped):
+            if not prompt_seen:
+                return "busy"
+            continue
+        if not prompt_seen:
+            return "busy"
     if prompt_seen:
         return "waiting"
+    if shell_prompt_seen:
+        return ""
     return ""
 
 
