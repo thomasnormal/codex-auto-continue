@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 import acw_observe  # noqa: E402
 
 
-def _observe_context(*, status_table, status_details=None):
+def _observe_context(*, status_table, status_details=None, run_watch_command=None):
     if status_details is None:
         status_details = lambda resolved, model=None: None
     return acw_observe.ObserveContext(
@@ -55,10 +55,20 @@ def _observe_context(*, status_table, status_details=None):
         print_doctor_plain=lambda report: None,
         print_doctor_rich=lambda report: None,
         short_thread_id=lambda thread_id: thread_id[:8],
+        run_watch_command=run_watch_command,
     )
 
 
 class AcwObserveUnitTests(unittest.TestCase):
+    def test_parse_watch_command_supports_aliases(self):
+        self.assertEqual(["edit", "uvm"], acw_observe.parse_watch_command("e uvm"))
+        self.assertEqual(["pause", "formal"], acw_observe.parse_watch_command("pause formal"))
+        self.assertEqual(["restart"], acw_observe.parse_watch_command("r"))
+
+    def test_parse_watch_command_rejects_unknown_command(self):
+        with self.assertRaisesRegex(ValueError, "unsupported command"):
+            acw_observe.parse_watch_command("frobnicate uvm")
+
     def test_watch_status_loop_repaints_only_when_content_changes_in_text_mode(self):
         rendered: list[int] = []
         frames: list[tuple[bool, str]] = []
@@ -157,6 +167,58 @@ class AcwObserveUnitTests(unittest.TestCase):
 
         self.assertEqual([1], rendered)
         self.assertEqual([], slept)
+
+    def test_watch_status_loop_dispatches_interactive_command_in_text_mode(self):
+        frames: list[tuple[bool, str]] = []
+        commands: list[list[str]] = []
+
+        class FakeInput:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def read(self, timeout: float) -> str:
+                if not hasattr(self, "_calls"):
+                    self._calls = 0
+                self._calls += 1
+                if self._calls == 1:
+                    return "e formal\r"
+                return ""
+
+            @contextlib.contextmanager
+            def pause(self):
+                yield
+
+        def _run_watch_command(argv: list[str]) -> None:
+            commands.append(argv)
+            print("edit: message unchanged")
+
+        context = _observe_context(
+            status_table=lambda resolved: None,
+            run_watch_command=_run_watch_command,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            acw_observe.watch_status_loop(
+                context,
+                [],
+                stdout_isatty_fn=lambda: True,
+                stdin_isatty_fn=lambda: True,
+                refresh_secs=0.5,
+                stop_after_iterations=2,
+                render_status_text_fn=lambda _context, _argv: "Sessions: 1\nrow one\n",
+                write_frame_fn=lambda text, first_frame: frames.append((first_frame, text)),
+                live_display_factory=None,
+                input_controller_factory=FakeInput,
+                monotonic_fn=lambda: 0.0,
+            )
+
+        self.assertEqual([["edit", "formal"]], commands)
+        self.assertEqual(2, len(frames))
+        self.assertIn("> ", frames[0][1])
+        self.assertIn("edit: message unchanged", frames[1][1])
 
 
 if __name__ == "__main__":

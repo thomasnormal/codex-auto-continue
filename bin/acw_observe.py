@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import select
+import shlex
 import sys
 import time
 from dataclasses import dataclass
@@ -15,6 +18,12 @@ class DoctorReport:
     result: str
     exit_code: int
     recommendations: list[str]
+
+
+@dataclass(frozen=True)
+class WatchCommandFeedback:
+    text: str
+    style: str
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,10 @@ class ObserveContext:
     print_doctor_plain: Callable[[DoctorReport], None]
     print_doctor_rich: Callable[[DoctorReport], None]
     short_thread_id: Callable[[str], str]
+    run_watch_command: Callable[[list[str]], None] | None = None
+
+
+_WATCH_COMMAND_HELP = "Commands: e/edit <target>, pause [target], restart [target]"
 
 
 def _status_args(argv: list[str]) -> tuple[str, bool]:
@@ -107,6 +120,155 @@ def render_status_live_frame(
         print_resolution=False,
     )
     return context.status_watch_frame(resolved)
+
+
+def parse_watch_command(command_text: str) -> list[str]:
+    stripped = command_text.strip()
+    if not stripped:
+        return []
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError as exc:
+        raise ValueError(f"invalid command: {exc}") from exc
+    if not tokens:
+        return []
+    if tokens[0] == "acw":
+        tokens = tokens[1:]
+        if not tokens:
+            raise ValueError("expected a command after 'acw'")
+    cmd = tokens[0].lower()
+    aliases = {
+        "?": "help",
+        "h": "help",
+        "e": "edit",
+        "p": "pause",
+        "r": "restart",
+    }
+    cmd = aliases.get(cmd, cmd)
+    if cmd not in {"help", "edit", "pause", "restart"}:
+        raise ValueError(f"unsupported command '{tokens[0]}'; {_WATCH_COMMAND_HELP.lower()}")
+    tokens[0] = cmd
+    return tokens
+
+
+def _trim_feedback_lines(text: str, *, max_lines: int = 8) -> str:
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    return "\n".join(["..."] + lines[-(max_lines - 1) :])
+
+
+def run_watch_command(
+    context: ObserveContext,
+    command_text: str,
+) -> WatchCommandFeedback | None:
+    try:
+        argv = parse_watch_command(command_text)
+    except ValueError as exc:
+        return WatchCommandFeedback(str(exc), "bold red")
+
+    if not argv:
+        return None
+    if argv[0] == "help":
+        return WatchCommandFeedback(_WATCH_COMMAND_HELP, "yellow")
+    if context.run_watch_command is None:
+        return WatchCommandFeedback("interactive commands are unavailable in this build", "bold red")
+
+    output = io.StringIO()
+    exit_code = 0
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            context.run_watch_command(argv)
+        except SystemExit as exc:
+            if isinstance(exc.code, str) and exc.code.strip():
+                print(exc.code)
+            exit_code = exc.code if isinstance(exc.code, int) else 1
+
+    text = _trim_feedback_lines(output.getvalue())
+    if not text:
+        rendered = " ".join(argv)
+        text = f"ok: {rendered}" if exit_code == 0 else f"error: {rendered}"
+    style = "bold red" if exit_code else "green"
+    return WatchCommandFeedback(text, style)
+
+
+def _consume_watch_input(
+    buffer: str,
+    chars: str,
+) -> tuple[str, list[str], bool]:
+    current = buffer
+    submitted: list[str] = []
+    changed = False
+
+    for ch in chars:
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch in ("\r", "\n"):
+            if current.strip():
+                submitted.append(current.strip())
+            current = ""
+            changed = True
+            continue
+        if ch in ("\x7f", "\b"):
+            if current:
+                current = current[:-1]
+                changed = True
+            continue
+        if ch == "\x15":
+            if current:
+                current = ""
+                changed = True
+            continue
+        if ch.isprintable():
+            current += ch
+            changed = True
+
+    return current, submitted, changed
+
+
+class _CbreakInput:
+    def __init__(self) -> None:
+        self._fd = sys.stdin.fileno()
+        self._saved_attrs: Any | None = None
+        self._cbreak_attrs: Any | None = None
+
+    def __enter__(self) -> "_CbreakInput":
+        import termios
+
+        self._saved_attrs = termios.tcgetattr(self._fd)
+        self._cbreak_attrs = termios.tcgetattr(self._fd)
+        self._cbreak_attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        self._cbreak_attrs[6][termios.VMIN] = 1
+        self._cbreak_attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(self._fd, termios.TCSANOW, self._cbreak_attrs)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        import termios
+
+        if self._saved_attrs is not None:
+            termios.tcsetattr(self._fd, termios.TCSANOW, self._saved_attrs)
+
+    def read(self, timeout: float) -> str:
+        ready, _, _ = select.select([self._fd], [], [], timeout)
+        if self._fd not in ready:
+            return ""
+        data = os.read(self._fd, 1024)
+        return data.decode("utf-8", errors="ignore")
+
+    @contextlib.contextmanager
+    def pause(self):
+        import termios
+
+        if self._saved_attrs is None:
+            yield
+            return
+        termios.tcsetattr(self._fd, termios.TCSANOW, self._saved_attrs)
+        try:
+            yield
+        finally:
+            if self._cbreak_attrs is not None:
+                termios.tcsetattr(self._fd, termios.TCSANOW, self._cbreak_attrs)
 
 
 def _write_watch_frame(text: str, *, first_frame: bool) -> None:
@@ -184,12 +346,170 @@ class _RichLiveDisplay:
     def update(self, renderable: Any) -> None:
         self._live.update(renderable, refresh=True)
 
+    @contextlib.contextmanager
+    def pause(self):
+        self._live.stop()
+        try:
+            yield
+        finally:
+            self._live.start(refresh=True)
+
+
+def _wrap_watch_renderable(
+    renderable: Any,
+    command_buffer: str,
+    feedback: WatchCommandFeedback | None,
+) -> Any:
+    from rich.console import Group
+    from rich.text import Text
+
+    renderables: list[Any] = [renderable]
+    if feedback and feedback.text:
+        renderables.append(Text(feedback.text, style=feedback.style))
+    renderables.append(Text(f"> {command_buffer}", style="bold cyan" if command_buffer else "cyan"))
+    return Group(*renderables)
+
+
+def _build_watch_text_frame(
+    status_text: str,
+    command_buffer: str,
+    feedback: WatchCommandFeedback | None,
+) -> str:
+    parts = ["Watching acw status. Press Ctrl-C to exit.", "", status_text.rstrip("\n")]
+    if feedback and feedback.text:
+        parts.extend(["", feedback.text])
+    parts.extend(["", f"> {command_buffer}"])
+    return "\n".join(parts) + "\n"
+
+
+@contextlib.contextmanager
+def _null_pause():
+    yield
+
+
+def _interactive_watch_loop(
+    context: ObserveContext,
+    argv: list[str],
+    *,
+    use_live: bool,
+    sleep_fn: Callable[[float], None],
+    refresh_secs: float,
+    stop_after_iterations: int | None,
+    render_status_text_fn: Callable[[ObserveContext, list[str]], str],
+    render_status_live_frame_fn: Callable[[ObserveContext, list[str]], tuple[str, Any]],
+    write_frame_fn: Callable[[str, bool], None],
+    live_display_factory: Callable[[], Any] | None,
+    input_controller_factory: Callable[[], Any],
+    monotonic_fn: Callable[[], float],
+) -> None:
+    command_buffer = ""
+    feedback: WatchCommandFeedback | None = None
+    iterations = 0
+    last_frame_key = ""
+    first_frame = True
+    next_refresh = 0.0
+    base_frame_key = ""
+    base_renderable: Any = None
+    base_text = ""
+
+    def refresh_base() -> None:
+        nonlocal base_frame_key, base_renderable, base_text, next_refresh
+        if use_live:
+            base_frame_key, base_renderable = render_status_live_frame_fn(context, argv)
+        else:
+            base_text = render_status_text_fn(context, argv)
+            base_frame_key = base_text
+        next_refresh = monotonic_fn() + refresh_secs
+
+    def render_current(live: Any | None = None) -> None:
+        nonlocal last_frame_key, first_frame
+        frame_key = repr(
+            (
+                base_frame_key,
+                command_buffer,
+                feedback.text if feedback else "",
+                feedback.style if feedback else "",
+            )
+        )
+        if frame_key == last_frame_key:
+            return
+        if use_live:
+            live.update(_wrap_watch_renderable(base_renderable, command_buffer, feedback))
+        else:
+            write_frame_fn(
+                _build_watch_text_frame(base_text, command_buffer, feedback),
+                first_frame,
+            )
+            first_frame = False
+        last_frame_key = frame_key
+
+    def execute_submitted_commands(
+        submitted: list[str],
+        *,
+        live: Any | None = None,
+        input_controller: Any | None = None,
+    ) -> None:
+        nonlocal feedback
+        for command_text in submitted:
+            display_pause = live.pause() if live is not None and hasattr(live, "pause") else _null_pause()
+            input_pause = input_controller.pause() if input_controller is not None and hasattr(input_controller, "pause") else _null_pause()
+            with display_pause, input_pause:
+                feedback = run_watch_command(context, command_text)
+
+    with input_controller_factory() as input_controller:
+        live_context = None
+        if use_live:
+            try:
+                live_context = live_display_factory() if live_display_factory is not None else None
+            except ModuleNotFoundError:
+                live_context = None
+            if live_context is None:
+                use_live = False
+        if use_live and live_context is not None:
+            with live_context as live:
+                while True:
+                    if monotonic_fn() >= next_refresh:
+                        refresh_base()
+                    render_current(live)
+                    iterations += 1
+                    if stop_after_iterations is not None and iterations >= stop_after_iterations:
+                        return
+                    timeout = max(0.0, next_refresh - monotonic_fn())
+                    chars = input_controller.read(timeout)
+                    if not chars:
+                        continue
+                    command_buffer, submitted, changed = _consume_watch_input(command_buffer, chars)
+                    if changed and not submitted:
+                        feedback = None
+                    if submitted:
+                        execute_submitted_commands(submitted, live=live, input_controller=input_controller)
+                        refresh_base()
+        else:
+            while True:
+                if monotonic_fn() >= next_refresh:
+                    refresh_base()
+                render_current()
+                iterations += 1
+                if stop_after_iterations is not None and iterations >= stop_after_iterations:
+                    return
+                timeout = max(0.0, next_refresh - monotonic_fn())
+                chars = input_controller.read(timeout)
+                if not chars:
+                    continue
+                command_buffer, submitted, changed = _consume_watch_input(command_buffer, chars)
+                if changed and not submitted:
+                    feedback = None
+                if submitted:
+                    execute_submitted_commands(submitted, input_controller=input_controller)
+                    refresh_base()
+
 
 def watch_status_loop(
     context: ObserveContext,
     argv: list[str],
     *,
     stdout_isatty_fn: Callable[[], bool] = lambda: sys.stdout.isatty(),
+    stdin_isatty_fn: Callable[[], bool] = lambda: sys.stdin.isatty(),
     sleep_fn: Callable[[float], None] = time.sleep,
     refresh_secs: float = 1.0,
     stop_after_iterations: int | None = None,
@@ -200,6 +520,8 @@ def watch_status_loop(
         first_frame=first_frame,
     ),
     live_display_factory: Callable[[], Any] | None = _RichLiveDisplay,
+    input_controller_factory: Callable[[], Any] | None = _CbreakInput,
+    monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> None:
     if not stdout_isatty_fn():
         render_status_once(context, argv)
@@ -207,6 +529,22 @@ def watch_status_loop(
 
     _pane_arg, details = _status_args(argv)
     use_live = live_display_factory is not None and not details
+    if stdin_isatty_fn() and input_controller_factory is not None:
+        _interactive_watch_loop(
+            context,
+            argv,
+            use_live=use_live,
+            sleep_fn=sleep_fn,
+            refresh_secs=refresh_secs,
+            stop_after_iterations=stop_after_iterations,
+            render_status_text_fn=render_status_text_fn,
+            render_status_live_frame_fn=render_status_live_frame_fn,
+            write_frame_fn=write_frame_fn,
+            live_display_factory=live_display_factory,
+            input_controller_factory=input_controller_factory,
+            monotonic_fn=monotonic_fn,
+        )
+        return
     iterations = 0
     last_frame = ""
     first_frame = True

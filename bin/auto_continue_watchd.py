@@ -1686,6 +1686,25 @@ def cmd_watch(argv: list[str]) -> None:
     acw_observe.cmd_watch(_observe_context(), argv)
 
 
+def _run_watch_command(argv: list[str]) -> None:
+    if not argv:
+        return
+    subcmd = argv[0]
+    rest = argv[1:]
+    if subcmd in ("restart", "edit"):
+        cleanup_stale_files()
+    commands = {
+        "edit": cmd_edit,
+        "pause": cmd_pause,
+        "restart": cmd_restart,
+    }
+    handler = commands.get(subcmd)
+    if handler is None:
+        print(f"error: unsupported interactive command '{subcmd}'", file=sys.stderr)
+        sys.exit(2)
+    handler(rest)
+
+
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
@@ -1797,6 +1816,7 @@ def _observe_context() -> acw_observe.ObserveContext:
         print_doctor_plain=_print_doctor_plain,
         print_doctor_rich=_print_doctor_rich,
         short_thread_id=_short_thread_id,
+        run_watch_command=_run_watch_command,
     )
 
 

@@ -48,7 +48,7 @@ def build_help_text(prog: str) -> str:
   {prog} doctor [target]
 
 Commands:
-  watch     Continuously refresh managed session state. Default command when no subcommand is given in an interactive terminal.
+  watch     Continuously refresh managed session state. In an interactive terminal you can also type e/edit, pause, or restart commands directly in the watch view. Default command when no subcommand is given in an interactive terminal.
   status    Show managed session state once. Default command when no subcommand is given without a TTY.
   start     Start managing a live tmux target. Auto-detect the Codex thread unless you pass one explicitly.
   stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.

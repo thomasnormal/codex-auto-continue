@@ -282,6 +282,60 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
                 proc.wait(timeout=5.0)
             os.close(master_fd)
 
+    def test_bare_acw_accepts_pause_command_over_pty(self):
+        self.harness.rename_window("watchpause")
+        self.harness.start_codex("say exactly WATCHPAUSE and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+        self.harness.run_manager("start", "watchpause", "--message", "INITIALPROMPT")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            ["python3", str(ROOT / "bin" / "auto_continue_watchd.py")],
+            env=self.harness.process_env,
+            cwd=str(ROOT),
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            text=False,
+            preexec_fn=lambda: os.umask(0o077),
+        )
+        os.close(slave_fd)
+
+        def _read_until(needle: str, timeout: float = 15.0) -> str:
+            end = time.time() + timeout
+            data = b""
+            while time.time() < end:
+                ready, _, _ = select.select([master_fd], [], [], 0.2)
+                if master_fd in ready:
+                    chunk = os.read(master_fd, 65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    text = data.decode("utf-8", errors="ignore")
+                    if needle in text:
+                        return text
+            raise AssertionError(
+                f"did not observe {needle!r}\n{data.decode('utf-8', errors='ignore')}\n{self.harness.diagnostics()}"
+            )
+
+        try:
+            first = _read_until("INITIALPROMPT")
+            self.assertIn("Watching acw status", first, self.harness.diagnostics())
+            os.write(master_fd, b"pause watchpause\r")
+            self.harness.wait_for_manager_watcher_paused_in_pane(pane)
+            second = _read_until("paused: pane=")
+            self.assertIn("paused: pane=", second, self.harness.diagnostics())
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+            os.close(master_fd)
+
 
 if __name__ == "__main__":
     unittest.main()
