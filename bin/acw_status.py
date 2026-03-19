@@ -12,6 +12,7 @@ _STATE_STYLES = {
     "running": "green",
     "busy": "green",
     "waiting": "cyan",
+    "input": "magenta",
     "paused": "yellow",
     "warn": "dark_orange",
     "error": "bold red",
@@ -553,7 +554,7 @@ def paused_state_detail(activity: str, detail: str) -> str:
 
 def display_state(base_state: str, activity: str) -> str:
     activity = activity.strip()
-    if base_state == "running" and activity in {"busy", "waiting"}:
+    if base_state == "running" and activity in {"busy", "waiting", "input"}:
         return activity
     return base_state
 

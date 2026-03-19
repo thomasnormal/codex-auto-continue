@@ -127,6 +127,10 @@ def _prompt_sleep_secs(prompt: str) -> float:
         return 0.0
 
 
+def _is_test_approval_prompt(prompt: str) -> bool:
+    return "show approval prompt" in prompt.lower()
+
+
 def _is_continue_prompt(prompt: str) -> bool:
     lowered = " ".join(prompt.lower().split())
     if not lowered:
@@ -148,6 +152,22 @@ def _emit_completion(log_path: Path, thread_id: str, turn_id: str) -> None:
     )
 
 
+def _render_test_approval_prompt(out) -> None:
+    out.write(
+        "\n"
+        "Reviewing approval request\n"
+        "\n"
+        "Tool call needs your approval. Reason: network access outside the allowlist.\n"
+        "Do you want to approve network access to \"https://example.com\"?\n"
+        "\n"
+        "› 1. Yes, allow\n"
+        "  2. No, continue without permissions\n"
+        "\n"
+        "  ctrl + p / ctrl + n change field\n"
+    )
+    out.flush()
+
+
 def _handle_prompt(
     prompt: str,
     *,
@@ -156,15 +176,18 @@ def _handle_prompt(
     thread_id: str,
     process_uuid: str,
     out,
-) -> None:
+) -> bool:
     prompt = prompt.strip()
     if not prompt:
-        return
+        return True
     if _is_continue_prompt(prompt):
-        return
+        return True
     ts, _ = _now_parts()
     _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
     _append_log_row(conn, thread_id, process_uuid)
+    if _is_test_approval_prompt(prompt):
+        _render_test_approval_prompt(out)
+        return False
     out.write("\nworking...\n")
     out.flush()
     sleep_secs = _prompt_sleep_secs(prompt)
@@ -174,6 +197,7 @@ def _handle_prompt(
     out.write(f"\n• {response}\n\n")
     out.flush()
     _emit_completion(log_path, thread_id, _new_id())
+    return True
 
 
 def main(argv: list[str]) -> int:
@@ -223,16 +247,33 @@ def main(argv: list[str]) -> int:
         ts, _ = _now_parts()
         _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
         _log_line(log_path, f"session_init:shell_snapshot{{thread_id={thread_id}}}: codex_core::shell_snapshot: new")
+        show_prompt = True
         if prompt:
-            _handle_prompt(prompt, conn=conn, log_path=log_path, thread_id=thread_id, process_uuid=process_uuid, out=sys.stdout)
-        _show_prompt(sys.stdout)
+            show_prompt = _handle_prompt(
+                prompt,
+                conn=conn,
+                log_path=log_path,
+                thread_id=thread_id,
+                process_uuid=process_uuid,
+                out=sys.stdout,
+            )
+        if show_prompt:
+            _show_prompt(sys.stdout)
         while True:
             line = tty.readline()
             if line == "":
                 break
             _clear_prompt(sys.stdout)
-            _handle_prompt(line, conn=conn, log_path=log_path, thread_id=thread_id, process_uuid=process_uuid, out=sys.stdout)
-            _show_prompt(sys.stdout)
+            show_prompt = _handle_prompt(
+                line,
+                conn=conn,
+                log_path=log_path,
+                thread_id=thread_id,
+                process_uuid=process_uuid,
+                out=sys.stdout,
+            )
+            if show_prompt:
+                _show_prompt(sys.stdout)
     finally:
         if tty is not None and tty_restore is not None:
             try:

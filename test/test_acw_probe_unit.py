@@ -10,6 +10,40 @@ import acw_probe  # noqa: E402
 
 
 class AcwProbeUnitTests(unittest.TestCase):
+    def test_paused_activity_from_pane_text_detects_directory_trust_prompt_as_input(self):
+        text = (
+            "> You are in /home/thomas-ahle/codex-auto-continue\n"
+            "\n"
+            "  Do you trust the contents of this directory? Working with untrusted contents comes with "
+            "higher risk of prompt injection.\n"
+            "\n"
+            "› 1. Yes, continue\n"
+            "  2. No, quit\n"
+            "\n"
+            "  Press enter to continue\n"
+            "\n"
+            "╭──────────────────────────────────────────────────╮\n"
+            "│ >_ OpenAI Codex (v0.114.0)                       │\n"
+            "╰──────────────────────────────────────────────────╯\n"
+        )
+
+        self.assertEqual("input", acw_probe.paused_activity_from_pane_text(text))
+
+    def test_paused_activity_from_pane_text_detects_tool_approval_prompt_as_input(self):
+        text = (
+            "Reviewing approval request\n"
+            "\n"
+            "Tool call needs your approval. Reason: network access outside the allowlist.\n"
+            "Do you want to approve network access to \"https://example.com\"?\n"
+            "\n"
+            "› 1. Yes, allow\n"
+            "  2. No, continue without permissions\n"
+            "\n"
+            "  ctrl + p / ctrl + n change field\n"
+        )
+
+        self.assertEqual("input", acw_probe.paused_activity_from_pane_text(text))
+
     def test_paused_activity_from_pane_text_detects_waiting_for_input(self):
         text = (
             "Running scope as unit: run-r45f69361fa3c4de882dca4bdf4996f6b.scope\n"
@@ -77,6 +111,18 @@ class AcwProbeUnitTests(unittest.TestCase):
         )
 
         self.assertEqual("waiting", acw_probe.paused_activity_from_pane_text(text))
+
+    def test_extract_last_agent_snippet_ignores_approval_prompt_chrome(self):
+        text = (
+            "• The previous real agent update.\n"
+            "\n"
+            "Reviewing approval request\n"
+            "Tool call needs your approval. Reason: network access outside the allowlist.\n"
+            "› 1. Yes, allow\n"
+            "  2. No, continue without permissions\n"
+        )
+
+        self.assertEqual("The previous real agent update.", acw_probe.extract_last_agent_snippet(text))
 
 
 if __name__ == "__main__":

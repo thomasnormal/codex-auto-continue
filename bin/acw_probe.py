@@ -19,6 +19,34 @@ _HARD_WORKING_STATUS_RE = re.compile(
     r"^(?:[•◦]\s*)?(?:messages to be submitted after next tool call|waiting for background terminal)\b",
     re.IGNORECASE,
 )
+_INPUT_REQUIRED_PROMPT_RE = re.compile(
+    r"(?:do you trust the contents of this directory\?|tool call needs your approval|"
+    r"do you want to approve network access to |enable full access\?|reviewing approval request)",
+    re.IGNORECASE,
+)
+_INPUT_REQUIRED_CHOICE_RE = re.compile(
+    r"^(?:[› ]\s*)?(?:\d+\.\s*)?(?:"
+    r"yes,\s*(?:continue|allow|continue anyway)|"
+    r"no,\s*(?:quit|continue without permissions)|"
+    r"yes,\s*and don't ask again|"
+    r"apply full access for this session|"
+    r"go back without enabling full access"
+    r")\b",
+    re.IGNORECASE,
+)
+_INPUT_REQUIRED_HELP_RE = re.compile(
+    r"^(?:press enter to continue|ctrl \+ p / ctrl \+ n change field)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_pane_state_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return ""
+    line = re.sub(r"^[│└┌┐┘┙┚┛┕┖┗┓┏]+\s*", "", line)
+    line = re.sub(r"\s*[│┘┙┚┛┐┑┒┓]+$", "", line)
+    return line.strip()
 
 
 def _freeze_multimap(mapping: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
@@ -243,6 +271,12 @@ def clean_pane_line_candidate(line: str) -> tuple[str, bool]:
         return "", False
     if "do you trust the contents of this directory?" in lowered:
         return "", False
+    if _INPUT_REQUIRED_PROMPT_RE.search(stripped):
+        return "", False
+    if _INPUT_REQUIRED_CHOICE_RE.match(stripped):
+        return "", False
+    if _INPUT_REQUIRED_HELP_RE.match(stripped):
+        return "", False
     if "? for shortcuts" in stripped:
         return "", False
     if "context left" in stripped and "gpt-" in stripped:
@@ -303,16 +337,27 @@ def paused_activity_from_pane_text(text: str) -> str:
         return ""
     prompt_seen = False
     shell_prompt_seen = False
+    input_prompt_seen = False
     for raw in reversed(text.splitlines()):
-        stripped = raw.strip()
+        stripped = _normalize_pane_state_line(raw)
         if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
             continue
 
+        if _INPUT_REQUIRED_PROMPT_RE.search(stripped):
+            if not prompt_seen:
+                return "input"
+            continue
+        if _INPUT_REQUIRED_CHOICE_RE.match(stripped) or _INPUT_REQUIRED_HELP_RE.match(stripped):
+            if not prompt_seen:
+                input_prompt_seen = True
+            continue
         if _HARD_WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
             return "busy"
 
         lowered = stripped.lower()
-        if stripped.startswith(("Tip:", "model:", "directory:", "Press enter to continue")):
+        if stripped.startswith(("Tip:", "model:", "directory:")):
+            continue
+        if stripped.startswith(">_ OpenAI Codex"):
             continue
         if stripped.startswith(("1. Yes", "2. No", "> You are in ", "Running scope as unit:")):
             continue
@@ -336,6 +381,8 @@ def paused_activity_from_pane_text(text: str) -> str:
             continue
         if not prompt_seen:
             return "busy"
+    if input_prompt_seen:
+        return "input"
     if prompt_seen:
         return "waiting"
     if shell_prompt_seen:

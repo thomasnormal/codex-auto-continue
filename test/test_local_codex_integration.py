@@ -178,6 +178,20 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertIn("busy", status.stdout, self.harness.diagnostics())
         self.harness.wait_for_pane_contains("RUNBUSYDONE", timeout=30.0)
 
+    def test_status_shows_input_for_running_approval_prompt_via_real_cli(self):
+        self.harness.rename_window("runninginput")
+        self.harness.start_codex("say exactly RUNINPUT and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "runninginput", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.send_codex_prompt("show approval prompt")
+        self.harness.wait_for_pane_contains("Tool call needs your approval", timeout=10.0)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("input", status.stdout, self.harness.diagnostics())
+
     def test_status_shows_average_time_per_continue_via_real_cli(self):
         self.harness.rename_window("avgacw")
         self.harness.start_codex("say exactly AVGACW and nothing else")

@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Change: `acw` now detects live Codex approval/trust prompts as a separate `input` activity/state instead of misclassifying them as idle `waiting`. The parser keys off real Codex UI strings such as `Tool call needs your approval`, `Do you trust the contents of this directory?`, the numbered `Yes/No` approval choices, and the approval review help text, while still ignoring those lines as pane chrome for `LAST_AGENT`.
 - Change: combined the status table's `STARTED`, `LAST_ACW`, and average-continue cadence into one compact `TIME` cell with three lines: `s: <started>`, `l: <last continue>`, and `a: <average cadence>`. This keeps the timing data together, removes the old `/acw` suffix noise, and frees a full table column for wider agent output.
 - Fix: the pane-activity parser no longer flips `busy` sessions to `waiting` just because a stale `working...` line remains above a reappeared prompt. Busy detection now distinguishes soft transient markers like bare `working...` from hard live-work markers like `esc to interrupt`, `Waiting for background terminal`, or queued-message chrome. After a prompt returns, soft markers are treated as stale history, but hard markers still win even if there is intervening ordinary output above the prompt.
 - Change: the Rich live bare-`acw` watch header no longer adds its own extra `Sessions: N` line above the table. The live view now keeps only the persistent “Watching acw status…” header and the table itself, while the plain-text fallback remains unchanged.
