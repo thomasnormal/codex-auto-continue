@@ -1,4 +1,8 @@
 import time
+import os
+import pty
+import select
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -190,6 +194,56 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         status = self.harness.run_manager("status")
 
         self.assertIn("/acw", status.stdout, self.harness.diagnostics())
+
+    def test_bare_acw_refreshes_interactive_status_over_pty(self):
+        self.harness.rename_window("watchlive")
+        self.harness.start_codex("say exactly WATCHLIVE and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        self.harness.run_manager("start", "watchlive", "--message", "INITIALPROMPT")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            ["python3", str(ROOT / "bin" / "auto_continue_watchd.py")],
+            env=self.harness.process_env,
+            cwd=str(ROOT),
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            text=False,
+            preexec_fn=lambda: os.umask(0o077),
+        )
+        os.close(slave_fd)
+
+        def _read_until(needle: str, timeout: float = 15.0) -> str:
+            end = time.time() + timeout
+            data = b""
+            while time.time() < end:
+                ready, _, _ = select.select([master_fd], [], [], 0.2)
+                if master_fd in ready:
+                    chunk = os.read(master_fd, 65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    text = data.decode("utf-8", errors="ignore")
+                    if needle in text:
+                        return text
+            raise AssertionError(f"did not observe {needle!r}\n{data.decode('utf-8', errors='ignore')}\n{self.harness.diagnostics()}")
+
+        try:
+            first = _read_until("INITIALPROMPT")
+            self.assertIn("Watching acw status", first, self.harness.diagnostics())
+            self.harness.mutate_manager_session_state(turn.thread_id, message="UPDATEDPROMPT")
+            second = _read_until("UPDATEDPROMPT")
+            self.assertIn("UPDATEDPROMPT", second, self.harness.diagnostics())
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+            os.close(master_fd)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Change: bare `acw` is now interactive in a real terminal. With no subcommand and a TTY, it continuously refreshes the status table once per second so live pane state and recent agent output update in place. `acw status` remains the one-shot snapshot command, and bare `acw` still falls back to that static behavior when stdout is not a TTY.
 - Change: `acw status` now adds a compact average continue cadence line in the `LAST_ACW` column, rendered as `<duration>/acw` such as `1h10m/acw`. The value is computed from thread age divided by the durable per-session `continue_count`. For older live sessions that predate the new counter, the status renderer temporarily falls back to counting `continue: sent` lines in the watch log until the daemon persists the counter on the next send/restart.
 - Change: healthy managed runtimes no longer all collapse to `running` in `acw status`. If a live pane proves that Codex is idle at a prompt, the state column now shows `waiting`; if the pane shows an active working/background-terminal indicator, it shows `busy`. `running` is now effectively the fallback when `acw` cannot prove a more specific live activity label.
 - Change: shortened the paused active-state label in `acw status` from `thinking/working` to `busy` so the state column stays compact while still distinguishing actively working panes from idle `waiting` ones.

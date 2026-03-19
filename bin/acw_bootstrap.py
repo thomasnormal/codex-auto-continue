@@ -34,6 +34,8 @@ def resolve_project_cwd() -> str:
 
 def build_help_text(prog: str) -> str:
     return f"""Usage:
+  {prog}
+  {prog} watch [target]
   {prog} status [target] [--details]
   {prog} start <target> [thread-id] [--message TEXT]
   {prog} stop [target]
@@ -46,7 +48,8 @@ def build_help_text(prog: str) -> str:
   {prog} doctor [target]
 
 Commands:
-  status    Show managed session state. Default command when no subcommand is given.
+  watch     Continuously refresh managed session state. Default command when no subcommand is given in an interactive terminal.
+  status    Show managed session state once. Default command when no subcommand is given without a TTY.
   start     Start managing a live tmux target. Auto-detect the Codex thread unless you pass one explicitly.
   stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.
   pause     Pause one managed session, or all managed sessions when no target is given.
@@ -95,9 +98,10 @@ def main(
     cleanup_stale_files_fn: Callable[[], None],
     print_help_fn: Callable[..., None],
     commands: dict[str, Callable[[list[str]], None]],
+    stdout_isatty_fn: Callable[[], bool],
 ) -> None:
     if len(argv) < 2:
-        subcmd = "status"
+        subcmd = "watch" if stdout_isatty_fn() else "status"
         rest: list[str] = []
     else:
         subcmd = argv[1]

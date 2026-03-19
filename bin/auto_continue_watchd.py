@@ -1665,6 +1665,10 @@ def cmd_status(argv: list[str]) -> None:
     acw_observe.cmd_status(_observe_context(), argv)
 
 
+def cmd_watch(argv: list[str]) -> None:
+    acw_observe.cmd_watch(_observe_context(), argv)
+
+
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
@@ -1887,6 +1891,7 @@ def _print_progress(message: str) -> None:
 
 def main() -> None:
     commands = {
+        "watch": cmd_watch,
         "start": cmd_start,
         "stop": cmd_stop,
         "pause": cmd_pause,
@@ -1905,6 +1910,7 @@ def main() -> None:
         cleanup_stale_files_fn=cleanup_stale_files,
         print_help_fn=print_help,
         commands=commands,
+        stdout_isatty_fn=lambda: sys.stdout.isatty(),
     )
 
 

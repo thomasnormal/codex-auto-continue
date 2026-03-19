@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 from typing import Callable
@@ -46,7 +47,7 @@ class ObserveContext:
     short_thread_id: Callable[[str], str]
 
 
-def cmd_status(context: ObserveContext, argv: list[str]) -> None:
+def _status_args(argv: list[str]) -> tuple[str, bool]:
     pane_arg = ""
     details = False
     for arg in argv:
@@ -54,6 +55,14 @@ def cmd_status(context: ObserveContext, argv: list[str]) -> None:
             details = True
         else:
             pane_arg = arg
+    return pane_arg, details
+
+
+def render_status_once(
+    context: ObserveContext,
+    argv: list[str],
+) -> None:
+    pane_arg, details = _status_args(argv)
 
     snapshot = context.build_runtime_snapshot()
     model = context.build_runtime_model(snapshot)
@@ -97,6 +106,49 @@ def cmd_status(context: ObserveContext, argv: list[str]) -> None:
     else:
         context.status_table(resolved)
         context.print_status_recommendations(resolved)
+
+
+def _clear_screen() -> None:
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.flush()
+
+
+def watch_status_loop(
+    context: ObserveContext,
+    argv: list[str],
+    *,
+    stdout_isatty_fn: Callable[[], bool] = lambda: sys.stdout.isatty(),
+    clear_screen_fn: Callable[[], None] = _clear_screen,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    refresh_secs: float = 1.0,
+    stop_after_iterations: int | None = None,
+    print_fn: Callable[[str], None] = print,
+) -> None:
+    if not stdout_isatty_fn():
+        render_status_once(context, argv)
+        return
+
+    iterations = 0
+    try:
+        while True:
+            clear_screen_fn()
+            print_fn("Watching acw status. Press Ctrl-C to exit.")
+            print_fn("")
+            render_status_once(context, argv)
+            iterations += 1
+            if stop_after_iterations is not None and iterations >= stop_after_iterations:
+                return
+            sleep_fn(refresh_secs)
+    except KeyboardInterrupt:
+        return
+
+
+def cmd_status(context: ObserveContext, argv: list[str]) -> None:
+    render_status_once(context, argv)
+
+
+def cmd_watch(context: ObserveContext, argv: list[str]) -> None:
+    watch_status_loop(context, argv)
 
 
 def doctor_recommendation_target(

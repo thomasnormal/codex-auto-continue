@@ -106,7 +106,8 @@ acw start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
 ## Everyday Commands
 
 ```text
-acw                  Show status
+acw                  Watch the status table live in an interactive terminal
+acw watch [target]   Watch one target or the full status table live
 acw status --details Show full managed-session details
 acw start <target>   Start managing a pane
 acw stop [target]    Stop one managed session or all managed sessions, and forget saved session state
@@ -230,7 +231,11 @@ panes in that tmux window.
 
 ## Status And Health
 
-`acw status` is the main control panel. It shows:
+`acw` is the live control panel in an interactive terminal. It continuously
+refreshes the status table so pane state and recent agent output update as they
+change. Use `acw status` for a one-shot snapshot.
+
+`acw status` shows:
 
 - the live tmux window and pane
 - whether the managed session runtime is `running`, `warn`, `paused`, `error`, or `dead`
