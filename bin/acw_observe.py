@@ -60,7 +60,8 @@ class ObserveContext:
     run_watch_command: Callable[[list[str]], None] | None = None
 
 
-_WATCH_COMMAND_HELP = "Commands: e/edit <target>, pause [target], restart [target]"
+_WATCH_COMMAND_HELP = "Commands: e/edit <target>, pause [target], resume [target], restart [target]"
+_WATCH_FEEDBACK_TTL_SECS = 10.0
 
 
 def _status_args(argv: list[str]) -> tuple[str, bool]:
@@ -145,7 +146,7 @@ def parse_watch_command(command_text: str) -> list[str]:
         "r": "restart",
     }
     cmd = aliases.get(cmd, cmd)
-    if cmd not in {"help", "edit", "pause", "restart"}:
+    if cmd not in {"help", "edit", "pause", "resume", "restart"}:
         raise ValueError(f"unsupported command '{tokens[0]}'; {_WATCH_COMMAND_HELP.lower()}")
     tokens[0] = cmd
     return tokens
@@ -156,6 +157,31 @@ def _trim_feedback_lines(text: str, *, max_lines: int = 8) -> str:
     if len(lines) <= max_lines:
         return "\n".join(lines)
     return "\n".join(["..."] + lines[-(max_lines - 1) :])
+
+
+def _watch_feedback_noteworthy(argv: list[str], exit_code: int, text: str) -> bool:
+    if exit_code != 0:
+        return True
+    if not text.strip():
+        return False
+    if argv and argv[0] not in {"edit", "pause", "resume"}:
+        return True
+    noteworthy_prefixes = (
+        "warning:",
+        "error:",
+        "hint:",
+        "already ",
+        "not ",
+        "no ",
+        "recommendation:",
+    )
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.lower().startswith(noteworthy_prefixes):
+            return True
+    return False
 
 
 def run_watch_command(
@@ -185,6 +211,8 @@ def run_watch_command(
             exit_code = exc.code if isinstance(exc.code, int) else 1
 
     text = _trim_feedback_lines(output.getvalue())
+    if not _watch_feedback_noteworthy(argv, exit_code, text):
+        return None
     if not text:
         rendered = " ".join(argv)
         text = f"ok: {rendered}" if exit_code == 0 else f"error: {rendered}"
@@ -404,6 +432,7 @@ def _interactive_watch_loop(
 ) -> None:
     command_buffer = ""
     feedback: WatchCommandFeedback | None = None
+    feedback_expires_at = 0.0
     iterations = 0
     last_frame_key = ""
     first_frame = True
@@ -422,7 +451,10 @@ def _interactive_watch_loop(
         next_refresh = monotonic_fn() + refresh_secs
 
     def render_current(live: Any | None = None) -> None:
-        nonlocal last_frame_key, first_frame
+        nonlocal last_frame_key, first_frame, feedback, feedback_expires_at
+        if feedback is not None and monotonic_fn() >= feedback_expires_at:
+            feedback = None
+            feedback_expires_at = 0.0
         frame_key = repr(
             (
                 base_frame_key,
@@ -449,12 +481,13 @@ def _interactive_watch_loop(
         live: Any | None = None,
         input_controller: Any | None = None,
     ) -> None:
-        nonlocal feedback
+        nonlocal feedback, feedback_expires_at
         for command_text in submitted:
             display_pause = live.pause() if live is not None and hasattr(live, "pause") else _null_pause()
             input_pause = input_controller.pause() if input_controller is not None and hasattr(input_controller, "pause") else _null_pause()
             with display_pause, input_pause:
                 feedback = run_watch_command(context, command_text)
+                feedback_expires_at = monotonic_fn() + _WATCH_FEEDBACK_TTL_SECS if feedback is not None else 0.0
 
     with input_controller_factory() as input_controller:
         live_context = None
@@ -481,6 +514,7 @@ def _interactive_watch_loop(
                     command_buffer, submitted, changed = _consume_watch_input(command_buffer, chars)
                     if changed and not submitted:
                         feedback = None
+                        feedback_expires_at = 0.0
                     if submitted:
                         execute_submitted_commands(submitted, live=live, input_controller=input_controller)
                         refresh_base()
@@ -499,6 +533,7 @@ def _interactive_watch_loop(
                 command_buffer, submitted, changed = _consume_watch_input(command_buffer, chars)
                 if changed and not submitted:
                     feedback = None
+                    feedback_expires_at = 0.0
                 if submitted:
                     execute_submitted_commands(submitted, input_controller=input_controller)
                     refresh_base()

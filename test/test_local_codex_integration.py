@@ -320,13 +320,26 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
                 f"did not observe {needle!r}\n{data.decode('utf-8', errors='ignore')}\n{self.harness.diagnostics()}"
             )
 
+        def _read_available(timeout: float = 2.0) -> str:
+            end = time.time() + timeout
+            data = b""
+            while time.time() < end:
+                ready, _, _ = select.select([master_fd], [], [], 0.2)
+                if master_fd not in ready:
+                    continue
+                chunk = os.read(master_fd, 65536)
+                if not chunk:
+                    break
+                data += chunk
+            return data.decode("utf-8", errors="ignore")
+
         try:
             first = _read_until("INITIALPROMPT")
             self.assertIn("Watching acw status", first, self.harness.diagnostics())
             os.write(master_fd, b"pause watchpause\r")
             self.harness.wait_for_manager_watcher_paused_in_pane(pane)
-            second = _read_until("paused: pane=")
-            self.assertIn("paused: pane=", second, self.harness.diagnostics())
+            second = _read_available()
+            self.assertNotIn("paused: pane=", second, self.harness.diagnostics())
         finally:
             proc.terminate()
             try:

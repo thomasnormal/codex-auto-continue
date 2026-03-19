@@ -63,6 +63,7 @@ class AcwObserveUnitTests(unittest.TestCase):
     def test_parse_watch_command_supports_aliases(self):
         self.assertEqual(["edit", "uvm"], acw_observe.parse_watch_command("e uvm"))
         self.assertEqual(["pause", "formal"], acw_observe.parse_watch_command("pause formal"))
+        self.assertEqual(["resume", "formal"], acw_observe.parse_watch_command("resume formal"))
         self.assertEqual(["restart"], acw_observe.parse_watch_command("r"))
 
     def test_parse_watch_command_rejects_unknown_command(self):
@@ -216,9 +217,101 @@ class AcwObserveUnitTests(unittest.TestCase):
             )
 
         self.assertEqual([["edit", "formal"]], commands)
-        self.assertEqual(2, len(frames))
+        self.assertEqual(1, len(frames))
         self.assertIn("> ", frames[0][1])
-        self.assertIn("edit: message unchanged", frames[1][1])
+
+    def test_run_watch_command_suppresses_benign_pause_success_output(self):
+        def _run_watch_command(argv: list[str]) -> None:
+            self.assertEqual(["pause", "formal"], argv)
+            print("paused: pane=%11 thread_id=019cd7fb-f4c1-7613-bf98-4915dcb1970a")
+
+        context = _observe_context(
+            status_table=lambda resolved: None,
+            run_watch_command=_run_watch_command,
+        )
+
+        feedback = acw_observe.run_watch_command(context, "pause formal")
+
+        self.assertIsNone(feedback)
+
+    def test_run_watch_command_keeps_warning_output_for_pause(self):
+        def _run_watch_command(argv: list[str]) -> None:
+            self.assertEqual(["pause", "formal"], argv)
+            print("not running: pane=%11")
+
+        context = _observe_context(
+            status_table=lambda resolved: None,
+            run_watch_command=_run_watch_command,
+        )
+
+        feedback = acw_observe.run_watch_command(context, "pause formal")
+
+        self.assertIsNotNone(feedback)
+        assert feedback is not None
+        self.assertIn("not running: pane=%11", feedback.text)
+
+    def test_watch_status_loop_expires_command_feedback_after_ten_seconds(self):
+        frames: list[tuple[bool, str]] = []
+        commands: list[list[str]] = []
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = FakeClock()
+
+        class FakeInput:
+            def __init__(self):
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def read(self, timeout: float) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return "restart formal\r"
+                clock.now += timeout
+                return ""
+
+            @contextlib.contextmanager
+            def pause(self):
+                yield
+
+        def _run_watch_command(argv: list[str]) -> None:
+            commands.append(argv)
+            print("restart: preparing pane=%11")
+
+        context = _observe_context(
+            status_table=lambda resolved: None,
+            run_watch_command=_run_watch_command,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            acw_observe.watch_status_loop(
+                context,
+                [],
+                stdout_isatty_fn=lambda: True,
+                stdin_isatty_fn=lambda: True,
+                refresh_secs=1.0,
+                stop_after_iterations=12,
+                render_status_text_fn=lambda _context, _argv: "Sessions: 1\nrow one\n",
+                write_frame_fn=lambda text, first_frame: frames.append((first_frame, text)),
+                live_display_factory=None,
+                input_controller_factory=FakeInput,
+                monotonic_fn=clock.monotonic,
+            )
+
+        self.assertEqual([["restart", "formal"]], commands)
+        self.assertGreaterEqual(len(frames), 3)
+        self.assertIn("restart: preparing pane=%11", frames[1][1])
+        self.assertNotIn("restart: preparing pane=%11", frames[-1][1])
 
 
 if __name__ == "__main__":

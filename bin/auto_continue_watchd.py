@@ -1696,6 +1696,7 @@ def _run_watch_command(argv: list[str]) -> None:
     commands = {
         "edit": cmd_edit,
         "pause": cmd_pause,
+        "resume": cmd_resume,
         "restart": cmd_restart,
     }
     handler = commands.get(subcmd)
