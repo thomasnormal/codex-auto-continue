@@ -254,6 +254,37 @@ def runtime_session_for_thread(model: RuntimeModel, thread_id: str) -> SavedSess
     return model.sessions_by_thread.get(thread_id.lower())
 
 
+def recoverable_named_session_for_pane(
+    model: RuntimeModel,
+    pane: str,
+    *,
+    context: RuntimeContext,
+) -> SavedSessionRecord | None:
+    pane_record = model.panes_by_id.get(pane)
+    if not pane_record:
+        return None
+
+    window_name = pane_record.window_name.strip()
+    if not window_name:
+        return None
+
+    named = model.sessions_by_name.get(window_name, ())
+    if len(named) != 1:
+        return None
+
+    session = named[0]
+    live_thread = pane_record.detected_thread.lower() if context.is_thread_id(pane_record.detected_thread) else ""
+    if live_thread and session.thread_id == live_thread:
+        return None
+
+    if runtime_panes_for_thread(model, session.thread_id):
+        return None
+    for watcher in runtime_watchers_for_thread(model, session.thread_id):
+        if watcher.pane and watcher.pane in model.panes_by_id:
+            return None
+    return session
+
+
 def runtime_session_name_conflict(
     model: RuntimeModel,
     session: SavedSessionRecord | None,

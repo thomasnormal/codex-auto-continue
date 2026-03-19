@@ -11,6 +11,7 @@ import builtins
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from unittest.mock import MagicMock
 from unittest.mock import mock_open
@@ -27,6 +28,7 @@ import auto_continue_watchd as acw  # noqa: E402
 
 THREAD = "11111111-1111-1111-1111-111111111111"
 OTHER_THREAD = "22222222-2222-2222-2222-222222222222"
+THIRD_THREAD = "33333333-3333-3333-3333-333333333333"
 ORIGINAL_READ_RUNTIME_ROWS = acw._read_runtime_rows
 
 
@@ -213,7 +215,9 @@ class WatchdUnitTests(unittest.TestCase):
             with redirect_stdout(out):
                 with self.assertRaises(SystemExit):
                     acw.main()
-        self.assertIn("Usage:\n  acw status", out.getvalue())
+        text = out.getvalue()
+        self.assertIn("Usage:\n  acw\n", text)
+        self.assertIn("  acw status [target] [--details]", text)
 
     def test_help_text_no_longer_mentions_migrate(self):
         text = acw.build_help_text("acw")
@@ -633,6 +637,7 @@ class WatchdUnitTests(unittest.TestCase):
 
         self.assertEqual(
             {
+                "continue_count": "0",
                 "health": "warn",
                 "health_detail": "codex log missing",
                 "health_ts": "2026-03-15 12:00:00",
@@ -1354,6 +1359,127 @@ class WatchdUnitTests(unittest.TestCase):
             panes=(_pane_record("%9", THREAD, window_label="0:9:scratch", window_name="scratch"),),
         ))
         self.assertEqual([], acw._build_repair_plan(model))
+
+    def test_repair_plan_adopts_dead_named_session_for_live_pane_without_runtime(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        steps = acw._repair_steps_for_pane(model, "%50")
+
+        self.assertEqual(1, len(steps))
+        self.assertEqual("start_watcher", steps[0].kind)
+        self.assertEqual(THIRD_THREAD, steps[0].thread_id)
+        self.assertEqual(THREAD, steps[0].source_thread_id)
+        self.assertEqual("continue through docs", steps[0].message)
+        self.assertIn("adopt saved session 'bugs'", steps[0].summary)
+
+    def test_repair_plan_adopts_dead_named_session_even_with_stale_missing_watcher(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            watchers=(_watcher_record("%5", THREAD, pid="9999"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        steps = acw._repair_steps_for_pane(model, "%50")
+
+        self.assertEqual(1, len(steps))
+        self.assertEqual("start_watcher", steps[0].kind)
+        self.assertEqual(THREAD, steps[0].source_thread_id)
+
+    def test_repair_plan_includes_recoverable_dead_named_session_in_no_target_mode(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        steps = acw._build_repair_plan(model)
+
+        self.assertEqual(["start_watcher"], [step.kind for step in steps])
+
+    def test_restart_target_adopts_dead_named_session_and_removes_old_session(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_daemon_rpc_remove_session") as remove_session:
+                with patch.object(acw, "run_tmux", return_value="bugs\n"):
+                    def _upsert(*args, **kwargs):
+                        self.assertFalse(remove_session.called)
+                        return {
+                            "thread": THIRD_THREAD,
+                            "pane": "%50",
+                            "runtime_status": "running",
+                            "runtime_id": "runtime-9999",
+                            "daemon_pid": "9999",
+                        }
+                    with patch.object(
+                        acw,
+                        "_daemon_rpc_upsert_session",
+                        side_effect=_upsert,
+                    ) as upsert:
+                        out = io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                            acw._restart_one("bugs", "%50", [])
+
+        remove_session.assert_called_once_with(THREAD, timeout_secs=2.0)
+        upsert.assert_called_once_with(
+            THIRD_THREAD,
+            pane="%50",
+            name="bugs",
+            message="continue through docs",
+            paused=False,
+            generation=1,
+        )
+        self.assertIn("restart: adopting saved continue message from dead thread", out.getvalue())
+
+    def test_restart_target_keeps_old_session_when_adopted_start_fails(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_daemon_rpc_remove_session") as remove_session:
+                with patch.object(acw, "run_tmux", return_value="bugs\n"):
+                    with patch.object(acw, "_daemon_rpc_upsert_session", side_effect=RuntimeError("boom")):
+                        with self.assertRaisesRegex(RuntimeError, "boom"):
+                            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                                acw._restart_one("bugs", "%50", [])
+
+        remove_session.assert_not_called()
+
+    def test_apply_repair_step_keeps_source_session_when_start_fails(self):
+        context = SimpleNamespace(
+            daemon_rpc_remove_session=MagicMock(),
+            print_progress=lambda message: None,
+            run_tmux=lambda *args, **kwargs: "bugs\n",
+            write_session_state=MagicMock(),
+            current_tmux_scope=lambda: "default",
+            message_text=lambda text: text,
+        )
+        step = acw.RepairStep(
+            kind="start_watcher",
+            target="%50",
+            summary="adopt bugs",
+            auto_apply=True,
+            thread_id=THIRD_THREAD,
+            source_thread_id=THREAD,
+            message="continue through docs",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            acw.acw_commands.apply_repair_step(
+                context,
+                step,
+                cmd_start_fn=MagicMock(side_effect=RuntimeError("boom")),
+                stop_pane_watchers_keep_session_fn=MagicMock(),
+            )
+
+        context.daemon_rpc_remove_session.assert_not_called()
 
     def test_doctor_report_recommends_restart_for_warn_watcher(self):
         model = acw._build_runtime_model(_snapshot(

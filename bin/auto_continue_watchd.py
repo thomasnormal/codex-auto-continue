@@ -1389,6 +1389,10 @@ def _runtime_session_for_thread(model: RuntimeModel, thread_id: str) -> SavedSes
     return acw_runtime.runtime_session_for_thread(model, thread_id)
 
 
+def _recoverable_named_session_for_pane(model: RuntimeModel, pane: str) -> SavedSessionRecord | None:
+    return acw_runtime.recoverable_named_session_for_pane(model, pane, context=_runtime_context())
+
+
 def _runtime_session_name_conflict(model: RuntimeModel, session: SavedSessionRecord | None) -> str:
     return acw_runtime.runtime_session_name_conflict(model, session, context=_runtime_context())
 
@@ -1744,6 +1748,7 @@ def _repair_context() -> acw_repair.RepairContext:
         runtime_watchers_for_thread=_runtime_watchers_for_thread,
         runtime_panes_for_thread=_runtime_panes_for_thread,
         runtime_session_for_thread=_runtime_session_for_thread,
+        recoverable_named_session_for_pane=_recoverable_named_session_for_pane,
         runtime_session_name_conflict=_runtime_session_name_conflict,
     )
 
@@ -1758,6 +1763,7 @@ def _command_context() -> acw_commands.CommandContext:
         runtime_watchers_for_pane=_runtime_watchers_for_pane,
         runtime_panes_for_thread=_runtime_panes_for_thread,
         runtime_session_for_thread=_runtime_session_for_thread,
+        recoverable_named_session_for_pane=_recoverable_named_session_for_pane,
         watcher_anomalies=_watcher_anomalies,
         other_watcher_for_thread=_other_watcher_for_thread,
         resolve_start_pane_target=resolve_start_pane_target,
@@ -1777,6 +1783,7 @@ def _command_context() -> acw_commands.CommandContext:
         daemon_rpc_remove_session=_daemon_rpc_remove_session,
         daemon_rpc_restart_codex=_daemon_rpc_restart_codex,
         current_session_generation=_current_session_generation,
+        current_tmux_scope=_tmux_scope_key,
         load_session_records=_load_session_records,
         strict_thread_for_pane=_strict_thread_for_pane,
         strict_session_for_thread=_strict_session_for_thread,

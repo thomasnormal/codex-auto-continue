@@ -18,6 +18,7 @@ class CommandContext:
     runtime_watchers_for_pane: Callable[[Any, str], tuple[Any, ...]]
     runtime_panes_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_session_for_thread: Callable[[Any, str], Any | None]
+    recoverable_named_session_for_pane: Callable[[Any, str], Any | None]
     watcher_anomalies: Callable[[Any, Any], list[str]]
     other_watcher_for_thread: Callable[[str, str], dict[str, str] | None]
     resolve_start_pane_target: Callable[[str], str]
@@ -37,6 +38,7 @@ class CommandContext:
     daemon_rpc_remove_session: Callable[..., None]
     daemon_rpc_restart_codex: Callable[..., None]
     current_session_generation: Callable[[dict[str, Any]], int]
+    current_tmux_scope: Callable[[], str]
     load_session_records: Callable[[], list[Any]]
     strict_thread_for_pane: Callable[[Any, str], tuple[str, str]]
     strict_session_for_thread: Callable[[Any, str], tuple[Any | None, str]]
@@ -454,6 +456,7 @@ def restart_one(context: CommandContext, target: str, pane: str, rest: list[str]
 
     thread_arg, msg_value, msg_explicit, restart_codex = parse_restart_args(rest)
     model = context.build_runtime_model()
+    recovered_session = None
 
     resolved_thread = ""
     if thread_arg and thread_arg != "auto":
@@ -497,14 +500,22 @@ def restart_one(context: CommandContext, target: str, pane: str, rest: list[str]
     if not msg_explicit:
         context.print_progress(f"restart: loading saved continue message for pane={pane}")
         if resolved_thread and context.is_thread_id(resolved_thread):
+            session = None
             session, session_error = context.strict_session_for_thread(model, resolved_thread)
             if session_error:
-                print(f"error: {session_error}", file=sys.stderr)
-                print(
-                    f"hint: repair the saved session for thread {context.short_thread_id(resolved_thread)} before restarting without --message",
-                    file=sys.stderr,
+                recovered_session = context.recoverable_named_session_for_pane(model, pane)
+                if not recovered_session or not recovered_session.message:
+                    print(f"error: {session_error}", file=sys.stderr)
+                    print(
+                        f"hint: repair the saved session for thread {context.short_thread_id(resolved_thread)} before restarting without --message",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                context.print_progress(
+                    "restart: adopting saved continue message from dead thread "
+                    f"{context.short_thread_id(recovered_session.thread_id)}"
                 )
-                sys.exit(1)
+                msg_value = recovered_session.message
             if session and session.message:
                 msg_value = session.message
 
@@ -553,6 +564,8 @@ def restart_one(context: CommandContext, target: str, pane: str, rest: list[str]
         paused=False,
         generation=next_generation,
     )
+    if recovered_session and recovered_session.thread_id != resolved_thread:
+        context.daemon_rpc_remove_session(recovered_session.thread_id, timeout_secs=2.0)
     daemon_pid = row.get("daemon_pid", "")
     context.print_progress(f"started: pane={pane} thread_id={resolved_thread} daemon_pid={daemon_pid}")
 
@@ -794,15 +807,21 @@ def apply_repair_step(
     cmd_start_fn,
     stop_pane_watchers_keep_session_fn,
 ) -> None:
+    def remove_source_session() -> None:
+        if step.source_thread_id and step.source_thread_id != step.thread_id:
+            context.daemon_rpc_remove_session(step.source_thread_id, timeout_secs=2.0)
+
     if step.kind == "restart_watcher":
         context.print_progress(f"repair: restarting runtime on pane={step.target}")
         stop_pane_watchers_keep_session_fn(step.target)
         cmd_start_fn([step.target, step.thread_id, "--message", step.message])
+        remove_source_session()
         return
 
     if step.kind == "start_watcher":
         context.print_progress(f"repair: starting runtime on pane={step.target}")
         cmd_start_fn([step.target, step.thread_id, "--message", step.message])
+        remove_source_session()
         return
 
     if step.kind == "stop_watchers_keep_session":
@@ -819,10 +838,15 @@ def apply_repair_step(
             step.thread_id,
             {
                 "thread_id": step.thread_id,
+                "pane": step.target,
                 "name": window_name,
                 "message": context.message_text(step.message),
+                "tmux_socket": context.current_tmux_scope(),
+                "generation": step.generation,
+                "paused": step.paused,
             },
         )
+        remove_source_session()
         return
 
     if step.kind == "sync_session_name":

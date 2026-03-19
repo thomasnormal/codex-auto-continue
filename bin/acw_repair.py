@@ -12,7 +12,10 @@ class RepairStep:
     summary: str
     auto_apply: bool
     thread_id: str = ""
+    source_thread_id: str = ""
     message: str = ""
+    generation: int = 0
+    paused: bool = False
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,7 @@ class RepairContext:
     runtime_watchers_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_panes_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_session_for_thread: Callable[[Any, str], Any | None]
+    recoverable_named_session_for_pane: Callable[[Any, str], Any | None]
     runtime_session_name_conflict: Callable[[Any, Any | None], str]
 
 
@@ -52,6 +56,9 @@ def repair_message_for_pane(
             continue
         if watcher.message_inline:
             return context.message_text(watcher.message_inline)
+    recovered = context.recoverable_named_session_for_pane(model, pane)
+    if recovered and recovered.message:
+        return recovered.message
     return ""
 
 
@@ -155,6 +162,7 @@ def repair_steps_for_pane(
         ]
 
     session = context.runtime_session_for_thread(model, live_thread)
+    recovered_session = None if session else context.recoverable_named_session_for_pane(model, pane)
     if session:
         conflict = context.runtime_session_name_conflict(model, session)
         if conflict:
@@ -170,7 +178,33 @@ def repair_steps_for_pane(
 
     message = repair_message_for_pane(model, pane, live_thread, context=context)
     if not watchers:
-        if not session or not message:
+        if session and message:
+            return [
+                RepairStep(
+                    kind="start_watcher",
+                    target=pane,
+                    summary=f"start one managed runtime on pane {pane} for thread {context.short_thread_id(live_thread)}",
+                    auto_apply=True,
+                    thread_id=live_thread,
+                    message=message,
+                )
+            ]
+        if recovered_session and message:
+            return [
+                RepairStep(
+                    kind="start_watcher",
+                    target=pane,
+                    summary=(
+                        f"adopt saved session '{recovered_session.name}' from dead thread "
+                        f"{context.short_thread_id(recovered_session.thread_id)} onto pane {pane} and start one managed runtime"
+                    ),
+                    auto_apply=True,
+                    thread_id=live_thread,
+                    source_thread_id=recovered_session.thread_id,
+                    message=message,
+                )
+            ]
+        if not message:
             return [
                 RepairStep(
                     kind="manual",
@@ -183,16 +217,7 @@ def repair_steps_for_pane(
                     thread_id=live_thread,
                 )
             ]
-        return [
-            RepairStep(
-                kind="start_watcher",
-                target=pane,
-                summary=f"start one managed runtime on pane {pane} for thread {context.short_thread_id(live_thread)}",
-                auto_apply=True,
-                thread_id=live_thread,
-                message=message,
-            )
-        ]
+        return []
 
     if len(watchers) > 1:
         if not message:
@@ -215,6 +240,7 @@ def repair_steps_for_pane(
                 summary=f"replace duplicate runtime entries on pane {pane} with one managed runtime for thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
+                source_thread_id=recovered_session.thread_id if recovered_session else "",
                 message=message,
             )
         ]
@@ -237,6 +263,7 @@ def repair_steps_for_pane(
                 summary=f"restart the runtime on pane {pane} with the live thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
+                source_thread_id=recovered_session.thread_id if recovered_session else "",
                 message=message,
             )
         ]
@@ -262,11 +289,29 @@ def repair_steps_for_pane(
                 summary=f"rebind the runtime on pane {pane} to the live thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
+                source_thread_id=recovered_session.thread_id if recovered_session else "",
                 message=message,
             )
         ]
 
     if not session:
+        if recovered_session and message:
+            return [
+                RepairStep(
+                    kind="recreate_session",
+                    target=pane,
+                    summary=(
+                        f"adopt saved session '{recovered_session.name}' from dead thread "
+                        f"{context.short_thread_id(recovered_session.thread_id)} onto pane {pane}"
+                    ),
+                    auto_apply=True,
+                    thread_id=live_thread,
+                    source_thread_id=recovered_session.thread_id,
+                    message=message,
+                    generation=watcher.generation,
+                    paused=watcher.paused,
+                )
+            ]
         if not message:
             return [
                 RepairStep(
@@ -285,6 +330,8 @@ def repair_steps_for_pane(
                 auto_apply=True,
                 thread_id=live_thread,
                 message=message,
+                generation=watcher.generation,
+                paused=watcher.paused,
             )
         ]
 
@@ -315,6 +362,9 @@ def build_repair_plan(
                 continue
             if context.runtime_session_for_thread(model, pane.detected_thread):
                 candidate_panes_set.add(pane.pane_id)
+                continue
+            if context.recoverable_named_session_for_pane(model, pane.pane_id):
+                candidate_panes_set.add(pane.pane_id)
         candidate_panes = sorted(
             candidate_panes_set,
             key=lambda value: pane_numeric_sort_key(value, context=context),
@@ -338,10 +388,11 @@ def build_repair_plan(
 
     if target_panes is None:
         live_threads = set(model.panes_by_thread) | set(model.watchers_by_thread)
+        recovered_threads = {step.source_thread_id for step in steps if step.source_thread_id}
         dead_sessions = [
             session
             for session in model.snapshot.sessions
-            if session.thread_id not in live_threads
+            if session.thread_id not in live_threads and session.thread_id not in recovered_threads
         ]
         if dead_sessions:
             steps.append(
