@@ -163,6 +163,24 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         self.assertIn("waiting", status.stdout, self.harness.diagnostics())
 
+    def test_resume_sends_continue_for_waiting_runtime_via_real_cli(self):
+        self.harness.rename_window("resumewait")
+        self.harness.start_codex("say exactly RESUMEWAIT and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "resumewait", "--message", "continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.mutate_manager_session_state(
+            turn.thread_id,
+            message="say exactly RESUMEFIRED and nothing else",
+        )
+        time.sleep(1.1)
+
+        resume = self.harness.run_manager("resume", "resumewait")
+        self.harness.wait_for_pane_contains("RESUMEFIRED", timeout=30.0)
+
+        self.assertIn("resuming waiting session", resume.stdout, self.harness.diagnostics())
+
     def test_status_shows_busy_for_running_busy_runtime_via_real_cli(self):
         self.harness.rename_window("runningbusy")
         self.harness.start_codex("say exactly RUNBUSY and nothing else")

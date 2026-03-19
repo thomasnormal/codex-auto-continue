@@ -466,7 +466,7 @@ class ManagerScenarioMixin:
 
         status = self.harness.run_manager("status")
 
-        self.assertIn("LAST_AGENT", status.stdout, self.harness.diagnostics())
+        self.assertIn("LAST AGENT MESSAGE", status.stdout, self.harness.diagnostics())
         self.assertIn(token, status.stdout, self.harness.diagnostics())
 
     def test_manager_recovers_after_private_tmux_socket_recreation(self):

@@ -234,6 +234,71 @@ def daemon_pause_session(
     append_log(Path(runtime.watch_log), f"pause: auto-pausing watcher ({reason})")
 
 
+def daemon_continue_session(
+    runtime: SessionRuntime,
+    *,
+    check_pane_for_interrupt,
+    check_pane_for_errors,
+    tmux_send,
+    now_ts,
+    append_log,
+    write_session_state,
+    enter_delay_secs: str,
+    time_module,
+) -> tuple[bool, str]:
+    if runtime.paused:
+        runtime.runtime_status = "paused"
+        return False, "managed session is paused"
+
+    pane_interrupt = check_pane_for_interrupt(runtime.pane)
+    if pane_interrupt:
+        return False, pane_interrupt
+
+    pane_error = check_pane_for_errors(runtime.pane)
+    if pane_error:
+        daemon_pause_session(
+            runtime,
+            pane_error,
+            write_session_state=write_session_state,
+            append_log=append_log,
+            now_ts=now_ts,
+        )
+        return False, pane_error
+
+    if time_module.time() - runtime.last_send_time < 1.0:
+        return False, "cooldown active"
+
+    send_result = tmux_send(
+        runtime.pane,
+        runtime.message,
+        max(0.0, float(enter_delay_secs)),
+        interrupt_checker=lambda: check_pane_for_interrupt(runtime.pane),
+    )
+    if send_result.status != "ok":
+        detail = send_result.detail or "tmux send failed"
+        if send_result.status != "interrupted":
+            append_log(
+                Path(runtime.watch_log),
+                f"error: manual continue failed thread={runtime.thread_id} detail={detail}",
+            )
+        return False, detail
+
+    runtime.last_send_time = time_module.time()
+    runtime.continue_count += 1
+    write_session_state(
+        runtime.thread_id,
+        {
+            "thread_id": runtime.thread_id,
+            "last_continue_at": now_ts(),
+            "continue_count": runtime.continue_count,
+            "health": runtime.health,
+            "health_detail": runtime.health_detail,
+        },
+    )
+    append_log(Path(runtime.watch_log), f"continue: sent manual thread={runtime.thread_id}")
+    return True, ""
+
+
 def daemon_process_session_events(
     runtime: SessionRuntime,
     events: list[object],

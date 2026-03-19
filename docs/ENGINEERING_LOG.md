@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Change: `acw resume <target>` now treats an explicitly targeted idle managed session as a request to send its saved continue message immediately. Paused sessions still resume via restart to avoid backlog replay, but a healthy `waiting` session now gets a direct daemon-routed continue send, while `busy` and `input` sessions are left alone with explicit operator-facing messages.
 - Fix: bare interactive `acw` now exits cleanly on `Ctrl-C` in the PTY path. The interactive watch branch had bypassed the existing top-level `KeyboardInterrupt` handler, so a `Ctrl-C` during terminal-state teardown could leak a traceback from `_CbreakInput.__exit__` instead of just returning to the shell.
 - Change: renamed the status-table text columns to `LAST AGENT MESSAGE` and `CONTINUE MESSAGE` so the two long free-text columns are explicit instead of relying on the overloaded `LAST_AGENT` / `MESSAGE` shorthand.
 - Change: de-emphasized the `TIME` column in the Rich `acw status` table. The compact `s:` / `l:` labels are now dim, and the whole average-cadence line (`a: ...`) is dim so the age/recency data stays readable without competing with `STATE` and `LAST_AGENT`.

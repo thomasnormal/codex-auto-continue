@@ -80,6 +80,7 @@ class DaemonRpcServerContext:
     remove_session_state: Callable[[str], bool]
     daemon_wait_for_condition: Callable[..., dict[str, str]]
     restart_codex_in_pane_result: Callable[[str, str, Callable[[str], None]], tuple[bool, str]]
+    continue_session: Callable[[Any], tuple[bool, str]]
 
 
 @dataclass(frozen=True)
@@ -397,6 +398,25 @@ def daemon_rpc_restart_codex(
     )
 
 
+def daemon_rpc_continue_session(
+    thread_id: str,
+    *,
+    daemon_rpc_call_fn: Callable[..., dict[str, object]],
+    timeout_secs: float = 2.0,
+) -> dict[str, str]:
+    payload = daemon_rpc_call_fn(
+        "continue_session",
+        {
+            "thread_id": thread_id.lower(),
+            "timeout_secs": timeout_secs,
+        },
+        timeout_secs=timeout_secs,
+    )
+    row = normalize_runtime_row(payload.get("row", {}))
+    row["daemon_pid"] = str(payload.get("daemon_pid", "")).strip()
+    return row
+
+
 def session_signature(session: acw_runtime.SavedSessionRecord) -> tuple[str, str, int]:
     return (session.pane, session.message, session.generation)
 
@@ -696,6 +716,31 @@ def daemon_handle_rpc_request(
         if not ok:
             raise acw_rpc.RpcError(f"failed to restart Codex in pane={pane}", detail=detail)
         return {"daemon_pid": str(os.getpid())}
+
+    if command == "continue_session":
+        thread_id = str(params.get("thread_id", "")).strip().lower()
+        if not context.is_thread_id(thread_id):
+            raise acw_rpc.RpcError("invalid thread_id for continue_session", detail=thread_id)
+        runtime = runtimes.get(thread_id)
+        if runtime is None:
+            raise acw_rpc.RpcError(
+                "continue_session requires a live managed runtime",
+                detail=f"thread_id={thread_id}",
+            )
+        send_progress(f"daemon: sending continue to pane={runtime.pane}")
+        ok, detail = context.continue_session(runtime)
+        if not ok:
+            raise acw_rpc.RpcError(
+                f"failed to send continue for thread_id={thread_id}",
+                detail=detail,
+            )
+        return {
+            "daemon_pid": str(os.getpid()),
+            "row": daemon_runtime_row(
+                thread_id,
+                acw_daemon.daemon_runtime_payload(runtime, now_ts=lambda: ""),
+            ),
+        }
 
     raise acw_rpc.RpcError("unknown daemon RPC command", detail=command)
 

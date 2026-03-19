@@ -659,6 +659,14 @@ def _daemon_rpc_restart_codex(pane: str, thread_id: str, *, timeout_secs: float 
     )
 
 
+def _daemon_rpc_continue_session(thread_id: str, *, timeout_secs: float = 2.0) -> dict[str, str]:
+    return acw_control.daemon_rpc_continue_session(
+        thread_id,
+        daemon_rpc_call_fn=_daemon_rpc_call,
+        timeout_secs=timeout_secs,
+    )
+
+
 def _session_signature(session: SavedSessionRecord) -> tuple[str, str, int]:
     return acw_control.session_signature(session)
 
@@ -794,6 +802,20 @@ def _daemon_runtime_row(thread_id: str, runtime: _DaemonSessionRuntime | None) -
     )
 
 
+def _daemon_continue_session(runtime: _DaemonSessionRuntime) -> tuple[bool, str]:
+    return acw_daemon.daemon_continue_session(
+        runtime,
+        check_pane_for_interrupt=_check_pane_for_interrupt,
+        check_pane_for_errors=_check_pane_for_errors,
+        tmux_send=_watch_tmux_send,
+        now_ts=_watch_now_ts,
+        append_log=_watch_append_log,
+        write_session_state=_write_session_state,
+        enter_delay_secs=ENTER_DELAY_SECS,
+        time_module=time,
+    )
+
+
 def _daemon_reconcile_context() -> acw_control.DaemonReconcileContext:
     return acw_control.DaemonReconcileContext(
         drain_daemon_codex_log_events=_drain_daemon_codex_log_events,
@@ -910,6 +932,7 @@ def _daemon_handle_rpc_request(
                 thread_id,
                 progress=progress_fn,
             ),
+            continue_session=_daemon_continue_session,
         ),
     )
 
@@ -1782,12 +1805,14 @@ def _command_context() -> acw_commands.CommandContext:
         daemon_rpc_patch_session=_daemon_rpc_patch_session,
         daemon_rpc_remove_session=_daemon_rpc_remove_session,
         daemon_rpc_restart_codex=_daemon_rpc_restart_codex,
+        daemon_rpc_continue_session=_daemon_rpc_continue_session,
         current_session_generation=_current_session_generation,
         current_tmux_scope=_tmux_scope_key,
         load_session_records=_load_session_records,
         strict_thread_for_pane=_strict_thread_for_pane,
         strict_session_for_thread=_strict_session_for_thread,
         short_thread_id=_short_thread_id,
+        pane_activity_for_pane=_paused_activity_for_pane,
         build_repair_plan=_build_repair_plan,
         doctor_resolve_target=_doctor_resolve_target,
         run_tmux=run_tmux,

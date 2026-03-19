@@ -37,12 +37,14 @@ class CommandContext:
     daemon_rpc_patch_session: Callable[..., dict[str, str]]
     daemon_rpc_remove_session: Callable[..., None]
     daemon_rpc_restart_codex: Callable[..., None]
+    daemon_rpc_continue_session: Callable[..., dict[str, str]]
     current_session_generation: Callable[[dict[str, Any]], int]
     current_tmux_scope: Callable[[], str]
     load_session_records: Callable[[], list[Any]]
     strict_thread_for_pane: Callable[[Any, str], tuple[str, str]]
     strict_session_for_thread: Callable[[Any, str], tuple[Any | None, str]]
     short_thread_id: Callable[[str], str]
+    pane_activity_for_pane: Callable[[str], str]
     build_repair_plan: Callable[[Any, tuple[str, ...] | None], list[Any]]
     doctor_resolve_target: Callable[[str, Any | None], tuple[str, str]]
     run_tmux: Callable[..., str | None]
@@ -644,7 +646,16 @@ def cmd_resume(
                 if not row.get("runtime_status", "") or not context.is_thread_id(thread_id):
                     continue
                 if row.get("paused", "") != "1":
-                    print(f"not paused: pane={pane} thread_id={thread_id}")
+                    activity = context.pane_activity_for_pane(pane)
+                    if activity == "waiting":
+                        context.daemon_rpc_continue_session(thread_id, timeout_secs=2.0)
+                        print(f"resuming waiting session: pane={pane} thread_id={thread_id}")
+                    elif activity == "busy":
+                        print(f"already busy: pane={pane} thread_id={thread_id}")
+                    elif activity == "input":
+                        print(f"input required: pane={pane} thread_id={thread_id}")
+                    else:
+                        print(f"not paused: pane={pane} thread_id={thread_id}")
                     continue
                 print(f"resuming paused session via restart: pane={pane} thread_id={thread_id}")
                 restart_one_fn(pane_arg, pane, [])

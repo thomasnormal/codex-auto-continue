@@ -53,7 +53,7 @@ Commands:
   start     Start managing a live tmux target. Auto-detect the Codex thread unless you pass one explicitly.
   stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.
   pause     Pause one managed session, or all managed sessions when no target is given.
-  resume    Restart one or more paused managed sessions, or all paused managed sessions, from current state.
+  resume    Restart one or more paused managed sessions. When explicitly targeted, it can also send the saved continue message immediately to an idle waiting managed session.
   restart   Restart one managed session or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running managed session, then restart it.
   repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.

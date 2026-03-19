@@ -100,6 +100,45 @@ class AcwDaemonUnitTests(unittest.TestCase):
             )
         )
 
+    def test_daemon_continue_session_increments_continue_count(self):
+        runtime = acw_daemon.SessionRuntime(
+            thread_id=THREAD,
+            pane="%11",
+            message="continue",
+            tmux_socket="",
+            generation=0,
+            runtime_id="runtime-1",
+            state_file="sqlite:session:" + THREAD,
+            watch_log=str(ROOT / "watch.log"),
+            cwd=str(ROOT),
+            continue_count=2,
+        )
+        writes: list[tuple[str, dict[str, object]]] = []
+
+        ok, detail = acw_daemon.daemon_continue_session(
+            runtime,
+            check_pane_for_interrupt=lambda _pane: "",
+            check_pane_for_errors=lambda _pane: "",
+            tmux_send=lambda *_args, **_kwargs: SimpleNamespace(status="ok", detail=""),
+            now_ts=lambda: "2026-03-19 12:34:56",
+            append_log=lambda _path, _line: None,
+            write_session_state=lambda thread_id, data: writes.append((thread_id, dict(data))),
+            enter_delay_secs="0",
+            time_module=SimpleNamespace(time=lambda: 100.0),
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual("", detail)
+        self.assertEqual(3, runtime.continue_count)
+        self.assertTrue(
+            any(
+                thread_id == THREAD
+                and data.get("continue_count") == 3
+                and data.get("last_continue_at") == "2026-03-19 12:34:56"
+                for thread_id, data in writes
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

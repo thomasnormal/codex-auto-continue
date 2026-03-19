@@ -907,7 +907,7 @@ class WatchdUnitTests(unittest.TestCase):
                                     acw.cmd_status([])
         text = out.getvalue()
         self.assertIn("WINDOW/PANE", text)
-        self.assertIn("LAST_AGENT", text)
+        self.assertIn("LAST AGENT MESSAGE", text)
         self.assertIn("Ran tests", text)
         self.assertIn("warn / codex log missing", text)
 
@@ -1958,6 +1958,40 @@ class WatchdUnitTests(unittest.TestCase):
         kill.assert_not_called()
         self.assertIn(f"resuming paused session via restart: pane=%7 thread_id={THREAD}", out.getvalue())
 
+    def test_resume_target_sends_continue_for_waiting_session(self):
+        with patch.object(acw, "resolve_pane_target", return_value="%7"):
+            with patch.object(
+                acw,
+                "watcher_rows",
+                return_value=[{"pane": "%7", "pid": "1234", "thread": THREAD, "runtime_status": "running", "paused": ""}],
+            ):
+                with patch.object(acw, "_paused_activity_for_pane", return_value="waiting"):
+                    with patch.object(acw, "_daemon_rpc_continue_session") as continue_session:
+                        with patch.object(acw, "_restart_one") as restart_one:
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw.cmd_resume(["ship"])
+        continue_session.assert_called_once_with(THREAD, timeout_secs=2.0)
+        restart_one.assert_not_called()
+        self.assertIn(f"resuming waiting session: pane=%7 thread_id={THREAD}", out.getvalue())
+
+    def test_resume_target_does_not_send_continue_for_busy_session(self):
+        with patch.object(acw, "resolve_pane_target", return_value="%7"):
+            with patch.object(
+                acw,
+                "watcher_rows",
+                return_value=[{"pane": "%7", "pid": "1234", "thread": THREAD, "runtime_status": "running", "paused": ""}],
+            ):
+                with patch.object(acw, "_paused_activity_for_pane", return_value="busy"):
+                    with patch.object(acw, "_daemon_rpc_continue_session") as continue_session:
+                        with patch.object(acw, "_restart_one") as restart_one:
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw.cmd_resume(["ship"])
+        continue_session.assert_not_called()
+        restart_one.assert_not_called()
+        self.assertIn(f"already busy: pane=%7 thread_id={THREAD}", out.getvalue())
+
     def test_resume_multiple_targets_restarts_each_paused_target(self):
         resolved = {"formal": "%6", "aot": "%7"}
 
@@ -2003,7 +2037,7 @@ class WatchdUnitTests(unittest.TestCase):
                         acw.cmd_resume(["formal", "aot"])
         restart_one.assert_called_once_with("aot", "%7", [])
         text = out.getvalue()
-        self.assertIn(f"not paused: pane=%6 thread_id={THREAD}", text)
+        self.assertIn(f"already busy: pane=%6 thread_id={THREAD}", text)
         self.assertIn(f"resuming paused session via restart: pane=%7 thread_id={OTHER_THREAD}", text)
 
     def test_restart_rejects_star_selector(self):

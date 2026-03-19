@@ -21,6 +21,7 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bin"))
 
+import acw_codex
 import acw_state
 
 
@@ -663,8 +664,27 @@ class RealCodexHarness:
 
         return self._wait_for_value(_probe, timeout=timeout, description=f"codex log containing {needle!r}")
 
+    def discover_live_thread_for_pane(self, pane_id: str) -> Optional[str]:
+        def _run_tmux(args: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["tmux", "-S", self.tmux_socket, *args],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        tid = acw_codex.discover_thread_for_pane(pane_id, run_tmux_fn=_run_tmux)
+        if not tid:
+            return None
+        return tid.lower()
+
     def wait_for_thread_visible(self, thread_id: str, timeout: float = 30.0) -> None:
-        self.wait_for_recent_codex_log_contains(thread_id, timeout=timeout)
+        expected = thread_id.lower()
+        self._wait_for(
+            lambda: self.discover_live_thread_for_pane(self.pane_id) == expected,
+            timeout=timeout,
+            description=f"thread {thread_id} visible",
+        )
 
     def reset_codex_log_baseline(self) -> None:
         self._codex_log_baseline = self._line_count(self.codex_log)
