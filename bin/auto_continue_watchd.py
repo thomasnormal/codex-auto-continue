@@ -760,6 +760,7 @@ def _daemon_process_session_events(
         events,
         check_pane_for_interrupt=_check_pane_for_interrupt,
         check_pane_for_errors=_check_pane_for_errors,
+        capture_pane_text=_capture_pane_text,
         tmux_send=_watch_tmux_send,
         compute_watch_health=_compute_watch_health,
         now_ts=_watch_now_ts,
@@ -1313,6 +1314,10 @@ def _extract_last_agent_snippet(text: str) -> str:
 
 def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
     return acw_probe.last_agent_snippet_for_pane(pane, thread_id, run_tmux, STATE_DIR)
+
+
+def _capture_pane_text(pane: str, *, lines: int = 200) -> str:
+    return run_tmux("capture-pane", "-t", pane, "-p", "-S", f"-{lines}") or ""
 
 
 def _paused_activity_for_pane(pane: str) -> str:

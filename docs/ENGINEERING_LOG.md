@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Change: added a first conservative loop detector in the `acw` daemon. It fingerprints docs-only checkpoint-style turns from the live pane text and auto-pauses a managed session after 4 matching turns on the same markdown file set. The first implementation is intentionally narrow: it targets the low-value pattern of repeated plan/log checkpoint commits without trying to classify every kind of unproductive repetition.
 - Change: `acw resume <target>` now treats an explicitly targeted idle managed session as a request to send its saved continue message immediately. Paused sessions still resume via restart to avoid backlog replay, but a healthy `waiting` session now gets a direct daemon-routed continue send, while `busy` and `input` sessions are left alone with explicit operator-facing messages.
 - Fix: bare interactive `acw` now exits cleanly on `Ctrl-C` in the PTY path. The interactive watch branch had bypassed the existing top-level `KeyboardInterrupt` handler, so a `Ctrl-C` during terminal-state teardown could leak a traceback from `_CbreakInput.__exit__` instead of just returning to the shell.
 - Change: renamed the status-table text columns to `LAST AGENT MESSAGE` and `CONTINUE MESSAGE` so the two long free-text columns are explicit instead of relying on the overloaded `LAST_AGENT` / `MESSAGE` shorthand.

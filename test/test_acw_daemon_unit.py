@@ -80,6 +80,7 @@ class AcwDaemonUnitTests(unittest.TestCase):
             [event],
             check_pane_for_interrupt=lambda _pane: "",
             check_pane_for_errors=lambda _pane: "",
+            capture_pane_text=lambda _pane: "",
             tmux_send=lambda *_args, **_kwargs: SimpleNamespace(status="ok", detail=""),
             compute_watch_health=lambda *_args, **_kwargs: ("ok", ""),
             now_ts=lambda: "2026-03-19 12:34:56",
@@ -96,6 +97,68 @@ class AcwDaemonUnitTests(unittest.TestCase):
                 thread_id == THREAD
                 and data.get("continue_count") == 3
                 and data.get("last_continue_at") == "2026-03-19 12:34:56"
+                for thread_id, data in writes
+            )
+        )
+
+    def test_daemon_process_session_events_auto_pauses_repeated_docs_only_checkpoint_loop(self):
+        runtime = acw_daemon.SessionRuntime(
+            thread_id=THREAD,
+            pane="%11",
+            message="continue by docs/DDR3_PLAN.md",
+            tmux_socket="",
+            generation=0,
+            runtime_id="runtime-1",
+            state_file="sqlite:session:" + THREAD,
+            watch_log=str(ROOT / "watch.log"),
+            cwd=str(ROOT),
+            loop_signature="docs-only:docs/DDR3_PLAN.md",
+            loop_score=3,
+        )
+        writes: list[tuple[str, dict[str, object]]] = []
+        event = SimpleNamespace(
+            kind="completion",
+            thread_id=THREAD,
+            turn_id=TURN,
+            detail="false",
+        )
+        pane_text = (
+            "• Updated:\n"
+            "  - docs/DDR3_PLAN.md\n"
+            "\n"
+            "  Committed:\n"
+            "  [DDR3] checkpoint\n"
+            "\n"
+            "› continue by docs/DDR3_PLAN.md\n"
+        )
+        send_calls: list[tuple[object, ...]] = []
+
+        acw_daemon.daemon_process_session_events(
+            runtime,
+            [event],
+            check_pane_for_interrupt=lambda _pane: "",
+            check_pane_for_errors=lambda _pane: "",
+            capture_pane_text=lambda _pane: pane_text,
+            tmux_send=lambda *_args, **_kwargs: send_calls.append(_args) or SimpleNamespace(status="ok", detail=""),
+            compute_watch_health=lambda *_args, **_kwargs: ("ok", ""),
+            now_ts=lambda: "2026-03-19 12:34:56",
+            append_log=lambda _path, _line: None,
+            write_session_state=lambda thread_id, data: writes.append((thread_id, dict(data))),
+            send_delay_secs="0",
+            enter_delay_secs="0",
+            time_module=SimpleNamespace(time=lambda: 100.0, sleep=lambda _secs: None),
+        )
+
+        self.assertTrue(runtime.paused)
+        self.assertEqual("paused", runtime.runtime_status)
+        self.assertEqual(4, runtime.loop_score)
+        self.assertIn("suspected loop: repeated docs-only checkpoint turns", runtime.health_detail)
+        self.assertEqual([], send_calls)
+        self.assertTrue(
+            any(
+                thread_id == THREAD
+                and data.get("paused") is True
+                and "suspected loop" in str(data.get("health_detail", ""))
                 for thread_id, data in writes
             )
         )

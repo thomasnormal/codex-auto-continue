@@ -181,6 +181,37 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         self.assertIn("resuming waiting session", resume.stdout, self.harness.diagnostics())
 
+    def test_looping_docs_only_checkpoint_turns_auto_pause_via_real_cli(self):
+        self.harness.rename_window("loopdoc")
+        self.harness.start_codex("say exactly LOOPDOCSTART and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "loopdoc", "--message", "continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        loop_prompt = (
+            "emit verbatim: Updated:\n"
+            "- docs/DDR3_PLAN.md\n"
+            "\n"
+            "Committed:\n"
+            "[DDR3] checkpoint"
+        )
+        self.harness.mutate_manager_session_state(
+            turn.thread_id,
+            message=loop_prompt,
+            loop_signature="docs-only:docs/DDR3_PLAN.md",
+            loop_score=3,
+        )
+        time.sleep(1.1)
+
+        resume = self.harness.run_manager("resume", "loopdoc")
+        self.harness.wait_for_pane_contains("Committed:", timeout=30.0)
+        self.harness.wait_for_manager_watcher_paused_in_pane(pane, timeout=30.0)
+        status = self.harness.run_manager("status")
+
+        self.assertIn("resuming waiting session", resume.stdout, self.harness.diagnostics())
+        self.assertIn("suspected loop", status.stdout, self.harness.diagnostics())
+
     def test_status_shows_busy_for_running_busy_runtime_via_real_cli(self):
         self.harness.rename_window("runningbusy")
         self.harness.start_codex("say exactly RUNBUSY and nothing else")

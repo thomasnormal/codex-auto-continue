@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import acw_loop
+
 
 @dataclass
 class CodexLogTail:
@@ -43,6 +45,8 @@ class SessionRuntime:
     watcher_start: float = 0.0
     interrupt_skip_armed: bool = False
     pending_startup_event: object | None = None
+    loop_signature: str = ""
+    loop_score: int = 0
 
 
 def continue_count_for_watch_log(watch_log: str) -> int:
@@ -158,6 +162,8 @@ def daemon_session_runtime(
         ),
         continue_count=continue_count,
         watcher_start=time.time(),
+        loop_signature=str(state.get("loop_signature", "")).strip(),
+        loop_score=_coerce_int(state.get("loop_score", 0)),
     )
     write_session_state(
         session.thread_id,
@@ -170,6 +176,8 @@ def daemon_session_runtime(
             "generation": session.generation,
             "tmux_socket": session.tmux_socket,
             "continue_count": runtime.continue_count,
+            "loop_signature": runtime.loop_signature,
+            "loop_score": runtime.loop_score,
         },
     )
     append_log(Path(runtime.watch_log), f"watch: pane={runtime.pane} thread_id={runtime.thread_id}")
@@ -299,12 +307,60 @@ def daemon_continue_session(
     return True, ""
 
 
+def daemon_check_loop(
+    runtime: SessionRuntime,
+    *,
+    capture_pane_text,
+    write_session_state,
+    append_log,
+    now_ts,
+) -> bool:
+    pane_text = capture_pane_text(runtime.pane)
+    observation = acw_loop.loop_observation_from_pane_text(pane_text, runtime.message)
+    state = acw_loop.advance_loop_state(
+        runtime.loop_signature,
+        runtime.loop_score,
+        observation,
+    )
+    if state.signature == runtime.loop_signature and state.score == runtime.loop_score:
+        return False
+
+    runtime.loop_signature = state.signature
+    runtime.loop_score = state.score
+    write_session_state(
+        runtime.thread_id,
+        {
+            "loop_signature": runtime.loop_signature,
+            "loop_score": runtime.loop_score,
+        },
+    )
+    if not state.should_pause:
+        return False
+
+    append_log(
+        Path(runtime.watch_log),
+        (
+            f"loop: detected repeated docs-only checkpoint turns score={runtime.loop_score}"
+            + (f" detail={observation.detail}" if observation.detail else "")
+        ),
+    )
+    daemon_pause_session(
+        runtime,
+        state.reason,
+        write_session_state=write_session_state,
+        append_log=append_log,
+        now_ts=now_ts,
+    )
+    return True
+
+
 def daemon_process_session_events(
     runtime: SessionRuntime,
     events: list[object],
     *,
     check_pane_for_interrupt,
     check_pane_for_errors,
+    capture_pane_text,
     tmux_send,
     compute_watch_health,
     now_ts,
@@ -371,6 +427,16 @@ def daemon_process_session_events(
                 append_log=append_log,
                 now_ts=now_ts,
             )
+            continue
+
+        if daemon_check_loop(
+            runtime,
+            capture_pane_text=capture_pane_text,
+            write_session_state=write_session_state,
+            append_log=append_log,
+            now_ts=now_ts,
+        ):
+            daemon_mark_handled(runtime, event.turn_id, event.thread_id, write_session_state=write_session_state)
             continue
 
         if time_module.time() - runtime.last_send_time < 1.0:
