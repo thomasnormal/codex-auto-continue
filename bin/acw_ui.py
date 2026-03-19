@@ -145,6 +145,13 @@ def build_status_table_renderable(
     return table
 
 
+_WATCH_HEADER_TEXT = "Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart"
+
+
+def watch_header_text() -> str:
+    return _WATCH_HEADER_TEXT
+
+
 def build_status_watch_renderable(
     rows_data: list[tuple[str, ...]],
     *,
@@ -157,7 +164,7 @@ def build_status_watch_renderable(
     from rich.text import Text
 
     renderables: list[object] = [
-        Text("Watching acw status. Press Ctrl-C to exit.", style="bold cyan"),
+        Text(watch_header_text(), style="bold cyan"),
     ]
     if rows_data:
         renderables.append(

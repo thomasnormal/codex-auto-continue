@@ -62,7 +62,9 @@ def _observe_context(*, status_table, status_details=None, run_watch_command=Non
 class AcwObserveUnitTests(unittest.TestCase):
     def test_parse_watch_command_supports_aliases(self):
         self.assertEqual(["edit", "uvm"], acw_observe.parse_watch_command("e uvm"))
+        self.assertEqual(["start", "uvm"], acw_observe.parse_watch_command("s uvm"))
         self.assertEqual(["pause", "formal"], acw_observe.parse_watch_command("pause formal"))
+        self.assertEqual(["resume", "formal"], acw_observe.parse_watch_command("u formal"))
         self.assertEqual(["resume", "formal"], acw_observe.parse_watch_command("resume formal"))
         self.assertEqual(["restart"], acw_observe.parse_watch_command("r"))
 

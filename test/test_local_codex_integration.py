@@ -263,7 +263,7 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         try:
             first = _read_until("INITIALPROMPT")
-            self.assertIn("Watching acw status", first, self.harness.diagnostics())
+            self.assertIn("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart", first, self.harness.diagnostics())
             if subprocess_has_rich:
                 self.assertRegex(first, "\x1b\\[[0-9;]*m", self.harness.diagnostics())
                 self.assertNotIn("\x1b[2J", first, self.harness.diagnostics())
@@ -335,11 +335,62 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         try:
             first = _read_until("INITIALPROMPT")
-            self.assertIn("Watching acw status", first, self.harness.diagnostics())
+            self.assertIn("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart", first, self.harness.diagnostics())
             os.write(master_fd, b"pause watchpause\r")
             self.harness.wait_for_manager_watcher_paused_in_pane(pane)
             second = _read_available()
             self.assertNotIn("paused: pane=", second, self.harness.diagnostics())
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+            os.close(master_fd)
+
+    def test_bare_acw_accepts_start_command_over_pty(self):
+        self.harness.rename_window("watchstart")
+        self.harness.start_codex("say exactly WATCHSTART and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            ["python3", str(ROOT / "bin" / "auto_continue_watchd.py")],
+            env=self.harness.process_env,
+            cwd=str(ROOT),
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            text=False,
+            preexec_fn=lambda: os.umask(0o077),
+        )
+        os.close(slave_fd)
+
+        def _read_until(needle: str, timeout: float = 15.0) -> str:
+            end = time.time() + timeout
+            data = b""
+            while time.time() < end:
+                ready, _, _ = select.select([master_fd], [], [], 0.2)
+                if master_fd in ready:
+                    chunk = os.read(master_fd, 65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    text = data.decode("utf-8", errors="ignore")
+                    if needle in text:
+                        return text
+            raise AssertionError(
+                f"did not observe {needle!r}\n{data.decode('utf-8', errors='ignore')}\n{self.harness.diagnostics()}"
+            )
+
+        try:
+            first = _read_until("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart")
+            self.assertIn("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart", first, self.harness.diagnostics())
+            os.write(master_fd, b"s watchstart --message STARTPROMPT\r")
+            self.harness.wait_for_manager_watcher_started(turn.thread_id)
+            second = _read_until("start: thread_id=")
+            self.assertIn("start: thread_id=", second, self.harness.diagnostics())
         finally:
             proc.terminate()
             try:

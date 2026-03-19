@@ -1691,9 +1691,10 @@ def _run_watch_command(argv: list[str]) -> None:
         return
     subcmd = argv[0]
     rest = argv[1:]
-    if subcmd in ("restart", "edit"):
+    if subcmd in ("start", "restart", "edit"):
         cleanup_stale_files()
     commands = {
+        "start": cmd_start,
         "edit": cmd_edit,
         "pause": cmd_pause,
         "resume": cmd_resume,

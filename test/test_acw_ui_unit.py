@@ -58,7 +58,7 @@ class AcwUiUnitTests(unittest.TestCase):
         console.print(renderable)
         text = console.export_text(styles=False)
 
-        self.assertIn("Watching acw status. Press Ctrl-C to exit.", text)
+        self.assertIn("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart", text)
         self.assertNotIn("Sessions:", text)
 
 

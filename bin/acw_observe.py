@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Callable
 
+import acw_ui
+
 
 @dataclass
 class DoctorReport:
@@ -60,7 +62,10 @@ class ObserveContext:
     run_watch_command: Callable[[list[str]], None] | None = None
 
 
-_WATCH_COMMAND_HELP = "Commands: e/edit <target>, pause [target], resume [target], restart [target]"
+_WATCH_COMMAND_HELP = (
+    "Commands: s/start <target> [thread-id] [--message TEXT], "
+    "e/edit <target>, p/pause [target], u/resume [target], r/restart [target]"
+)
 _WATCH_FEEDBACK_TTL_SECS = 10.0
 
 
@@ -142,11 +147,13 @@ def parse_watch_command(command_text: str) -> list[str]:
         "?": "help",
         "h": "help",
         "e": "edit",
+        "s": "start",
         "p": "pause",
+        "u": "resume",
         "r": "restart",
     }
     cmd = aliases.get(cmd, cmd)
-    if cmd not in {"help", "edit", "pause", "resume", "restart"}:
+    if cmd not in {"help", "start", "edit", "pause", "resume", "restart"}:
         raise ValueError(f"unsupported command '{tokens[0]}'; {_WATCH_COMMAND_HELP.lower()}")
     tokens[0] = cmd
     return tokens
@@ -404,6 +411,7 @@ def _build_watch_text_frame(
     feedback: WatchCommandFeedback | None,
 ) -> str:
     parts = ["Watching acw status. Press Ctrl-C to exit.", "", status_text.rstrip("\n")]
+    parts[0] = acw_ui.watch_header_text()
     if feedback and feedback.text:
         parts.extend(["", feedback.text])
     parts.extend(["", f"> {command_buffer}"])
