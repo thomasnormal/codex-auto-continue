@@ -315,6 +315,33 @@ class AcwObserveUnitTests(unittest.TestCase):
         self.assertIn("restart: preparing pane=%11", frames[1][1])
         self.assertNotIn("restart: preparing pane=%11", frames[-1][1])
 
+    def test_watch_status_loop_swallows_keyboard_interrupt_from_interactive_teardown(self):
+        class FakeInput:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                raise KeyboardInterrupt
+
+            def read(self, timeout: float) -> str:
+                return ""
+
+        context = _observe_context(status_table=lambda resolved: None)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            acw_observe.watch_status_loop(
+                context,
+                [],
+                stdout_isatty_fn=lambda: True,
+                stdin_isatty_fn=lambda: True,
+                refresh_secs=0.5,
+                stop_after_iterations=1,
+                render_status_text_fn=lambda _context, _argv: "Sessions: 1\nrow one\n",
+                write_frame_fn=lambda text, first_frame: None,
+                live_display_factory=None,
+                input_controller_factory=FakeInput,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

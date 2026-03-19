@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Fix: bare interactive `acw` now exits cleanly on `Ctrl-C` in the PTY path. The interactive watch branch had bypassed the existing top-level `KeyboardInterrupt` handler, so a `Ctrl-C` during terminal-state teardown could leak a traceback from `_CbreakInput.__exit__` instead of just returning to the shell.
 - Change: renamed the status-table text columns to `LAST AGENT MESSAGE` and `CONTINUE MESSAGE` so the two long free-text columns are explicit instead of relying on the overloaded `LAST_AGENT` / `MESSAGE` shorthand.
 - Change: de-emphasized the `TIME` column in the Rich `acw status` table. The compact `s:` / `l:` labels are now dim, and the whole average-cadence line (`a: ...`) is dim so the age/recency data stays readable without competing with `STATE` and `LAST_AGENT`.
 - Fix: the new dead-session adoption path in `acw repair` / `acw restart` no longer deletes the source saved session before the replacement session/runtime has been created successfully. Review of the unstaged recovery changes found that a failed restart could otherwise lose the operator's saved continue message and name. The source session is now removed only after the new session upsert/recreate succeeds, with regressions covering both restart and repair failure paths.

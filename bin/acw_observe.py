@@ -573,20 +573,23 @@ def watch_status_loop(
     _pane_arg, details = _status_args(argv)
     use_live = live_display_factory is not None and not details
     if stdin_isatty_fn() and input_controller_factory is not None:
-        _interactive_watch_loop(
-            context,
-            argv,
-            use_live=use_live,
-            sleep_fn=sleep_fn,
-            refresh_secs=refresh_secs,
-            stop_after_iterations=stop_after_iterations,
-            render_status_text_fn=render_status_text_fn,
-            render_status_live_frame_fn=render_status_live_frame_fn,
-            write_frame_fn=write_frame_fn,
-            live_display_factory=live_display_factory,
-            input_controller_factory=input_controller_factory,
-            monotonic_fn=monotonic_fn,
-        )
+        try:
+            _interactive_watch_loop(
+                context,
+                argv,
+                use_live=use_live,
+                sleep_fn=sleep_fn,
+                refresh_secs=refresh_secs,
+                stop_after_iterations=stop_after_iterations,
+                render_status_text_fn=render_status_text_fn,
+                render_status_live_frame_fn=render_status_live_frame_fn,
+                write_frame_fn=write_frame_fn,
+                live_display_factory=live_display_factory,
+                input_controller_factory=input_controller_factory,
+                monotonic_fn=monotonic_fn,
+            )
+        except KeyboardInterrupt:
+            return
         return
     iterations = 0
     last_frame = ""
