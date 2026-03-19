@@ -201,6 +201,21 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         turn = self.harness.wait_for_first_completed_turn()
         self.harness.run_manager("start", "watchlive", "--message", "INITIALPROMPT")
         self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        subprocess_has_rich = (
+            subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('rich') else 1)",
+                ],
+                env=self.harness.process_env,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
 
         master_fd, slave_fd = pty.openpty()
         proc = subprocess.Popen(
@@ -233,9 +248,15 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         try:
             first = _read_until("INITIALPROMPT")
             self.assertIn("Watching acw status", first, self.harness.diagnostics())
+            if subprocess_has_rich:
+                self.assertRegex(first, "\x1b\\[[0-9;]*m", self.harness.diagnostics())
+                self.assertNotIn("\x1b[2J", first, self.harness.diagnostics())
             self.harness.mutate_manager_session_state(turn.thread_id, message="UPDATEDPROMPT")
             second = _read_until("UPDATEDPROMPT")
             self.assertIn("UPDATEDPROMPT", second, self.harness.diagnostics())
+            if subprocess_has_rich:
+                self.assertRegex(second, "\x1b\\[[0-9;]*m", self.harness.diagnostics())
+                self.assertNotIn("\x1b[2J", second, self.harness.diagnostics())
         finally:
             proc.terminate()
             try:

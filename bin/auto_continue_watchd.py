@@ -1587,7 +1587,16 @@ def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    acw_status.status_table(
+    rows_data = _status_rows_data(resolved)
+    acw_ui.render_status_table(
+        rows_data,
+        section_every=_STATUS_SECTION_EVERY,
+        max_msg_lines=_MAX_MSG_LINES,
+    )
+
+
+def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[tuple[str, str, str, str, str, str]]:
+    return acw_status.status_rows_data(
         resolved,
         read_state_json_fn=_read_state_json,
         compute_state_fn=_compute_state,
@@ -1606,14 +1615,22 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
         message_summary_for_row_fn=_message_summary_for_row,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
-        render_status_table_fn=lambda rows_data, section_every, max_msg_lines: acw_ui.render_status_table(
-            rows_data,
-            section_every=section_every,
-            max_msg_lines=max_msg_lines,
-        ),
+    )
+
+
+def _status_watch_frame(resolved: list[tuple[dict[str, str], str, str]]) -> tuple[str, object]:
+    rows_data = _status_rows_data(resolved)
+    recommendations = _status_recommendations(resolved)
+    invariant_messages = _status_invariant_messages(resolved)
+    frame_key = repr((rows_data, recommendations, invariant_messages))
+    renderable = acw_ui.build_status_watch_renderable(
+        rows_data,
         section_every=_STATUS_SECTION_EVERY,
         max_msg_lines=_MAX_MSG_LINES,
+        recommendations=recommendations,
+        invariant_messages=invariant_messages,
     )
+    return frame_key, renderable
 
 
 def _status_details(
@@ -1762,6 +1779,7 @@ def _observe_context() -> acw_observe.ObserveContext:
         status_sort_key=_status_sort_key,
         status_details=_status_details,
         status_table=_status_table,
+        status_watch_frame=_status_watch_frame,
         print_status_recommendations=_print_status_recommendations,
         state_dir_is_writable=_state_dir_is_writable,
         codex_auth_state_available=_codex_auth_state_available,

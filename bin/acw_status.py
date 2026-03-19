@@ -575,6 +575,38 @@ def status_table(
     section_every: int,
     max_msg_lines: int,
 ) -> None:
+    rows_data = status_rows_data(
+        resolved,
+        read_state_json_fn=read_state_json_fn,
+        compute_state_fn=compute_state_fn,
+        status_row_detail_fn=status_row_detail_fn,
+        thread_times_fn=thread_times_fn,
+        average_continue_label_fn=average_continue_label_fn,
+        format_age_fn=format_age_fn,
+        last_agent_snippet_for_pane_fn=last_agent_snippet_for_pane_fn,
+        paused_activity_for_pane_fn=paused_activity_for_pane_fn,
+        message_summary_for_row_fn=message_summary_for_row_fn,
+        status_window_pane_cell_fn=status_window_pane_cell_fn,
+        state_summary_fn=state_summary_fn,
+    )
+    render_status_table_fn(rows_data, section_every, max_msg_lines)
+
+
+def status_rows_data(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    read_state_json_fn: Callable[[str], dict[str, str]],
+    compute_state_fn: Callable[[dict[str, str], dict[str, str]], str],
+    status_row_detail_fn: Callable[[dict[str, str], dict[str, str]], str],
+    thread_times_fn: Callable[[str, bool], tuple[str, str]],
+    average_continue_label_fn: Callable[[dict[str, str], dict[str, str]], str],
+    format_age_fn: Callable[[float, bool], str],
+    last_agent_snippet_for_pane_fn: Callable[[str, str], str],
+    paused_activity_for_pane_fn: Callable[[str], str],
+    message_summary_for_row_fn: Callable[[dict[str, str]], str],
+    status_window_pane_cell_fn: Callable[[str, str, str, str], str],
+    state_summary_fn: Callable[[str, dict[str, str]], str],
+) -> list[tuple[str, str, str, str, str, str]]:
     rows_data: list[tuple[str, str, str, str, str, str]] = []
     for row, current_pane, window_label in resolved:
         session_json = read_state_json_fn(row["state"])
@@ -615,8 +647,7 @@ def status_table(
                 msg_raw,
             )
         )
-
-    render_status_table_fn(rows_data, section_every, max_msg_lines)
+    return rows_data
 
 
 def status_details(

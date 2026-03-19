@@ -87,10 +87,26 @@ def render_status_table(
 ) -> None:
     try:
         from rich.console import Console
-        from rich.table import Table
     except ModuleNotFoundError:
         status_table_plain(rows_data, section_every=section_every)
         return
+    Console().print(
+        build_status_table_renderable(
+            rows_data,
+            section_every=section_every,
+            max_msg_lines=max_msg_lines,
+        )
+    )
+
+
+def build_status_table_renderable(
+    rows_data: list[tuple[str, str, str, str, str, str]],
+    *,
+    section_every: int,
+    max_msg_lines: int,
+):
+    from rich.table import Table
+    from rich.text import Text
 
     term_w = shutil.get_terminal_size((120, 24)).columns
     headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
@@ -111,17 +127,56 @@ def render_status_table(
 
     for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
         table.add_row(
-            window_pane,
-            state_value,
-            started,
-            last_acw,
-            clamp_visual_lines(last_agent, max_msg_lines, last_agent_col_w),
-            clamp_visual_lines(msg_raw, max_msg_lines, msg_col_w),
+            Text.from_markup(window_pane),
+            Text.from_markup(state_value),
+            Text.from_markup(started),
+            Text.from_markup(last_acw),
+            Text.from_markup(clamp_visual_lines(last_agent, max_msg_lines, last_agent_col_w)),
+            Text.from_markup(clamp_visual_lines(msg_raw, max_msg_lines, msg_col_w)),
         )
         if idx % section_every == 0 and idx != len(rows_data):
             table.add_section()
 
-    Console().print(table)
+    return table
+
+
+def build_status_watch_renderable(
+    rows_data: list[tuple[str, str, str, str, str, str]],
+    *,
+    section_every: int,
+    max_msg_lines: int,
+    recommendations: list[str],
+    invariant_messages: list[str],
+):
+    from rich.console import Group
+    from rich.text import Text
+
+    renderables: list[object] = [
+        Text("Watching acw status. Press Ctrl-C to exit.", style="bold cyan"),
+        Text(f"Sessions: {len(rows_data)}", style="bold"),
+    ]
+    if rows_data:
+        renderables.append(
+            build_status_table_renderable(
+                rows_data,
+                section_every=section_every,
+                max_msg_lines=max_msg_lines,
+            )
+        )
+    else:
+        renderables.append(Text("(none)", style="dim"))
+
+    for command in recommendations:
+        renderables.append(Text(f"Recommendation: run {command}", style="bold green"))
+    for message in invariant_messages:
+        style = "yellow"
+        if message.startswith("Shared daemon error") or message.startswith("Invariant error"):
+            style = "bold red"
+        elif message.startswith("Hint:"):
+            style = "yellow"
+        renderables.append(Text(message, style=style))
+
+    return Group(*renderables)
 
 
 def print_doctor_plain(report, *, state_dir: str, tmux_socket: str) -> None:

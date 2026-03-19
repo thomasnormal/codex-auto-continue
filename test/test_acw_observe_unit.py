@@ -37,6 +37,7 @@ def _observe_context(*, status_table, status_details=None):
         status_sort_key=lambda item: item[2],
         status_details=status_details,
         status_table=status_table,
+        status_watch_frame=lambda resolved: (f"resolved:{len(resolved)}", f"renderable:{len(resolved)}"),
         print_status_recommendations=lambda resolved: None,
         state_dir_is_writable=lambda: (True, "/tmp"),
         codex_auth_state_available=lambda: (True, "/tmp/auth.json"),
@@ -58,7 +59,7 @@ def _observe_context(*, status_table, status_details=None):
 
 
 class AcwObserveUnitTests(unittest.TestCase):
-    def test_watch_status_loop_repaints_only_when_content_changes(self):
+    def test_watch_status_loop_repaints_only_when_content_changes_in_text_mode(self):
         rendered: list[int] = []
         frames: list[tuple[bool, str]] = []
         slept: list[float] = []
@@ -82,6 +83,7 @@ class AcwObserveUnitTests(unittest.TestCase):
                 stop_after_iterations=3,
                 render_status_text_fn=lambda _context, _argv: next(statuses),
                 write_frame_fn=lambda text, first_frame: frames.append((first_frame, text)),
+                live_display_factory=None,
             )
 
         self.assertEqual([], rendered)
@@ -91,6 +93,50 @@ class AcwObserveUnitTests(unittest.TestCase):
             [
                 (True, "Watching acw status. Press Ctrl-C to exit.\n\nSessions: 1\nrow one\n"),
                 (False, "Watching acw status. Press Ctrl-C to exit.\n\nSessions: 1\nrow two\n"),
+            ],
+            frames,
+        )
+
+    def test_watch_status_loop_updates_live_display_only_when_content_changes(self):
+        frames: list[str] = []
+        slept: list[float] = []
+        statuses = iter(
+            [
+                ("frame-one", "renderable-one"),
+                ("frame-one", "renderable-one"),
+                ("frame-two", "renderable-two"),
+            ]
+        )
+
+        class FakeLive:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def update(self, renderable: str) -> None:
+                frames.append(renderable)
+
+        context = _observe_context(status_table=lambda resolved: None)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            acw_observe.watch_status_loop(
+                context,
+                [],
+                stdout_isatty_fn=lambda: True,
+                sleep_fn=lambda seconds: slept.append(seconds),
+                refresh_secs=0.5,
+                stop_after_iterations=3,
+                render_status_live_frame_fn=lambda _context, _argv: next(statuses),
+                live_display_factory=lambda: FakeLive(),
+            )
+
+        self.assertEqual([0.5, 0.5], slept)
+        self.assertEqual(
+            [
+                "renderable-one",
+                "renderable-two",
             ],
             frames,
         )

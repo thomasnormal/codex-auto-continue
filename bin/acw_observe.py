@@ -30,6 +30,7 @@ class ObserveContext:
     status_sort_key: Callable[[tuple[dict[str, str], str, str]], Any]
     status_details: Callable[[list[tuple[dict[str, str], str, str]], Any | None], None]
     status_table: Callable[[list[tuple[dict[str, str], str, str]]], None]
+    status_watch_frame: Callable[[list[tuple[dict[str, str], str, str]]], tuple[str, Any]]
     print_status_recommendations: Callable[[list[tuple[dict[str, str], str, str]]], None]
     state_dir_is_writable: Callable[[], tuple[bool, str]]
     codex_auth_state_available: Callable[[], tuple[bool, str]]
@@ -64,35 +65,12 @@ def render_status_once(
     context: ObserveContext,
     argv: list[str],
 ) -> None:
-    pane_arg, details = _status_args(argv)
-
-    snapshot = context.build_runtime_snapshot()
-    model = context.build_runtime_model(snapshot)
-    recovery = ""
-    if not snapshot.panes and not snapshot.watchers:
-        recovery = context.tmux_socket_recovery_hint()
-        if recovery:
-            print(
-                "warning: tmux metadata is unavailable; status is falling back to saved session state",
-                file=sys.stderr,
-            )
-            print(recovery, file=sys.stderr)
-
-    resolved = context.build_status_entries_from_snapshot(snapshot)
-
-    if pane_arg:
-        target = pane_arg
-        pane = context.resolve_live_pane_target(target)
-        if pane and pane != target:
-            print(f"resolved: target={target} pane={pane}")
-        target_thread = target.lower() if context.is_thread_id(target) else ""
-        resolved = [
-            (row, live_pane, window_label)
-            for row, live_pane, window_label in resolved
-            if (pane and live_pane == pane)
-            or (target_thread and row.get("thread", "").lower() == target_thread)
-            or row.get("session_name", "") == target
-        ]
+    resolved, model, details = _build_status_entries(
+        context,
+        argv,
+        warn_if_tmux_unavailable=True,
+        print_resolution=True,
+    )
 
     detail_tag = " (details)" if details else ""
     print(f"Sessions{detail_tag}: {len(resolved)}")
@@ -100,8 +78,6 @@ def render_status_once(
     if not resolved:
         print("(none)")
         return
-
-    resolved.sort(key=context.status_sort_key)
 
     if details:
         context.status_details(resolved, model=model)
@@ -120,6 +96,19 @@ def render_status_text(
     return buffer.getvalue()
 
 
+def render_status_live_frame(
+    context: ObserveContext,
+    argv: list[str],
+) -> tuple[str, Any]:
+    resolved, _model, _details = _build_status_entries(
+        context,
+        argv,
+        warn_if_tmux_unavailable=False,
+        print_resolution=False,
+    )
+    return context.status_watch_frame(resolved)
+
+
 def _write_watch_frame(text: str, *, first_frame: bool) -> None:
     if first_frame:
         sys.stdout.write("\x1b[2J\x1b[H")
@@ -131,6 +120,71 @@ def _write_watch_frame(text: str, *, first_frame: bool) -> None:
     sys.stdout.flush()
 
 
+def _build_status_entries(
+    context: ObserveContext,
+    argv: list[str],
+    *,
+    warn_if_tmux_unavailable: bool,
+    print_resolution: bool,
+) -> tuple[list[tuple[dict[str, str], str, str]], Any, bool]:
+    pane_arg, details = _status_args(argv)
+    snapshot = context.build_runtime_snapshot()
+    model = context.build_runtime_model(snapshot)
+    if warn_if_tmux_unavailable and not snapshot.panes and not snapshot.watchers:
+        recovery = context.tmux_socket_recovery_hint()
+        if recovery:
+            print(
+                "warning: tmux metadata is unavailable; status is falling back to saved session state",
+                file=sys.stderr,
+            )
+            print(recovery, file=sys.stderr)
+
+    resolved = context.build_status_entries_from_snapshot(snapshot)
+    if pane_arg:
+        target = pane_arg
+        pane = context.resolve_live_pane_target(target)
+        if print_resolution and pane and pane != target:
+            print(f"resolved: target={target} pane={pane}")
+        target_thread = target.lower() if context.is_thread_id(target) else ""
+        resolved = [
+            (row, live_pane, window_label)
+            for row, live_pane, window_label in resolved
+            if (pane and live_pane == pane)
+            or (target_thread and row.get("thread", "").lower() == target_thread)
+            or row.get("session_name", "") == target
+        ]
+
+    resolved.sort(key=context.status_sort_key)
+    return resolved, model, details
+
+
+class _RichLiveDisplay:
+    def __init__(self) -> None:
+        from rich.console import Console
+        from rich.live import Live
+
+        self._live = Live(
+            "",
+            console=Console(force_terminal=True, color_system="standard"),
+            auto_refresh=False,
+            transient=False,
+            redirect_stdout=False,
+            redirect_stderr=False,
+            screen=False,
+            vertical_overflow="visible",
+        )
+
+    def __enter__(self) -> "_RichLiveDisplay":
+        self._live.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._live.__exit__(exc_type, exc, tb)
+
+    def update(self, renderable: Any) -> None:
+        self._live.update(renderable, refresh=True)
+
+
 def watch_status_loop(
     context: ObserveContext,
     argv: list[str],
@@ -140,30 +194,53 @@ def watch_status_loop(
     refresh_secs: float = 1.0,
     stop_after_iterations: int | None = None,
     render_status_text_fn: Callable[[ObserveContext, list[str]], str] = render_status_text,
+    render_status_live_frame_fn: Callable[[ObserveContext, list[str]], tuple[str, Any]] = render_status_live_frame,
     write_frame_fn: Callable[[str, bool], None] = lambda text, first_frame: _write_watch_frame(
         text,
         first_frame=first_frame,
     ),
+    live_display_factory: Callable[[], Any] | None = _RichLiveDisplay,
 ) -> None:
     if not stdout_isatty_fn():
         render_status_once(context, argv)
         return
 
+    _pane_arg, details = _status_args(argv)
+    use_live = live_display_factory is not None and not details
     iterations = 0
     last_frame = ""
     first_frame = True
     try:
-        while True:
-            frame = "Watching acw status. Press Ctrl-C to exit.\n\n"
-            frame += render_status_text_fn(context, argv)
-            if frame != last_frame:
-                write_frame_fn(frame, first_frame)
-                last_frame = frame
-                first_frame = False
-            iterations += 1
-            if stop_after_iterations is not None and iterations >= stop_after_iterations:
-                return
-            sleep_fn(refresh_secs)
+        if use_live:
+            try:
+                live_context = live_display_factory()
+            except ModuleNotFoundError:
+                live_context = None
+            if live_context is None:
+                use_live = False
+        if use_live:
+            with live_context as live:
+                while True:
+                    frame_key, renderable = render_status_live_frame_fn(context, argv)
+                    if frame_key != last_frame:
+                        live.update(renderable)
+                        last_frame = frame_key
+                    iterations += 1
+                    if stop_after_iterations is not None and iterations >= stop_after_iterations:
+                        return
+                    sleep_fn(refresh_secs)
+        else:
+            while True:
+                frame = "Watching acw status. Press Ctrl-C to exit.\n\n"
+                frame += render_status_text_fn(context, argv)
+                if frame != last_frame:
+                    write_frame_fn(frame, first_frame)
+                    last_frame = frame
+                    first_frame = False
+                iterations += 1
+                if stop_after_iterations is not None and iterations >= stop_after_iterations:
+                    return
+                sleep_fn(refresh_secs)
     except KeyboardInterrupt:
         return
 
