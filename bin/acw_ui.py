@@ -153,7 +153,6 @@ def build_status_watch_renderable(
 
     renderables: list[object] = [
         Text("Watching acw status. Press Ctrl-C to exit.", style="bold cyan"),
-        Text(f"Sessions: {len(rows_data)}", style="bold"),
     ]
     if rows_data:
         renderables.append(

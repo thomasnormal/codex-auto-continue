@@ -2,6 +2,7 @@
 
 ## 2026-03-18
 
+- Change: the Rich live bare-`acw` watch header no longer adds its own extra `Sessions: N` line above the table. The live view now keeps only the persistent “Watching acw status…” header and the table itself, while the plain-text fallback remains unchanged.
 - Change: the interactive bare-`acw` watch path now uses a real Rich `Live` renderable when `rich` is importable in the running interpreter, instead of trying to capture ANSI-colored status text after the fact. The watch view now reuses the same status-row builder as one-shot `acw status`, renders the live table with actual styled cells, and only falls back to the old plain-text repaint path when `rich` is genuinely unavailable (for example in the temporary-HOME local integration harness).
 - Change: bare `acw` is now interactive in a real terminal. With no subcommand and a TTY, it continuously refreshes the status table once per second so live pane state and recent agent output update in place. `acw status` remains the one-shot snapshot command, and bare `acw` still falls back to that static behavior when stdout is not a TTY.
 - Change: the interactive bare-`acw` watch loop now renders each frame off-screen and only repaints when the visible status text actually changes. It also switched from full-screen `2J` clears to cursor-home plus clear-to-end-of-screen, which removes most of the visible flash between refreshes.
