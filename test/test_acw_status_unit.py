@@ -58,8 +58,8 @@ class AcwStatusUnitTests(unittest.TestCase):
 
         self.assertEqual("1h00m/acw", label)
 
-    def test_status_table_appends_average_continue_line_to_last_acw(self):
-        captured: list[tuple[str, str, str, str, str, str]] = []
+    def test_status_table_combines_started_last_acw_and_average(self):
+        captured: list[tuple[str, str, str, str, str]] = []
         acw_status.status_table(
             [(
                 {
@@ -90,7 +90,7 @@ class AcwStatusUnitTests(unittest.TestCase):
             max_msg_lines=3,
         )
 
-        self.assertEqual("5m\n[dim]1h10m/acw[/dim]", captured[0][3])
+        self.assertEqual("s: 3h30m\nl: 5m\na: 1h10m", captured[0][2])
 
 
 if __name__ == "__main__":

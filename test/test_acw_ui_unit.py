@@ -9,6 +9,33 @@ import acw_ui  # noqa: E402
 
 
 class AcwUiUnitTests(unittest.TestCase):
+    def test_build_status_table_renderable_uses_combined_time_column(self):
+        from rich.console import Console
+
+        renderable = acw_ui.build_status_table_renderable(
+            [
+                (
+                    "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]id=1[/dim]",
+                    "[green]busy[/green]",
+                    "s: 1d\nl: 5m\na: 20m",
+                    "Explored",
+                    "continue",
+                )
+            ],
+            section_every=3,
+            max_msg_lines=3,
+        )
+        console = Console(record=True, force_terminal=True, color_system="standard", width=120)
+        console.print(renderable)
+        text = console.export_text(styles=False)
+
+        self.assertIn("TIME", text)
+        self.assertNotIn("STARTED", text)
+        self.assertNotIn("LAST_ACW", text)
+        self.assertIn("s: 1d", text)
+        self.assertIn("l: 5m", text)
+        self.assertIn("a: 20m", text)
+
     def test_build_status_watch_renderable_omits_sessions_summary_line(self):
         from rich.console import Console
 
@@ -17,8 +44,7 @@ class AcwUiUnitTests(unittest.TestCase):
                 (
                     "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]id=1[/dim]",
                     "[green]busy[/green]",
-                    "1d",
-                    "5m",
+                    "s: 1d\nl: 5m\na: 20m",
                     "Explored",
                     "continue",
                 )

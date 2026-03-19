@@ -193,7 +193,9 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         status = self.harness.run_manager("status")
 
-        self.assertIn("/acw", status.stdout, self.harness.diagnostics())
+        self.assertIn("a: ", status.stdout, self.harness.diagnostics())
+        self.assertIn("l: ", status.stdout, self.harness.diagnostics())
+        self.assertIn("s: ", status.stdout, self.harness.diagnostics())
 
     def test_bare_acw_refreshes_interactive_status_over_pty(self):
         self.harness.rename_window("watchlive")

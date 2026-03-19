@@ -95,6 +95,20 @@ def average_continue_label(
     return f"{format_age_fn(now - average_secs, True)}/acw"
 
 
+def average_continue_value(label: str) -> str:
+    label = label.strip()
+    if label.endswith("/acw"):
+        return label[:-4]
+    return label
+
+
+def status_time_cell(started: str, last_acw: str, average_continue: str) -> str:
+    started = started.strip() or "-"
+    last_acw = last_acw.strip() or "-"
+    average_continue = average_continue_value(average_continue) or "-"
+    return f"s: {started}\nl: {last_acw}\na: {average_continue}"
+
+
 def resolve_message(
     row: dict[str, str],
     *,
@@ -571,7 +585,7 @@ def status_table(
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
     status_window_pane_cell_fn: Callable[[str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
-    render_status_table_fn: Callable[[list[tuple[str, str, str, str, str, str]], int, int], None],
+    render_status_table_fn: Callable[[list[tuple[str, str, str, str, str]], int, int], None],
     section_every: int,
     max_msg_lines: int,
 ) -> None:
@@ -606,8 +620,8 @@ def status_rows_data(
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
     status_window_pane_cell_fn: Callable[[str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
-) -> list[tuple[str, str, str, str, str, str]]:
-    rows_data: list[tuple[str, str, str, str, str, str]] = []
+) -> list[tuple[str, str, str, str, str]]:
+    rows_data: list[tuple[str, str, str, str, str]] = []
     for row, current_pane, window_label in resolved:
         session_json = read_state_json_fn(row["state"])
         state_value = compute_state_fn(row, session_json)
@@ -627,8 +641,7 @@ def status_rows_data(
         if not last_acw:
             last_acw = "-"
         average_continue = average_continue_label_fn(row, session_json)
-        if average_continue:
-            last_acw = f"{last_acw}\n[dim]{average_continue}[/dim]"
+        time_cell = status_time_cell(started, last_acw, average_continue)
         last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
         msg_raw = message_summary_for_row_fn(row)
         window_pane = status_window_pane_cell_fn(
@@ -641,8 +654,7 @@ def status_rows_data(
             (
                 window_pane,
                 state_summary_fn(rendered_state, {"health_detail": state_detail}),
-                started,
-                last_acw,
+                time_cell,
                 last_agent,
                 msg_raw,
             )

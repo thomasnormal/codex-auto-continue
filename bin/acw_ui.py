@@ -51,14 +51,19 @@ def strip_rich_markup(text: str) -> str:
 
 
 def status_table_plain(
-    rows_data: list[tuple[str, str, str, str, str, str]],
+    rows_data: list[tuple[str, ...]],
     *,
     section_every: int,
 ) -> None:
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW", "LAST_AGENT", "MESSAGE")
-    plain_rows: list[tuple[str, str, str, str, str, str]] = []
+    headers = ("WINDOW/PANE", "STATE", "TIME", "LAST_AGENT", "MESSAGE")
+    plain_rows: list[tuple[str, str, str, str, str]] = []
     for row in rows_data:
-        plain_rows.append(tuple(strip_rich_markup(cell).replace("\n", " / ") for cell in row))
+        plain_rows.append(
+            tuple(
+                strip_rich_markup(cell).replace("\n", " / ")
+                for cell in _normalize_status_row(row)
+            )
+        )
 
     widths = [len(header) for header in headers]
     for row in plain_rows:
@@ -80,7 +85,7 @@ def status_table_plain(
 
 
 def render_status_table(
-    rows_data: list[tuple[str, str, str, str, str, str]],
+    rows_data: list[tuple[str, ...]],
     *,
     section_every: int,
     max_msg_lines: int,
@@ -100,7 +105,7 @@ def render_status_table(
 
 
 def build_status_table_renderable(
-    rows_data: list[tuple[str, str, str, str, str, str]],
+    rows_data: list[tuple[str, ...]],
     *,
     section_every: int,
     max_msg_lines: int,
@@ -109,28 +114,28 @@ def build_status_table_renderable(
     from rich.text import Text
 
     term_w = shutil.get_terminal_size((120, 24)).columns
-    headers = ("WINDOW/PANE", "STATE", "STARTED", "LAST_ACW")
+    headers = ("WINDOW/PANE", "STATE", "TIME")
     col_widths = [len(header) for header in headers]
     for row in rows_data:
-        for idx in range(4):
-            text = strip_rich_markup(row[idx].split("\n")[0])
+        normalized = _normalize_status_row(row)
+        for idx in range(3):
+            text = strip_rich_markup(normalized[idx].split("\n")[0])
             col_widths[idx] = max(col_widths[idx], len(text))
     last_agent_col_w, msg_col_w = status_flex_widths(term_w, col_widths)
 
     table = Table(show_lines=False, expand=True)
     table.add_column("WINDOW/PANE", no_wrap=True)
     table.add_column("STATE", no_wrap=True)
-    table.add_column("STARTED", no_wrap=True)
-    table.add_column("LAST_ACW", no_wrap=True)
+    table.add_column("TIME", no_wrap=True)
     table.add_column("LAST_AGENT", ratio=2, max_width=last_agent_col_w)
     table.add_column("MESSAGE", ratio=1, max_width=msg_col_w)
 
-    for idx, (window_pane, state_value, started, last_acw, last_agent, msg_raw) in enumerate(rows_data, 1):
+    for idx, row in enumerate(rows_data, 1):
+        window_pane, state_value, time_cell, last_agent, msg_raw = _normalize_status_row(row)
         table.add_row(
             Text.from_markup(window_pane),
             Text.from_markup(state_value),
-            Text.from_markup(started),
-            Text.from_markup(last_acw),
+            Text.from_markup(time_cell),
             Text.from_markup(clamp_visual_lines(last_agent, max_msg_lines, last_agent_col_w)),
             Text.from_markup(clamp_visual_lines(msg_raw, max_msg_lines, msg_col_w)),
         )
@@ -141,7 +146,7 @@ def build_status_table_renderable(
 
 
 def build_status_watch_renderable(
-    rows_data: list[tuple[str, str, str, str, str, str]],
+    rows_data: list[tuple[str, ...]],
     *,
     section_every: int,
     max_msg_lines: int,
@@ -176,6 +181,14 @@ def build_status_watch_renderable(
         renderables.append(Text(message, style=style))
 
     return Group(*renderables)
+
+
+def _normalize_status_row(row: tuple[str, ...]) -> tuple[str, str, str, str, str]:
+    if len(row) == 5:
+        return row[0], row[1], row[2], row[3], row[4]
+    if len(row) == 6:
+        return row[0], row[1], f"s: {row[2]}\nl: {row[3]}\na: -", row[4], row[5]
+    raise ValueError(f"expected 5 or 6 columns in status row, got {len(row)}")
 
 
 def print_doctor_plain(report, *, state_dir: str, tmux_socket: str) -> None:
