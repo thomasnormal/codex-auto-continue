@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 from pathlib import Path
 import re
 import signal
 import sqlite3
+import subprocess
 import sys
 import termios
 import time
@@ -48,8 +50,21 @@ def _ensure_state_db(path: Path) -> sqlite3.Connection:
         "title text, "
         "first_user_message text, "
         "created_at integer, "
-        "updated_at integer)"
+        "updated_at integer, "
+        "rollout_path text not null default '', "
+        "cwd text not null default '', "
+        "git_branch text, "
+        "git_sha text)"
     )
+    columns = {row[1] for row in conn.execute("pragma table_info(threads)")}
+    for name, ddl in (
+        ("rollout_path", "alter table threads add column rollout_path text not null default ''"),
+        ("cwd", "alter table threads add column cwd text not null default ''"),
+        ("git_branch", "alter table threads add column git_branch text"),
+        ("git_sha", "alter table threads add column git_sha text"),
+    ):
+        if name not in columns:
+            conn.execute(ddl)
     conn.execute(
         "create table if not exists logs ("
         "thread_id text, "
@@ -61,20 +76,57 @@ def _ensure_state_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _upsert_thread(conn: sqlite3.Connection, thread_id: str, *, prompt: str, created_at: int) -> None:
+def _git_repo_state(cwd: Path) -> tuple[str, str]:
+    branch = ""
+    sha = ""
+    try:
+        branch_proc = subprocess.run(
+            ["git", "-C", str(cwd), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if branch_proc.returncode == 0:
+            branch = branch_proc.stdout.strip()
+        sha_proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if sha_proc.returncode == 0:
+            sha = sha_proc.stdout.strip()
+    except FileNotFoundError:
+        return "", ""
+    return branch, sha
+
+
+def _upsert_thread(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    *,
+    prompt: str,
+    created_at: int,
+    rollout_path: Path,
+    cwd: Path,
+    git_branch: str,
+    git_sha: str,
+) -> None:
     row = conn.execute("select created_at from threads where id = ?", (thread_id,)).fetchone()
     first = prompt.strip()
     title = first.splitlines()[0][:120] if first else ""
     if row:
         conn.execute(
             "update threads set updated_at = ?, title = coalesce(nullif(title, ''), ?), "
-            "first_user_message = coalesce(nullif(first_user_message, ''), ?) where id = ?",
-            (created_at, title, first, thread_id),
+            "first_user_message = coalesce(nullif(first_user_message, ''), ?), "
+            "rollout_path = ?, cwd = ?, git_branch = ?, git_sha = ? where id = ?",
+            (created_at, title, first, str(rollout_path), str(cwd), git_branch or None, git_sha or None, thread_id),
         )
     else:
         conn.execute(
-            "insert into threads(id, title, first_user_message, created_at, updated_at) values (?, ?, ?, ?, ?)",
-            (thread_id, title, first, created_at, created_at),
+            "insert into threads(id, title, first_user_message, created_at, updated_at, rollout_path, cwd, git_branch, git_sha) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (thread_id, title, first, created_at, created_at, str(rollout_path), str(cwd), git_branch or None, git_sha or None),
         )
     conn.commit()
 
@@ -87,6 +139,21 @@ def _append_log_row(conn: sqlite3.Connection, thread_id: str, process_uuid: str)
     )
     conn.execute("update threads set updated_at = ? where id = ?", (ts, thread_id))
     conn.commit()
+
+
+def _append_rollout_function_call(rollout_path: Path, *, cwd: Path, cmd: str) -> None:
+    rollout_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": cmd, "workdir": str(cwd)}),
+        },
+    }
+    with rollout_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
 
 def _render_response(prompt: str) -> str:
@@ -173,8 +240,12 @@ def _handle_prompt(
     *,
     conn: sqlite3.Connection,
     log_path: Path,
+    rollout_path: Path,
     thread_id: str,
     process_uuid: str,
+    cwd: Path,
+    git_branch: str,
+    git_sha: str,
     out,
 ) -> bool:
     prompt = prompt.strip()
@@ -183,7 +254,17 @@ def _handle_prompt(
     if _is_continue_prompt(prompt):
         return True
     ts, _ = _now_parts()
-    _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
+    _append_rollout_function_call(rollout_path, cwd=cwd, cmd="fake_codex_prompt")
+    _upsert_thread(
+        conn,
+        thread_id,
+        prompt=prompt,
+        created_at=ts,
+        rollout_path=rollout_path,
+        cwd=cwd,
+        git_branch=git_branch,
+        git_sha=git_sha,
+    )
     _append_log_row(conn, thread_id, process_uuid)
     if _is_test_approval_prompt(prompt):
         _render_test_approval_prompt(out)
@@ -228,6 +309,9 @@ def main(argv: list[str]) -> int:
         thread_id = _new_id()
         prompt = " ".join(args)
 
+    rollout_path = sessions_dir / f"rollout-{thread_id}.jsonl"
+    cwd = Path.cwd()
+    git_branch, git_sha = _git_repo_state(cwd)
     process_uuid = f"pid:{os.getpid()}:fakecodex"
     conn = _ensure_state_db(state_db)
     session_path = sessions_dir / f"{thread_id}.json"
@@ -245,7 +329,16 @@ def main(argv: list[str]) -> int:
             tty = sys.stdin
             tty_restore = None
         ts, _ = _now_parts()
-        _upsert_thread(conn, thread_id, prompt=prompt, created_at=ts)
+        _upsert_thread(
+            conn,
+            thread_id,
+            prompt=prompt,
+            created_at=ts,
+            rollout_path=rollout_path,
+            cwd=cwd,
+            git_branch=git_branch,
+            git_sha=git_sha,
+        )
         _log_line(log_path, f"session_init:shell_snapshot{{thread_id={thread_id}}}: codex_core::shell_snapshot: new")
         show_prompt = True
         if prompt:
@@ -253,8 +346,12 @@ def main(argv: list[str]) -> int:
                 prompt,
                 conn=conn,
                 log_path=log_path,
+                rollout_path=rollout_path,
                 thread_id=thread_id,
                 process_uuid=process_uuid,
+                cwd=cwd,
+                git_branch=git_branch,
+                git_sha=git_sha,
                 out=sys.stdout,
             )
         if show_prompt:
@@ -268,8 +365,12 @@ def main(argv: list[str]) -> int:
                 line,
                 conn=conn,
                 log_path=log_path,
+                rollout_path=rollout_path,
                 thread_id=thread_id,
                 process_uuid=process_uuid,
+                cwd=cwd,
+                git_branch=git_branch,
+                git_sha=git_sha,
                 out=sys.stdout,
             )
             if show_prompt:

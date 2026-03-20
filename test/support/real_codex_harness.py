@@ -370,6 +370,14 @@ class RealCodexHarness:
     def manager_state_db(self) -> Path:
         return self.codex_dir / "acw_state.sqlite"
 
+    @property
+    def codex_state_db(self) -> Path:
+        fake_db = self.codex_dir / "state_fake.sqlite"
+        if fake_db.is_file():
+            return fake_db
+        state_dbs = sorted(self.codex_dir.glob("state_*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return state_dbs[0] if state_dbs else fake_db
+
     def _manager_db_query(self, query: str, params: tuple[object, ...]) -> list[dict[str, object]]:
         if not self.manager_state_db.is_file():
             return []
@@ -396,6 +404,56 @@ class RealCodexHarness:
         payload = dict(row)
         payload.update(changes)
         acw_state.write_runtime_state(payload, state_dir=str(self.codex_dir), scope=str(self.tmux_socket))
+
+    def codex_thread_row(self, thread_id: str) -> Optional[dict[str, object]]:
+        db_path = self.codex_state_db
+        if not db_path.is_file():
+            return None
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute("select * from threads where id = ?", (thread_id,)).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def mutate_codex_thread_state(self, thread_id: str, **changes: object) -> None:
+        row = self.codex_thread_row(thread_id)
+        if row is None:
+            raise AssertionError(f"no Codex thread row for thread {thread_id}\n{self.diagnostics()}")
+        payload = dict(row)
+        payload.update(changes)
+        keys = list(payload.keys())
+        assignments = ", ".join(f"{key} = ?" for key in keys if key != "id")
+        values = [payload[key] for key in keys if key != "id"]
+        values.append(thread_id)
+        conn = sqlite3.connect(self.codex_state_db)
+        try:
+            conn.execute(f"update threads set {assignments} where id = ?", values)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def append_codex_rollout_workdir(self, thread_id: str, workdir: str, *, cmd: str = "pwd") -> None:
+        row = self.codex_thread_row(thread_id)
+        if row is None:
+            raise AssertionError(f"no Codex thread row for thread {thread_id}\n{self.diagnostics()}")
+        rollout_text = str(row.get("rollout_path", "")).strip()
+        if not rollout_text:
+            raise AssertionError(f"no rollout path for thread {thread_id}\n{self.diagnostics()}")
+        rollout_path = Path(rollout_text)
+        rollout_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": cmd, "workdir": workdir}),
+            },
+        }
+        with rollout_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
 
     def manager_runtime_rows(self) -> list[dict[str, object]]:
         rows = self._manager_db_query(

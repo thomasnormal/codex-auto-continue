@@ -1,5 +1,12 @@
 # Engineering Log
 
+## 2026-03-20
+
+- Change: branch display in `acw status` no longer comes from tmux pane cwd. It now reads the latest explicit tool `workdir` from the Codex rollout JSONL for that thread, via `threads.rollout_path`, and derives `br=...` from that path. This matches Codex's internal tool working directory instead of the shell cwd shown in the tmux pane.
+- Realization: tmux `#{pane_current_path}` can stay on the original checkout even after Codex tool calls have moved to a different worktree. A real session proved this with `/home/thomas-ahle/circt-debug-ppa`: tmux still showed `~/circt`, but the rollout JSONL recorded `workdir=/home/thomas-ahle/circt-debug-ppa`, which is the directory Codex was actually using for tool calls.
+- Change: the shared `acw_codex` helper now caches per-thread rollout workdir lookups and reads rollout files from the end backward, so interactive `acw` can follow Codex-side workdir changes without re-reading entire rollout files on every refresh.
+- Change: the local fake-Codex backend now writes minimal rollout JSONL files plus `threads.rollout_path` / `cwd` / `git_branch` / `git_sha` metadata. The local tmux/CLI suite now has a real regression where tmux pane cwd is intentionally non-git while the rollout `workdir` points at the repo, proving that `acw status` follows Codex workdir instead of tmux cwd.
+
 ## 2026-03-18
 
 - Fix: the new `br=...` branch display now prefers the live tmux pane path (`#{pane_current_path}`) over the daemon runtime's stored `cwd`. The first implementation had incorrectly reused the daemon runtime cwd, which was really the directory where the shared daemon had been started. That made branch labels flicker between the repo branch and `-` after daemon restarts or commands launched from different directories. Status now reads the branch from the live pane path and only falls back to the stored cwd when there is no live pane.

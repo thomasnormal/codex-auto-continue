@@ -1,9 +1,11 @@
 import os
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import sqlite3
 
 import sys
 
@@ -18,6 +20,9 @@ TURN = "019cd7fb-f4cf-7512-8325-dae60d5294e4"
 
 
 class AcwCodexUnitTests(unittest.TestCase):
+    def tearDown(self):
+        acw_codex.clear_thread_workdir_cache()
+
     def test_parse_codex_log_event_parses_task_close_line(self):
         line = (
             f'2026-03-10T13:42:21Z INFO session_loop{{thread_id={THREAD}}}:'
@@ -90,6 +95,74 @@ class AcwCodexUnitTests(unittest.TestCase):
         send_key_calls = [cmd for cmd, _ in calls if cmd[:3] == ["send-keys", "-t", "%11"]]
         self.assertIn(["send-keys", "-t", "%11", "-l", "continue"], send_key_calls)
         self.assertFalse(any(cmd[-1] == "C-m" for cmd in send_key_calls))
+
+    def test_thread_workdir_from_rollout_uses_latest_function_call_workdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            rollout_path = state_dir / "rollout.jsonl"
+            rollout_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "payload": {
+                                    "type": "function_call",
+                                    "name": "exec_command",
+                                    "arguments": json.dumps({"cmd": "pwd", "workdir": "/repo-one"}),
+                                }
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "payload": {
+                                    "type": "function_call",
+                                    "name": "exec_command",
+                                    "arguments": json.dumps({"cmd": "git status", "workdir": "/repo-two"}),
+                                }
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            conn = sqlite3.connect(state_dir / "state_test.sqlite")
+            conn.execute(
+                "create table threads (id text primary key, rollout_path text not null, updated_at integer not null)"
+            )
+            conn.execute(
+                "insert into threads(id, rollout_path, updated_at) values (?, ?, ?)",
+                (THREAD, str(rollout_path), 1),
+            )
+            conn.commit()
+            conn.close()
+
+            workdir = acw_codex.thread_workdir_from_rollout(THREAD, state_dir=state_dir, ttl_secs=0.0)
+
+        self.assertEqual("/repo-two", workdir)
+
+    def test_thread_workdir_from_rollout_returns_empty_when_no_workdir_found(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            rollout_path = state_dir / "rollout.jsonl"
+            rollout_path.write_text(
+                json.dumps({"payload": {"type": "message", "role": "assistant"}}) + "\n",
+                encoding="utf-8",
+            )
+            conn = sqlite3.connect(state_dir / "state_test.sqlite")
+            conn.execute(
+                "create table threads (id text primary key, rollout_path text not null, updated_at integer not null)"
+            )
+            conn.execute(
+                "insert into threads(id, rollout_path, updated_at) values (?, ?, ?)",
+                (THREAD, str(rollout_path), 1),
+            )
+            conn.commit()
+            conn.close()
+
+            workdir = acw_codex.thread_workdir_from_rollout(THREAD, state_dir=state_dir, ttl_secs=0.0)
+
+        self.assertEqual("", workdir)
 
 
 if __name__ == "__main__":

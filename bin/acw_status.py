@@ -584,8 +584,7 @@ def status_table(
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
     paused_activity_for_pane_fn: Callable[[str], str],
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
-    pane_cwd_for_pane_fn: Callable[[str], str],
-    branch_for_cwd_fn: Callable[[str], str],
+    branch_for_thread_fn: Callable[[str], str],
     status_window_pane_cell_fn: Callable[[str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
     render_status_table_fn: Callable[[list[tuple[str, str, str, str, str]], int, int], None],
@@ -603,8 +602,7 @@ def status_table(
         last_agent_snippet_for_pane_fn=last_agent_snippet_for_pane_fn,
         paused_activity_for_pane_fn=paused_activity_for_pane_fn,
         message_summary_for_row_fn=message_summary_for_row_fn,
-        pane_cwd_for_pane_fn=pane_cwd_for_pane_fn,
-        branch_for_cwd_fn=branch_for_cwd_fn,
+        branch_for_thread_fn=branch_for_thread_fn,
         status_window_pane_cell_fn=status_window_pane_cell_fn,
         state_summary_fn=state_summary_fn,
     )
@@ -623,8 +621,7 @@ def status_rows_data(
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
     paused_activity_for_pane_fn: Callable[[str], str],
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
-    pane_cwd_for_pane_fn: Callable[[str], str],
-    branch_for_cwd_fn: Callable[[str], str],
+    branch_for_thread_fn: Callable[[str], str],
     status_window_pane_cell_fn: Callable[[str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
 ) -> list[tuple[str, str, str, str, str]]:
@@ -651,8 +648,7 @@ def status_rows_data(
         time_cell = status_time_cell(started, last_acw, average_continue)
         last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
         msg_raw = message_summary_for_row_fn(row)
-        pane_cwd = pane_cwd_for_pane_fn(current_pane) if current_pane else ""
-        branch = branch_for_cwd_fn(pane_cwd)
+        branch = branch_for_thread_fn(row["thread"])
         window_pane = status_window_pane_cell_fn(
             window_label,
             current_pane,

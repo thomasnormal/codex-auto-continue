@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -34,6 +35,9 @@ INTERRUPT_RE = re.compile(
 PSTREE_PROCESS_PID_RE = re.compile(r"(?<!\{)[A-Za-z0-9_.+-]+\((\d+)\)")
 
 STATE_DIR = acw_config.state_dir_path()
+_THREAD_WORKDIR_CACHE: dict[str, tuple[float, str]] = {}
+_ROLLOUT_WORKDIR_CACHE: dict[str, tuple[float, str]] = {}
+_DEFAULT_THREAD_WORKDIR_TTL_SECS = 1.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,22 @@ class CodexLogEvent:
     thread_id: str
     turn_id: str = ""
     detail: str = ""
+
+
+def clear_thread_workdir_cache() -> None:
+    _THREAD_WORKDIR_CACHE.clear()
+    _ROLLOUT_WORKDIR_CACHE.clear()
+
+
+def _state_db_candidates(state_dir: Path):
+    seen: set[Path] = set()
+    for path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path not in seen:
+            seen.add(path)
+            yield path
+    fake_db = state_dir / "state_fake.sqlite"
+    if fake_db.is_file() and fake_db not in seen:
+        yield fake_db
 
 
 def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
@@ -232,7 +252,7 @@ def thread_times_from_state_db(thread_id: str, state_dir: Path = STATE_DIR) -> t
 
     best: tuple[Optional[int], Optional[int]] = (None, None)
     best_last = -1
-    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for db_path in _state_db_candidates(state_dir):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:
@@ -274,6 +294,114 @@ def thread_times_from_state_db(thread_id: str, state_dir: Path = STATE_DIR) -> t
     return best
 
 
+def _thread_rollout_path_from_state_db(thread_id: str, state_dir: Path = STATE_DIR) -> str:
+    if not is_thread_id(thread_id) or not state_dir.is_dir():
+        return ""
+
+    best_path = ""
+    best_updated = -1
+    for db_path in _state_db_candidates(state_dir):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute(
+                "select rollout_path, updated_at from threads where id = ?",
+                (thread_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            conn.close()
+        if not row:
+            continue
+        rollout_path = str(row[0] or "").strip()
+        updated_at = int(row[1]) if len(row) > 1 and row[1] is not None else -1
+        if rollout_path and updated_at >= best_updated:
+            best_path = rollout_path
+            best_updated = updated_at
+    return best_path
+
+
+def _iter_rollout_lines_reverse(path: Path, chunk_size: int = 8192):
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        pos = handle.tell()
+        buffer = b""
+        while pos > 0:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            handle.seek(pos)
+            chunk = handle.read(read_size)
+            parts = (chunk + buffer).split(b"\n")
+            buffer = parts[0]
+            for line in reversed(parts[1:]):
+                if line:
+                    yield line.decode("utf-8", "replace")
+        if buffer:
+            yield buffer.decode("utf-8", "replace")
+
+
+def _workdir_from_rollout_path(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    cached = _ROLLOUT_WORKDIR_CACHE.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    workdir = ""
+    try:
+        for line in _iter_rollout_lines_reverse(path):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = obj.get("payload", {})
+            if payload.get("type") != "function_call":
+                continue
+            arguments = payload.get("arguments")
+            if not isinstance(arguments, str) or "workdir" not in arguments:
+                continue
+            try:
+                parsed_args = json.loads(arguments)
+            except json.JSONDecodeError:
+                continue
+            candidate = parsed_args.get("workdir")
+            if isinstance(candidate, str) and candidate.strip():
+                workdir = candidate.strip()
+                break
+    except OSError:
+        workdir = ""
+
+    _ROLLOUT_WORKDIR_CACHE[str(path)] = (mtime, workdir)
+    return workdir
+
+
+def thread_workdir_from_rollout(
+    thread_id: str,
+    state_dir: Path = STATE_DIR,
+    *,
+    ttl_secs: float = _DEFAULT_THREAD_WORKDIR_TTL_SECS,
+    time_fn: Callable[[], float] = time.time,
+) -> str:
+    if not is_thread_id(thread_id):
+        return ""
+    now = time_fn()
+    cached = _THREAD_WORKDIR_CACHE.get(thread_id)
+    if cached and ttl_secs > 0 and now - cached[0] < ttl_secs:
+        return cached[1]
+
+    rollout_path = _thread_rollout_path_from_state_db(thread_id, state_dir)
+    workdir = _workdir_from_rollout_path(Path(rollout_path)) if rollout_path else ""
+    _THREAD_WORKDIR_CACHE[thread_id] = (now, workdir)
+    return workdir
+
+
 def _thread_from_state_db_pid(
     pid: str,
     state_dir: Path = STATE_DIR,
@@ -287,7 +415,7 @@ def _thread_from_state_db_pid(
     started_at = process_start_epoch_fn(pid)
     min_ts = int(started_at) if started_at is not None else None
 
-    for db_path in sorted(state_dir.glob("state_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for db_path in _state_db_candidates(state_dir):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:

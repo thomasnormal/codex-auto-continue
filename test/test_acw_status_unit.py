@@ -84,8 +84,7 @@ class AcwStatusUnitTests(unittest.TestCase):
             last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Explored",
             paused_activity_for_pane_fn=lambda _pane: "",
             message_summary_for_row_fn=lambda _row: "continue",
-            pane_cwd_for_pane_fn=lambda _pane: "",
-            branch_for_cwd_fn=lambda _cwd: "main",
+            branch_for_thread_fn=lambda _thread: "main",
             status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
             state_summary_fn=lambda state, _row: state,
             render_status_table_fn=lambda rows_data, _section_every, _max_msg_lines: captured.extend(rows_data),
@@ -96,7 +95,7 @@ class AcwStatusUnitTests(unittest.TestCase):
         self.assertEqual("s: 3h30m\nl: 5m\na: 1h10m", captured[0][2])
         self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=main", captured[0][0])
 
-    def test_status_rows_data_uses_branch_for_live_pane_cwd(self):
+    def test_status_rows_data_uses_branch_for_thread(self):
         rows_data = acw_status.status_rows_data(
             [(
                 {
@@ -118,15 +117,14 @@ class AcwStatusUnitTests(unittest.TestCase):
             last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Explored",
             paused_activity_for_pane_fn=lambda _pane: "",
             message_summary_for_row_fn=lambda _row: "continue",
-            pane_cwd_for_pane_fn=lambda pane: "/repo" if pane == "%11" else "",
-            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else "-",
+            branch_for_thread_fn=lambda thread: "main" if thread == THREAD else "-",
             status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
             state_summary_fn=lambda state, _row: state,
         )
 
         self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=main", rows_data[0][0])
 
-    def test_status_rows_data_does_not_fallback_to_runtime_cwd_when_pane_cwd_missing(self):
+    def test_status_rows_data_shows_unknown_when_thread_branch_unknown(self):
         rows_data = acw_status.status_rows_data(
             [(
                 {
@@ -148,8 +146,7 @@ class AcwStatusUnitTests(unittest.TestCase):
             last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Explored",
             paused_activity_for_pane_fn=lambda _pane: "",
             message_summary_for_row_fn=lambda _row: "continue",
-            pane_cwd_for_pane_fn=lambda _pane: "",
-            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else ("wrong" if cwd == "/wrong" else "-"),
+            branch_for_thread_fn=lambda _thread: "-",
             status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
             state_summary_fn=lambda state, _row: state,
         )

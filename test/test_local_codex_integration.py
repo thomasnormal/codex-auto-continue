@@ -266,15 +266,32 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
     def test_status_shows_branch_for_managed_runtime_via_real_cli(self):
         self.harness.rename_window("branchpane")
+        nongit = self.harness.root / "nongit-branchpane"
+        nongit.mkdir(parents=True, exist_ok=True)
+        self.harness.send_keys(f"cd {nongit}", "C-m")
+        pane_cwd = ""
+        for _ in range(20):
+            pane_cwd = self.harness.tmux_stdout(
+                "display-message",
+                "-p",
+                "-t",
+                self.harness.pane_id,
+                "#{pane_current_path}",
+            )
+            if pane_cwd == str(nongit):
+                break
+            time.sleep(0.2)
         self.harness.start_codex("say exactly BRANCHPANE and nothing else")
         turn = self.harness.wait_for_first_completed_turn()
 
         self.harness.run_manager("start", "branchpane", "--message", "test continue")
         self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.append_codex_rollout_workdir(turn.thread_id, str(ROOT), cmd="pwd")
 
         status = self.harness.run_manager("status")
         expected = acw_repo.branch_for_cwd(str(ROOT), ttl_secs=0.0)
 
+        self.assertEqual(str(nongit), pane_cwd, self.harness.diagnostics())
         self.assertIn(f"br={expected}", status.stdout, self.harness.diagnostics())
 
     def test_bare_acw_refreshes_interactive_status_over_pty(self):

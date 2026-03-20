@@ -17,6 +17,7 @@ import traceback
 from pathlib import Path
 
 import acw_bootstrap
+import acw_codex
 import acw_config
 import acw_state
 import acw_session
@@ -1527,12 +1528,9 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
     return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, branch)
 
 
-def _pane_cwd_for_pane(pane: str) -> str:
-    return acw_tmux.tmux_pane_current_path(pane, run_tmux_fn=run_tmux)
-
-
-def _branch_for_cwd(cwd: str) -> str:
-    return acw_repo.branch_for_cwd(cwd)
+def _branch_for_thread(thread_id: str) -> str:
+    workdir = acw_codex.thread_workdir_from_rollout(thread_id)
+    return acw_repo.branch_for_cwd(workdir)
 
 
 def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
@@ -1654,8 +1652,7 @@ def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[t
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
         paused_activity_for_pane_fn=_paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
-        pane_cwd_for_pane_fn=_pane_cwd_for_pane,
-        branch_for_cwd_fn=_branch_for_cwd,
+        branch_for_thread_fn=_branch_for_thread,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
     )
