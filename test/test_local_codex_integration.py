@@ -281,12 +281,14 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
             if pane_cwd == str(nongit):
                 break
             time.sleep(0.2)
-        self.harness.start_codex("say exactly BRANCHPANE and nothing else")
+        self.harness.start_codex(
+            f"emit verbatim: Edited {ROOT / 'README.md'} (+1 -0)"
+        )
         turn = self.harness.wait_for_first_completed_turn()
+        self.harness.wait_for_pane_contains(str(ROOT / "README.md"))
 
         self.harness.run_manager("start", "branchpane", "--message", "test continue")
         self.harness.wait_for_manager_watcher_started(turn.thread_id)
-        self.harness.append_codex_rollout_workdir(turn.thread_id, str(ROOT), cmd="pwd")
 
         status = self.harness.run_manager("status")
         expected = acw_repo.branch_for_cwd(str(ROOT), ttl_secs=0.0)

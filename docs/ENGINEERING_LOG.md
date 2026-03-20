@@ -6,6 +6,10 @@
 - Realization: tmux `#{pane_current_path}` can stay on the original checkout even after Codex tool calls have moved to a different worktree. A real session proved this with `/home/thomas-ahle/circt-debug-ppa`: tmux still showed `~/circt`, but the rollout JSONL recorded `workdir=/home/thomas-ahle/circt-debug-ppa`, which is the directory Codex was actually using for tool calls.
 - Change: the shared `acw_codex` helper now caches per-thread rollout workdir lookups and reads rollout files from the end backward, so interactive `acw` can follow Codex-side workdir changes without re-reading entire rollout files on every refresh.
 - Change: the local fake-Codex backend now writes minimal rollout JSONL files plus `threads.rollout_path` / `cwd` / `git_branch` / `git_sha` metadata. The local tmux/CLI suite now has a real regression where tmux pane cwd is intentionally non-git while the rollout `workdir` points at the repo, proving that `acw status` follows Codex workdir instead of tmux cwd.
+- Fix: branch display in `acw status` now comes from the live pane snapshot, not tmux cwd and not the thread row's stale `cwd` / `git_branch`. A real `ppa` session proved that both tmux and the Codex `threads` row could stay on `~/circt` while the pane was actively editing and compiling under `~/circt-debug-ppa`.
+- Realization: the rollout/state row is not authoritative for long-lived sessions that switch worktrees inside tool commands. In the failing `ppa` case, the only reliable current signal was the live pane text itself.
+- Change: `acw` now parses recent repo paths from `capture-pane`, ignores build-dir-only repo paths like `.../build_debugger_plan`, and prefers the most recent non-build repo path from the visible Codex transcript. That makes `br=...` track the repo the agent is actually touching, not the shared build tree it may reference at the same time.
+- Change: `acw_repo` now has cached `repo_root_for_path()` / `branch_for_path()` helpers so branch detection can work from file paths such as `~/circt-debug-ppa/tools/circt-synth/circt-synth.cpp`, not just exact directory cwd strings.
 
 ## 2026-03-18
 

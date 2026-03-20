@@ -1528,9 +1528,16 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
     return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, branch)
 
 
-def _branch_for_thread(thread_id: str) -> str:
-    workdir = acw_codex.thread_workdir_from_rollout(thread_id)
-    return acw_repo.branch_for_cwd(workdir)
+def _branch_for_pane(pane: str, _thread_id: str) -> str:
+    repo_root = acw_probe.repo_root_hint_for_pane(
+        pane,
+        run_tmux,
+        resolve_repo_root_fn=acw_repo.repo_root_for_path,
+        home_dir=str(Path.home()),
+    )
+    if not repo_root:
+        return "-"
+    return acw_repo.branch_for_cwd(repo_root)
 
 
 def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
@@ -1652,7 +1659,7 @@ def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[t
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
         paused_activity_for_pane_fn=_paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
-        branch_for_thread_fn=_branch_for_thread,
+        branch_for_pane_fn=_branch_for_pane,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
     )

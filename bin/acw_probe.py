@@ -38,6 +38,8 @@ _INPUT_REQUIRED_HELP_RE = re.compile(
     r"^(?:press enter to continue|ctrl \+ p / ctrl \+ n change field)\b",
     re.IGNORECASE,
 )
+_PANE_PATH_TOKEN_RE = re.compile(r"(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)")
+_PROMPT_PATH_RE = re.compile(r"(?:directory:\s*|·\s*)(?P<path>(?:~|/)[^·]+?)\s*$", re.IGNORECASE)
 
 
 def _normalize_pane_state_line(line: str) -> str:
@@ -47,6 +49,57 @@ def _normalize_pane_state_line(line: str) -> str:
     line = re.sub(r"^[│└┌┐┘┙┚┛┕┖┗┓┏]+\s*", "", line)
     line = re.sub(r"\s*[│┘┙┚┛┐┑┒┓]+$", "", line)
     return line.strip()
+
+
+def _normalize_path_token(token: str, home_dir: str) -> str:
+    cleaned = token.strip().rstrip(".,:;!?)]}»…")
+    if cleaned == "~":
+        return home_dir
+    if cleaned.startswith("~/"):
+        return str(Path(home_dir) / cleaned[2:])
+    return cleaned
+
+
+def _repo_path_is_build_only(candidate: str, repo_root: str) -> bool:
+    try:
+        candidate_path = Path(candidate).resolve(strict=False)
+        repo_root_path = Path(repo_root).resolve(strict=False)
+        relative = candidate_path.relative_to(repo_root_path)
+    except ValueError:
+        return False
+    if not relative.parts:
+        return False
+    return relative.parts[0].startswith("build")
+
+
+def _prompt_repo_root_from_line(
+    line: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    match = _PROMPT_PATH_RE.search(line)
+    if not match:
+        return ""
+    candidate = _normalize_path_token(match.group("path"), home_dir)
+    return resolve_repo_root_fn(candidate)
+
+
+def _explicit_repo_root_from_line(
+    line: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    if line.lstrip().startswith("› "):
+        return ""
+    repo_root = ""
+    for match in _PANE_PATH_TOKEN_RE.finditer(line):
+        candidate = _normalize_path_token(match.group("path"), home_dir)
+        resolved = resolve_repo_root_fn(candidate)
+        if resolved and not _repo_path_is_build_only(candidate, resolved):
+            repo_root = resolved
+    return repo_root
 
 
 def _freeze_multimap(mapping: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:
@@ -395,3 +448,51 @@ def paused_activity_for_pane(pane: str, run_tmux) -> str:
         return ""
     text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-40") or ""
     return paused_activity_from_pane_text(text)
+
+
+def repo_root_hint_from_pane_text(
+    text: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    if not text:
+        return ""
+    prompt_root = ""
+    for raw in reversed(text.splitlines()):
+        line = _normalize_pane_state_line(raw)
+        if not line or _PANE_CHROME_ONLY_RE.fullmatch(line):
+            continue
+        if not prompt_root:
+            prompt_root = _prompt_repo_root_from_line(
+                line,
+                resolve_repo_root_fn=resolve_repo_root_fn,
+                home_dir=home_dir,
+            )
+            if prompt_root:
+                continue
+        repo_root = _explicit_repo_root_from_line(
+            line,
+            resolve_repo_root_fn=resolve_repo_root_fn,
+            home_dir=home_dir,
+        )
+        if repo_root:
+            return repo_root
+    return prompt_root
+
+
+def repo_root_hint_for_pane(
+    pane: str,
+    run_tmux,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    if not pane:
+        return ""
+    text = run_tmux("capture-pane", "-t", pane, "-p", "-S", "-80") or ""
+    return repo_root_hint_from_pane_text(
+        text,
+        resolve_repo_root_fn=resolve_repo_root_fn,
+        home_dir=home_dir,
+    )

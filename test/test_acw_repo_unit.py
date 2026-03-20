@@ -57,6 +57,47 @@ class AcwRepoUnitTests(unittest.TestCase):
         self.assertEqual(branch1, branch2)
         self.assertEqual(1, calls)
 
+    def test_repo_root_for_path_walks_file_path_up_to_git_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            nested = repo / "tools" / "circt-synth"
+            nested.mkdir(parents=True)
+            file_path = nested / "circt-synth.cpp"
+            file_path.write_text("// test\n", encoding="utf-8")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+
+            root = acw_repo.repo_root_for_path(str(file_path), ttl_secs=0.0)
+
+        self.assertEqual(str(repo.resolve()), root)
+
+    def test_branch_for_path_uses_repo_root_for_file_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            nested = repo / "include"
+            nested.mkdir(parents=True)
+            file_path = nested / "Thing.h"
+            file_path.write_text("// test\n", encoding="utf-8")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+
+            calls: list[list[str]] = []
+
+            def fake_run(args, **_kwargs):
+                calls.append(args)
+                if args[3:6] == ["rev-parse", "--show-toplevel"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=str(repo.resolve()) + "\n", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="main\n", stderr="")
+
+            branch = acw_repo.branch_for_path(str(file_path), ttl_secs=0.0, run_fn=fake_run)
+
+        self.assertEqual("main", branch)
+        self.assertEqual(
+            [
+                ["git", "-C", str(nested.resolve()), "rev-parse", "--show-toplevel"],
+                ["git", "-C", str(repo.resolve()), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            ],
+            calls,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
