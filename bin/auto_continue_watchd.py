@@ -1515,6 +1515,7 @@ class _StatusRowHelpers:
 
 _MAX_MSG_LINES = 3
 _STATUS_SECTION_EVERY = 3
+_STATUS_PANE_CAPTURE_LINES = 1200
 
 
 def _clamp_visual_lines(text: str, max_lines: int, col_width: int) -> str:
@@ -1530,7 +1531,7 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
 
 
 def _workdir_path_for_pane(pane: str, *, text: str | None = None) -> str:
-    pane_text = _capture_pane_text(pane, lines=80) if text is None else text
+    pane_text = _capture_pane_text(pane, lines=_STATUS_PANE_CAPTURE_LINES) if text is None else text
     return acw_probe.workdir_hint_from_pane_text(
         pane_text,
         resolve_repo_root_fn=acw_repo.repo_root_for_path,
@@ -1549,7 +1550,7 @@ def _branch_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> 
     workdir = _workdir_path_for_pane(pane, text=text)
     if workdir:
         return acw_repo.branch_for_cwd(workdir)
-    pane_text = _capture_pane_text(pane, lines=80) if text is None else text
+    pane_text = _capture_pane_text(pane, lines=_STATUS_PANE_CAPTURE_LINES) if text is None else text
     branch = acw_probe.branch_hint_from_pane_text(
         pane_text,
         resolve_repo_root_fn=acw_repo.repo_root_for_path,
@@ -1562,9 +1563,9 @@ def _branch_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> 
 
 def _status_row_helpers() -> _StatusRowHelpers:
     state_json_cache: dict[str, dict[str, str]] = {}
+    session_state_cache: dict[str, dict] = {}
     pane_text_cache: dict[str, str] = {}
-    pane_workdir_cache: dict[str, str] = {}
-    pane_branch_cache: dict[str, str] = {}
+    pane_location_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _read_state_json_cached(state_path: str) -> dict[str, str]:
         cached = state_json_cache.get(state_path)
@@ -1574,13 +1575,21 @@ def _status_row_helpers() -> _StatusRowHelpers:
         state_json_cache[state_path] = loaded
         return loaded
 
+    def _read_session_state_cached(thread_id: str) -> dict:
+        cached = session_state_cache.get(thread_id)
+        if cached is not None:
+            return cached
+        loaded = _read_session_state(thread_id)
+        session_state_cache[thread_id] = loaded
+        return loaded
+
     def _pane_text(pane: str) -> str:
         if not pane:
             return ""
         cached = pane_text_cache.get(pane)
         if cached is not None:
             return cached
-        loaded = _capture_pane_text(pane, lines=80)
+        loaded = _capture_pane_text(pane, lines=_STATUS_PANE_CAPTURE_LINES)
         pane_text_cache[pane] = loaded
         return loaded
 
@@ -1590,21 +1599,56 @@ def _status_row_helpers() -> _StatusRowHelpers:
     def _paused_activity(pane: str) -> str:
         return _paused_activity_for_pane(pane, text=_pane_text(pane))
 
-    def _workdir(pane: str, _thread_id: str) -> str:
-        cached = pane_workdir_cache.get(pane)
+    def _pane_location(pane: str, thread_id: str) -> tuple[str, str]:
+        cached = pane_location_cache.get((pane, thread_id))
         if cached is not None:
             return cached
-        workdir = _workdir_for_pane(pane, _thread_id, text=_pane_text(pane))
-        pane_workdir_cache[pane] = workdir
-        return workdir
+        pane_text = _pane_text(pane)
+        detected_workdir, detected_source = acw_probe.workdir_proof_from_pane_text(
+            pane_text,
+            resolve_repo_root_fn=acw_repo.repo_root_for_path,
+            home_dir=str(Path.home()),
+        )
+        session_state = _read_session_state_cached(thread_id)
+        saved_workdir = str(session_state.get("last_proven_workdir", "")).strip()
+        saved_branch = str(session_state.get("last_proven_branch", "")).strip()
+        if detected_workdir:
+            if detected_source in {"explicit", "git_c"}:
+                detected_branch = acw_repo.branch_for_cwd(detected_workdir)
+                if detected_branch == "-":
+                    detected_branch = ""
+                updates: dict[str, str] = {}
+                if saved_workdir != detected_workdir:
+                    updates["last_proven_workdir"] = detected_workdir
+                if saved_branch != detected_branch:
+                    updates["last_proven_branch"] = detected_branch
+                if updates:
+                    _write_session_state(thread_id, updates)
+                    merged = dict(session_state)
+                    merged.update(updates)
+                    session_state_cache[thread_id] = merged
+                result = (detected_workdir, detected_branch)
+            elif saved_workdir:
+                result = (saved_workdir, saved_branch)
+            else:
+                detected_branch = acw_repo.branch_for_cwd(detected_workdir)
+                if detected_branch == "-":
+                    detected_branch = ""
+                result = (detected_workdir, detected_branch)
+        else:
+            result = (saved_workdir, saved_branch)
+        pane_location_cache[(pane, thread_id)] = result
+        return result
 
-    def _branch(pane: str, _thread_id: str) -> str:
-        cached = pane_branch_cache.get(pane)
-        if cached is not None:
-            return cached
-        branch = _branch_for_pane(pane, _thread_id, text=_pane_text(pane))
-        pane_branch_cache[pane] = branch
-        return branch
+    def _workdir(pane: str, thread_id: str) -> str:
+        workdir, _branch = _pane_location(pane, thread_id)
+        if not workdir:
+            return "-"
+        return acw_repo.shorten_workdir_label(workdir)
+
+    def _branch(pane: str, thread_id: str) -> str:
+        _workdir, branch = _pane_location(pane, thread_id)
+        return branch or "-"
 
     return _StatusRowHelpers(
         read_state_json=_read_state_json_cached,

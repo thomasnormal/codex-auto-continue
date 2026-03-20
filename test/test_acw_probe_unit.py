@@ -357,7 +357,7 @@ class AcwProbeUnitTests(unittest.TestCase):
 
     def test_workdir_hint_from_pane_text_prefers_explicit_working_directory_line(self):
         text = (
-            "• Continued in /home/thomas-ahle/circt-todo-sweep.\n"
+            "• I’m continuing in /home/thomas-ahle/circt-todo-sweep, not ~/circt main.\n"
             "• Ran git -C /home/thomas-ahle/circt status --short\n"
         )
 
@@ -392,6 +392,32 @@ class AcwProbeUnitTests(unittest.TestCase):
 
         self.assertEqual(
             "/home/thomas-ahle/circt-hopper-wt",
+            acw_probe.workdir_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                home_dir="/home/thomas-ahle",
+            ),
+        )
+
+    def test_workdir_hint_from_pane_text_prefers_dominant_worktree_over_later_shared_repo_query(self):
+        text = "\n".join(
+            [
+                "• Ran /home/thomas-ahle/circt-worktree-qda9-frontier/utils/ninja-with-lock.sh -C /home/thomas-ahle/circt-worktree-qda9-frontier/build_frontier circt-verilog",
+                "• Ran git -C /home/thomas-ahle/circt-worktree-qda9-frontier status --short",
+                "• Ran /home/thomas-ahle/circt-worktree-qda9-frontier/utils/ninja-with-lock.sh -C /home/thomas-ahle/circt-worktree-qda9-frontier/build_frontier circt-sim",
+                "• Ran git -C /home/thomas-ahle/circt log --oneline -n 20",
+            ]
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/circt-worktree-qda9-frontier"):
+                return "/home/thomas-ahle/circt-worktree-qda9-frontier"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        self.assertEqual(
+            "/home/thomas-ahle/circt-worktree-qda9-frontier",
             acw_probe.workdir_hint_from_pane_text(
                 text,
                 resolve_repo_root_fn=resolve_repo_root,

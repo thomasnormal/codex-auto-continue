@@ -36,6 +36,24 @@ class AcwStateUnitTests(unittest.TestCase):
 
         self.assertEqual(7, state["continue_count"])
 
+    def test_write_session_state_persists_last_proven_workdir_and_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            acw_state.write_session_state(
+                THREAD,
+                {
+                    "thread_id": THREAD,
+                    "message": "continue",
+                    "last_proven_workdir": "/home/thomas-ahle/circt-ddr3-debug",
+                    "last_proven_branch": "ddr3-debug-20260320",
+                },
+                state_dir=td,
+            )
+
+            state = acw_state.read_session_state(THREAD, state_dir=td)
+
+        self.assertEqual("/home/thomas-ahle/circt-ddr3-debug", state["last_proven_workdir"])
+        self.assertEqual("ddr3-debug-20260320", state["last_proven_branch"])
+
     def test_connect_initializes_schema_once_per_state_dir(self):
         with tempfile.TemporaryDirectory() as td:
             Path(acw_state.state_db_path(td)).touch()

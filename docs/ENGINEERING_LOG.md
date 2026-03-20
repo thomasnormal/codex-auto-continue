@@ -256,6 +256,9 @@
 
 ## 2026-03-20
 
+- Change: `acw status` now persists `last_proven_workdir` and `last_proven_branch` per managed session in SQLite. The status view updates those fields only from strong live pane evidence (`... in /path` lines and `git -C /path ...` commands), then reuses the last proven values when later refreshes only show weaker shared-checkout hints like `~/circt`.
+- Realization: tmux pane cwd, process cwd, Codex SQLite `threads.cwd`, and rollout `workdir` are all stale for long-lived sessions that move tool execution into worktrees. Live pane transcript evidence is currently the only reliable source of actual worktree usage.
+- Change: workdir parsing now recognizes “continuing in /path” text and prefers strong explicit workdir signals before falling back to dominant recent repo-root hints. Weak generic repo hints still affect the current display when no stronger proof exists, but they no longer overwrite previously proven worktree state.
 - Change: branch detection from live pane text now gives explicit branch lines priority over later generic repo-path hints. This fixes cases where Codex reports `Switched to branch 'debug/ppa-liberty'` but later output mentions files under another checkout whose inferred branch would otherwise mask the explicit branch change.
 - Change: branch-path probing now treats unreadable filesystem paths as non-fatal. If pane text mentions a path like `/root/...` that the current user cannot stat, `acw` now ignores it and keeps rendering status instead of crashing.
 - Change: the Rich interactive watch refresh error path now uses a dedicated shared header helper, so a status-refresh failure no longer cascades into a second `AttributeError` while trying to render the fallback header.

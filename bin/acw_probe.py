@@ -58,7 +58,7 @@ _GIT_WORKTREE_BRANCH_RE = re.compile(
     r"(?:(?:~|/)\S+)\s+[0-9a-f]{7,40}\s+\[(?P<branch>[^\]]+)\]"
 )
 _WORKDIR_LINE_RE = re.compile(
-    r"\b(?:continued|working)\s+in\s+(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)",
+    r"\b(?:continue|continued|continuing|work|worked|working)\s+in\s+(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)",
     re.IGNORECASE,
 )
 _WORKTREE_FIELD_RE = re.compile(
@@ -643,8 +643,22 @@ def workdir_hint_from_pane_text(
     resolve_repo_root_fn,
     home_dir: str,
 ) -> str:
+    workdir, _source = workdir_proof_from_pane_text(
+        text,
+        resolve_repo_root_fn=resolve_repo_root_fn,
+        home_dir=home_dir,
+    )
+    return workdir
+
+
+def workdir_proof_from_pane_text(
+    text: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> tuple[str, str]:
     if not text:
-        return ""
+        return "", ""
     normalized_lines: list[str] = []
     for raw in reversed(text.splitlines()):
         line = _normalize_pane_state_line(raw)
@@ -659,26 +673,45 @@ def workdir_hint_from_pane_text(
             home_dir=home_dir,
         )
         if explicit_root:
-            return explicit_root
+            return explicit_root, "explicit"
 
-    for line in normalized_lines:
+    candidate_scores: dict[str, tuple[int, int, bool]] = {}
+
+    def _record(root: str, score: int, index: int) -> None:
+        if not root:
+            return
+        current_score, current_index, saw_git_c = candidate_scores.get(root, (0, index, False))
+        if index < current_index:
+            current_index = index
+        candidate_scores[root] = (
+            current_score + score,
+            current_index,
+            saw_git_c or score > 1,
+        )
+
+    for index, line in enumerate(normalized_lines):
         git_c_root = _git_c_repo_root_from_line(
             line,
             resolve_repo_root_fn=resolve_repo_root_fn,
             home_dir=home_dir,
         )
-        if git_c_root:
-            return git_c_root
+        _record(git_c_root, 2, index)
 
-    for line in normalized_lines:
+    for index, line in enumerate(normalized_lines):
         repo_root = _explicit_repo_root_from_line(
             line,
             resolve_repo_root_fn=resolve_repo_root_fn,
             home_dir=home_dir,
         )
-        if repo_root:
-            return repo_root
-    return ""
+        _record(repo_root, 1, index)
+
+    if not candidate_scores:
+        return "", ""
+    root, (_score, _index, saw_git_c) = max(
+        candidate_scores.items(),
+        key=lambda item: (item[1][0], -item[1][1]),
+    )
+    return root, "git_c" if saw_git_c else "repo"
 
 
 def repo_root_hint_for_pane(

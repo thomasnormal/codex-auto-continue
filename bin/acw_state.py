@@ -32,6 +32,8 @@ _AGENT_DEFAULTS: dict[str, object] = {
     "continue_count": 0,
     "last_handled_turn": "",
     "last_handled_thread": "",
+    "last_proven_workdir": "",
+    "last_proven_branch": "",
     "loop_signature": "",
     "loop_score": 0,
 }
@@ -143,6 +145,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             continue_count INTEGER NOT NULL DEFAULT 0,
             last_handled_turn TEXT NOT NULL DEFAULT '',
             last_handled_thread TEXT NOT NULL DEFAULT '',
+            last_proven_workdir TEXT NOT NULL DEFAULT '',
+            last_proven_branch TEXT NOT NULL DEFAULT '',
             loop_signature TEXT NOT NULL DEFAULT '',
             loop_score INTEGER NOT NULL DEFAULT 0,
             CHECK(agent_id <> ''),
@@ -192,6 +196,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "agents", "continue_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "agents", "loop_signature", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "agents", "loop_score", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "agents", "last_proven_workdir", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "agents", "last_proven_branch", "TEXT NOT NULL DEFAULT ''")
 
 
 def _coerce_int(value: object) -> int:
@@ -288,6 +294,12 @@ def _agent_from_row(row: sqlite3.Row | None) -> dict[str, object]:
             "last_handled_thread": str(row["last_handled_thread"]).strip()
             if "last_handled_thread" in keys
             else "",
+            "last_proven_workdir": str(row["last_proven_workdir"]).strip()
+            if "last_proven_workdir" in keys
+            else "",
+            "last_proven_branch": str(row["last_proven_branch"]).strip()
+            if "last_proven_branch" in keys
+            else "",
             "loop_signature": str(row["loop_signature"]).strip() if "loop_signature" in keys else "",
             "loop_score": _coerce_int(row["loop_score"]) if "loop_score" in keys else 0,
         }
@@ -346,7 +358,8 @@ def _agent_query() -> str:
     return """
         SELECT agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
                health, health_detail, health_ts, last_continue_at, continue_count,
-               last_handled_turn, last_handled_thread, loop_signature, loop_score
+               last_handled_turn, last_handled_thread, last_proven_workdir,
+               last_proven_branch, loop_signature, loop_score
         FROM agents
     """
 
@@ -378,8 +391,9 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
         INSERT INTO agents(
             agent_id, thread_id, pane, name, message, tmux_socket, paused, generation,
             health, health_detail, health_ts, last_continue_at, continue_count,
-            last_handled_turn, last_handled_thread, loop_signature, loop_score
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            last_handled_turn, last_handled_thread, last_proven_workdir,
+            last_proven_branch, loop_signature, loop_score
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             pane = excluded.pane,
@@ -395,6 +409,8 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             continue_count = excluded.continue_count,
             last_handled_turn = excluded.last_handled_turn,
             last_handled_thread = excluded.last_handled_thread,
+            last_proven_workdir = excluded.last_proven_workdir,
+            last_proven_branch = excluded.last_proven_branch,
             loop_signature = excluded.loop_signature,
             loop_score = excluded.loop_score
         """,
@@ -414,6 +430,8 @@ def _upsert_agent(conn: sqlite3.Connection, data: dict[str, object]) -> None:
             _coerce_int(data["continue_count"]),
             str(data["last_handled_turn"]).strip(),
             str(data["last_handled_thread"]).strip(),
+            str(data["last_proven_workdir"]).strip(),
+            str(data["last_proven_branch"]).strip(),
             str(data["loop_signature"]).strip(),
             _coerce_int(data["loop_score"]),
         ),
@@ -531,6 +549,8 @@ def _migrate_session_payload(conn: sqlite3.Connection, payload: dict[str, object
             "continue_count": _coerce_int(payload.get("continue_count", 0)),
             "last_handled_turn": str(payload.get("last_handled_turn", "")).strip(),
             "last_handled_thread": str(payload.get("last_handled_thread", "")).strip(),
+            "last_proven_workdir": str(payload.get("last_proven_workdir", "")).strip(),
+            "last_proven_branch": str(payload.get("last_proven_branch", "")).strip(),
             "loop_signature": str(payload.get("loop_signature", "")).strip(),
             "loop_score": _coerce_int(payload.get("loop_score", 0)),
         }

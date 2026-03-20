@@ -579,33 +579,109 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_status_window_pane_cell_splits_thread_and_branch_lines(self):
         self.assertEqual(
-            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]br=main[/dim]",
-            acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "main"),
+            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]wd=circt-ddr3-debug[/dim]\n[dim]br=main[/dim]",
+            acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "circt-ddr3-debug", "main"),
         )
 
     def test_status_row_helpers_cache_state_and_pane_text_per_refresh(self):
+        filler = "\n".join(f"line {idx}" for idx in range(200))
         pane_text = "\n".join(
             [
+                "• Working in /home/thomas-ahle/circt-ddr3-debug.",
+                filler,
                 "• Ran /home/thomas-ahle/circt/lib/Conversion/Foo.cpp",
                 "› continue",
             ]
         )
         with patch.object(acw, "_read_state_json", return_value={"health": "ok"}) as read_state_json:
-            with patch.object(acw, "_capture_pane_text", return_value=pane_text) as capture_pane_text:
-                with patch.object(acw.acw_repo, "repo_root_for_path", return_value="/home/thomas-ahle/circt") as repo_root:
-                    with patch.object(acw.acw_repo, "branch_for_cwd", return_value="main") as branch_for_cwd:
-                        helpers = acw._status_row_helpers()
-                        self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
-                        self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
-                        self.assertEqual("Ran /home/thomas-ahle/circt/lib/Conversion/Foo.cpp", helpers.last_agent_snippet_for_pane("%11", THREAD))
-                        self.assertEqual("waiting", helpers.paused_activity_for_pane("%11"))
-                        self.assertEqual("main", helpers.branch_for_pane("%11", THREAD))
+            with patch.object(acw, "_read_session_state", return_value={}) as read_session_state:
+                with patch.object(acw, "_write_session_state") as write_session_state:
+                    with patch.object(acw, "_capture_pane_text", return_value=pane_text) as capture_pane_text:
+                        with patch.object(acw.acw_repo, "repo_root_for_path") as repo_root:
+                            repo_root.side_effect = lambda path: (
+                                "/home/thomas-ahle/circt-ddr3-debug"
+                                if path.startswith("/home/thomas-ahle/circt-ddr3-debug")
+                                else "/home/thomas-ahle/circt"
+                                if path.startswith("/home/thomas-ahle/circt")
+                                else ""
+                            )
+                            with patch.object(acw.acw_repo, "branch_for_cwd", return_value="ddr3-debug-20260320") as branch_for_cwd:
+                                helpers = acw._status_row_helpers()
+                                self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
+                                self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
+                                self.assertEqual("Ran /home/thomas-ahle/circt/lib/Conversion/Foo.cpp", helpers.last_agent_snippet_for_pane("%11", THREAD))
+                                self.assertEqual("waiting", helpers.paused_activity_for_pane("%11"))
+                                self.assertEqual("circt-ddr3-debug", helpers.workdir_for_pane("%11", THREAD))
+                                self.assertEqual("ddr3-debug-20260320", helpers.branch_for_pane("%11", THREAD))
+                                self.assertEqual(1, read_session_state.call_count)
+                                write_session_state.assert_called_once_with(
+                                    THREAD,
+                                    {
+                                        "last_proven_workdir": "/home/thomas-ahle/circt-ddr3-debug",
+                                        "last_proven_branch": "ddr3-debug-20260320",
+                                    },
+                                )
 
         read_state_json.assert_called_once_with("sqlite:session:" + THREAD)
-        capture_pane_text.assert_called_once_with("%11", lines=80)
-        self.assertGreaterEqual(repo_root.call_count, 2)
+        capture_pane_text.assert_called_once_with("%11", lines=acw._STATUS_PANE_CAPTURE_LINES)
+        self.assertEqual(1, repo_root.call_count)
         branch_for_cwd.assert_called_once()
-        self.assertEqual("/home/thomas-ahle/circt", branch_for_cwd.call_args.args[0])
+        self.assertEqual("/home/thomas-ahle/circt-ddr3-debug", branch_for_cwd.call_args.args[0])
+
+    def test_status_row_helpers_fall_back_to_last_proven_workdir_and_branch(self):
+        with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
+            with patch.object(
+                acw,
+                "_read_session_state",
+                return_value={
+                    "last_proven_workdir": "/home/thomas-ahle/circt-worktree-qda9-frontier",
+                    "last_proven_branch": "qda9-frontier",
+                },
+            ) as read_session_state:
+                with patch.object(acw, "_write_session_state") as write_session_state:
+                    with patch.object(acw, "_capture_pane_text", return_value="› continue") as capture_pane_text:
+                        with patch.object(acw.acw_repo, "repo_root_for_path", return_value=""):
+                            with patch.object(acw.acw_repo, "branch_for_cwd", return_value="-") as branch_for_cwd:
+                                helpers = acw._status_row_helpers()
+                                self.assertEqual("circt-worktree-qda9…", helpers.workdir_for_pane("%11", THREAD))
+                                self.assertEqual("qda9-frontier", helpers.branch_for_pane("%11", THREAD))
+
+        read_session_state.assert_called_once_with(THREAD)
+        write_session_state.assert_not_called()
+        capture_pane_text.assert_called_once_with("%11", lines=acw._STATUS_PANE_CAPTURE_LINES)
+        branch_for_cwd.assert_not_called()
+
+    def test_status_row_helpers_prefer_saved_proven_workdir_over_weaker_current_hint(self):
+        pane_text = (
+            "  gpt-5.4 high · 71% left · ~/circt\n"
+        )
+        with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
+            with patch.object(
+                acw,
+                "_read_session_state",
+                return_value={
+                    "last_proven_workdir": "/home/thomas-ahle/circt-ddr3-debug",
+                    "last_proven_branch": "ddr3-debug-20260320",
+                },
+            ) as read_session_state:
+                with patch.object(acw, "_write_session_state") as write_session_state:
+                    with patch.object(acw, "_capture_pane_text", return_value=pane_text) as capture_pane_text:
+                        with patch.object(
+                            acw.acw_repo,
+                            "repo_root_for_path",
+                            side_effect=lambda path: "/home/thomas-ahle/circt"
+                            if path.startswith("/home/thomas-ahle/circt")
+                            else "",
+                        ):
+                            with patch.object(acw.acw_repo, "branch_for_cwd", return_value="main") as branch_for_cwd:
+                                helpers = acw._status_row_helpers()
+                                self.assertEqual("circt-ddr3-debug", helpers.workdir_for_pane("%11", THREAD))
+                                self.assertEqual("ddr3-debug-20260320", helpers.branch_for_pane("%11", THREAD))
+
+        read_session_state.assert_called_once_with(THREAD)
+        write_session_state.assert_not_called()
+        capture_pane_text.assert_called_once_with("%11", lines=acw._STATUS_PANE_CAPTURE_LINES)
+        branch_for_cwd.assert_not_called()
 
     def test_format_age_compact_omits_ago_suffix(self):
         with patch.object(acw.time, "time", return_value=10_000.0):
