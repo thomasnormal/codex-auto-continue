@@ -198,6 +198,10 @@ def _is_test_approval_prompt(prompt: str) -> bool:
     return "show approval prompt" in prompt.lower()
 
 
+def _is_test_plan_prompt(prompt: str) -> bool:
+    return "show plan question" in prompt.lower()
+
+
 def _is_continue_prompt(prompt: str) -> bool:
     lowered = " ".join(prompt.lower().split())
     if not lowered:
@@ -235,6 +239,19 @@ def _render_test_approval_prompt(out) -> None:
     out.flush()
 
 
+def _render_test_plan_prompt(out) -> None:
+    out.write(
+        "\n"
+        "Implement this plan?\n"
+        "\n"
+        "› 1. Yes, implement this plan  Switch to Default and start coding.\n"
+        "  2. No, stay in Plan mode     Continue planning with the model.\n"
+        "\n"
+        "  Press enter to confirm or esc to go back\n"
+    )
+    out.flush()
+
+
 def _handle_prompt(
     prompt: str,
     *,
@@ -268,6 +285,9 @@ def _handle_prompt(
     _append_log_row(conn, thread_id, process_uuid)
     if _is_test_approval_prompt(prompt):
         _render_test_approval_prompt(out)
+        return False
+    if _is_test_plan_prompt(prompt):
+        _render_test_plan_prompt(out)
         return False
     out.write("\nworking...\n")
     out.flush()

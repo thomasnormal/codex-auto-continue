@@ -2021,6 +2021,23 @@ class WatchdUnitTests(unittest.TestCase):
         restart_one.assert_not_called()
         self.assertIn(f"already busy: pane=%7 thread_id={THREAD}", out.getvalue())
 
+    def test_resume_target_does_not_send_continue_for_asking_session(self):
+        with patch.object(acw, "resolve_pane_target", return_value="%7"):
+            with patch.object(
+                acw,
+                "watcher_rows",
+                return_value=[{"pane": "%7", "pid": "1234", "thread": THREAD, "runtime_status": "running", "paused": ""}],
+            ):
+                with patch.object(acw, "_paused_activity_for_pane", return_value="asking"):
+                    with patch.object(acw, "_daemon_rpc_continue_session") as continue_session:
+                        with patch.object(acw, "_restart_one") as restart_one:
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw.cmd_resume(["ship"])
+        continue_session.assert_not_called()
+        restart_one.assert_not_called()
+        self.assertIn(f"answer required: pane=%7 thread_id={THREAD}", out.getvalue())
+
     def test_resume_multiple_targets_restarts_each_paused_target(self):
         resolved = {"formal": "%6", "aot": "%7"}
 

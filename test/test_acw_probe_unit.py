@@ -112,6 +112,18 @@ class AcwProbeUnitTests(unittest.TestCase):
 
         self.assertEqual("waiting", acw_probe.paused_activity_from_pane_text(text))
 
+    def test_paused_activity_detects_plan_question_as_asking(self):
+        text = (
+            "Implement this plan?\n"
+            "\n"
+            "› 1. Yes, implement this plan  Switch to Default and start coding.\n"
+            "  2. No, stay in Plan mode     Continue planning with the model.\n"
+            "\n"
+            "  Press enter to confirm or esc to go back\n"
+        )
+
+        self.assertEqual("asking", acw_probe.paused_activity_from_pane_text(text))
+
     def test_extract_last_agent_snippet_ignores_approval_prompt_chrome(self):
         text = (
             "• The previous real agent update.\n"

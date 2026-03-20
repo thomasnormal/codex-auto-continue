@@ -38,6 +38,15 @@ _INPUT_REQUIRED_HELP_RE = re.compile(
     r"^(?:press enter to continue|ctrl \+ p / ctrl \+ n change field)\b",
     re.IGNORECASE,
 )
+_ASKING_CHOICE_RE = re.compile(
+    r"^(?:[› ]\s*)?\d+\.\s*(?:yes|no)\b",
+    re.IGNORECASE,
+)
+_ASKING_HELP_RE = re.compile(
+    r"^press enter to confirm(?: or esc to go back)?\b",
+    re.IGNORECASE,
+)
+_ASKING_QUESTION_RE = re.compile(r".+\?$")
 _PANE_PATH_TOKEN_RE = re.compile(r"(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)")
 _PROMPT_PATH_RE = re.compile(r"(?:directory:\s*|·\s*)(?P<path>(?:~|/)[^·]+?)\s*$", re.IGNORECASE)
 
@@ -390,6 +399,8 @@ def paused_activity_from_pane_text(text: str) -> str:
     prompt_seen = False
     shell_prompt_seen = False
     input_prompt_seen = False
+    asking_choice_seen = False
+    asking_help_seen = False
     for raw in reversed(text.splitlines()):
         stripped = _normalize_pane_state_line(raw)
         if not stripped or _PANE_CHROME_ONLY_RE.fullmatch(stripped):
@@ -403,6 +414,16 @@ def paused_activity_from_pane_text(text: str) -> str:
             if not prompt_seen:
                 input_prompt_seen = True
             continue
+        if _ASKING_HELP_RE.match(stripped):
+            if not prompt_seen:
+                asking_help_seen = True
+            continue
+        if _ASKING_CHOICE_RE.match(stripped):
+            if not prompt_seen:
+                asking_choice_seen = True
+            continue
+        if (asking_help_seen or asking_choice_seen) and _ASKING_QUESTION_RE.match(stripped) and not stripped.startswith("›"):
+            return "asking"
         if _HARD_WORKING_STATUS_RE.match(stripped) or "esc to interrupt" in stripped.lower():
             return "busy"
 
@@ -435,6 +456,8 @@ def paused_activity_from_pane_text(text: str) -> str:
             return "busy"
     if input_prompt_seen:
         return "input"
+    if asking_help_seen and asking_choice_seen:
+        return "asking"
     if prompt_seen:
         return "waiting"
     if shell_prompt_seen:

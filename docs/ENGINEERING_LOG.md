@@ -2,6 +2,7 @@
 
 ## 2026-03-20
 
+- Change: added a distinct `asking` live state for Codex plan-mode confirmation prompts such as `Implement this plan?`. `acw status` now renders those panes as `asking` instead of collapsing them into `paused` + `busy`, and `resume` refuses to inject `continue` into that UI, reporting that an answer is required instead.
 - Change: bare `acw repair` now applies safe repairs across all managed panes instead of silently defaulting to a dry-run. `acw repair --dry-run` remains the explicit preview path. This matches the shared-daemon recovery UX much better: when status says the daemon is down, `acw repair` now actually restarts it and recreates the missing runtimes instead of only printing the plan.
 - Realization: `acw status` had become slow for structural reasons, not rendering reasons. A live cProfile run on the real tmux server showed three dominant costs: repeated SQLite initialization on every state read, repeated `capture-pane` calls for the same pane in one refresh, and repeated `git rev-parse --show-toplevel` subprocesses while branch detection scanned every path token in the pane transcript.
 - Change: made SQLite connection initialization one-time per process and per state DB path. `acw_state._connect()` still opens a fresh connection each time, but schema setup, WAL setup, and legacy migration checks now run only on the first open for that DB in the current process. That keeps the safety model simple while removing repeated startup work from `status`, `doctor`, and other read-heavy commands.

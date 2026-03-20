@@ -153,6 +153,35 @@ class AcwStatusUnitTests(unittest.TestCase):
 
         self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=-", rows_data[0][0])
 
+    def test_status_rows_data_shows_asking_for_paused_plan_prompt(self):
+        rows_data = acw_status.status_rows_data(
+            [(
+                {
+                    "thread": THREAD,
+                    "state": "sqlite:session:" + THREAD,
+                    "watch": "",
+                    "runtime_id": "runtime-1",
+                    "cwd": "/repo",
+                },
+                "%11",
+                "0:11:audit",
+            )],
+            read_state_json_fn=lambda _state: {},
+            compute_state_fn=lambda _row, _session_json: "paused",
+            status_row_detail_fn=lambda _row, _session_json: "",
+            thread_times_fn=lambda _thread, _compact: ("3h30m", "5m"),
+            average_continue_label_fn=lambda _row, _session_json: "",
+            format_age_fn=lambda _epoch, _compact: "5m",
+            last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Implement this plan?",
+            paused_activity_for_pane_fn=lambda _pane: "asking",
+            message_summary_for_row_fn=lambda _row: "continue",
+            branch_for_pane_fn=lambda _pane, _thread: "main",
+            status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
+            state_summary_fn=lambda state, _row: state,
+        )
+
+        self.assertEqual("asking", rows_data[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

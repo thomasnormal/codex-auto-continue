@@ -13,6 +13,7 @@ _STATE_STYLES = {
     "busy": "green",
     "waiting": "cyan",
     "input": "magenta",
+    "asking": "magenta",
     "paused": "yellow",
     "warn": "dark_orange",
     "error": "bold red",
@@ -554,7 +555,9 @@ def paused_state_detail(activity: str, detail: str) -> str:
 
 def display_state(base_state: str, activity: str) -> str:
     activity = activity.strip()
-    if base_state == "running" and activity in {"busy", "waiting", "input"}:
+    if activity in {"input", "asking"}:
+        return activity
+    if base_state == "running" and activity in {"busy", "waiting"}:
         return activity
     return base_state
 
@@ -631,9 +634,9 @@ def status_rows_data(
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
         activity = paused_activity_for_pane_fn(current_pane) if state_value in {"running", "paused"} else ""
-        if state_value == "paused":
-            state_detail = paused_state_detail(activity, state_detail)
         rendered_state = display_state(state_value, activity)
+        if state_value == "paused" and rendered_state == "paused":
+            state_detail = paused_state_detail(activity, state_detail)
         started, _last_activity = thread_times_fn(row["thread"], True)
         last_acw = session_json.get("last_continue_at", "")
         if last_acw:
@@ -691,6 +694,7 @@ def status_details(
         state_value = compute_state_fn(row, session_json)
         state_detail = status_row_detail_fn(row, session_json)
         activity = paused_activity_for_pane_fn(current_pane) if state_value in {"running", "paused"} else ""
+        rendered_state = display_state(state_value, activity)
 
         last_event = "-"
         if row["watch"]:
@@ -721,8 +725,10 @@ def status_details(
         provenance = thread_provenance_text_fn(pane_record.detected_thread_source) if pane_record else ""
         if provenance:
             print_fn(f"  {'THREAD_PROVENANCE:':<16} {provenance}")
-        print_fn(f"  {'STATE:':<16} {state_value}")
-        if activity:
+        print_fn(f"  {'STATE:':<16} {rendered_state}")
+        if state_value == "paused" and rendered_state != state_value:
+            print_fn(f"  {'MANAGED_STATE:':<16} {state_value}")
+        if activity and activity != rendered_state:
             label = "PAUSED_ACTIVITY:" if state_value == "paused" else "ACTIVITY:"
             print_fn(f"  {label:<16} {activity}")
         print_fn(f"  {'STARTED:':<16} {started}")

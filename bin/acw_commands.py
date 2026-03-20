@@ -652,6 +652,8 @@ def cmd_resume(
                         print(f"resuming waiting session: pane={pane} thread_id={thread_id}")
                     elif activity == "busy":
                         print(f"already busy: pane={pane} thread_id={thread_id}")
+                    elif activity == "asking":
+                        print(f"answer required: pane={pane} thread_id={thread_id}")
                     elif activity == "input":
                         print(f"input required: pane={pane} thread_id={thread_id}")
                     else:

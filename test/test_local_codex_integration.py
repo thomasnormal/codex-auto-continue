@@ -245,6 +245,23 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         self.assertIn("input", status.stdout, self.harness.diagnostics())
 
+    def test_status_shows_asking_for_paused_plan_question_via_real_cli(self):
+        self.harness.rename_window("pausedasking")
+        self.harness.start_codex("say exactly PAUSEDASKING and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+        pane = self.harness.pane_id
+
+        self.harness.run_manager("start", "pausedasking", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.send_codex_prompt("show plan question")
+        self.harness.wait_for_pane_contains("Implement this plan?", timeout=10.0)
+        self.harness.run_manager("pause", "pausedasking")
+        self.harness.wait_for_manager_watcher_paused_in_pane(pane)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("asking", status.stdout, self.harness.diagnostics())
+
     def test_status_shows_average_time_per_continue_via_real_cli(self):
         self.harness.rename_window("avgacw")
         self.harness.start_codex("say exactly AVGACW and nothing else")
