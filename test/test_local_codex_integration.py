@@ -5,6 +5,7 @@ import select
 import subprocess
 import unittest
 from pathlib import Path
+import sys
 
 from test.support.local_codex_harness import LocalCodexHarness
 from test.support.local_codex_harness import require_local_codex_prereqs
@@ -13,6 +14,9 @@ from test.support.manager_scenarios import manager_scenario_backend_enabled
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bin"))
+
+import acw_repo  # noqa: E402
 
 
 def _test_failed(case: unittest.TestCase) -> bool:
@@ -259,6 +263,19 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertIn("a: ", status.stdout, self.harness.diagnostics())
         self.assertIn("l: ", status.stdout, self.harness.diagnostics())
         self.assertIn("s: ", status.stdout, self.harness.diagnostics())
+
+    def test_status_shows_branch_for_managed_runtime_via_real_cli(self):
+        self.harness.rename_window("branchpane")
+        self.harness.start_codex("say exactly BRANCHPANE and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "branchpane", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+
+        status = self.harness.run_manager("status")
+        expected = acw_repo.branch_for_cwd(str(ROOT), ttl_secs=0.0)
+
+        self.assertIn(f"br={expected}", status.stdout, self.harness.diagnostics())
 
     def test_bare_acw_refreshes_interactive_status_over_pty(self):
         self.harness.rename_window("watchlive")

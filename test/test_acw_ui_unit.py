@@ -21,7 +21,7 @@ class AcwUiUnitTests(unittest.TestCase):
         renderable = acw_ui.build_status_table_renderable(
             [
                 (
-                    "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]id=1[/dim]",
+                    "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]br=main[/dim]",
                     "[green]busy[/green]",
                     "s: 1d\nl: 5m\na: 20m",
                     "Explored",
@@ -52,7 +52,7 @@ class AcwUiUnitTests(unittest.TestCase):
         renderable = acw_ui.build_status_watch_renderable(
             [
                 (
-                    "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]id=1[/dim]",
+                    "0:0:gaps/%0\n[dim]019cc20c…b9ea[/dim]\n[dim]br=main[/dim]",
                     "[green]busy[/green]",
                     "s: 1d\nl: 5m\na: 20m",
                     "Explored",
@@ -70,6 +70,12 @@ class AcwUiUnitTests(unittest.TestCase):
 
         self.assertIn("Ctrl-C: exit; e: edit; s: start; p: pause; u: resume; r: restart", text)
         self.assertNotIn("Sessions:", text)
+
+    def test_status_window_pane_cell_shows_branch_instead_of_runtime_id(self):
+        self.assertEqual(
+            "0:10:aot2/%10\n[dim]019cc20c…b9ea[/dim]\n[dim]br=main[/dim]",
+            acw_ui.status_window_pane_cell("0:10:aot2", "%10", "019cc20c-1d66-7cc2-ba28-1b620213b9ea", "main"),
+        )
 
 
 if __name__ == "__main__":

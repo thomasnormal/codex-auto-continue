@@ -52,6 +52,7 @@ py-modules = [
   "acw_housekeeping",
   "acw_loop",
   "acw_probe",
+  "acw_repo",
   "acw_observe",
   "acw_repair",
   "acw_rpc",

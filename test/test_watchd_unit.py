@@ -575,10 +575,10 @@ class WatchdUnitTests(unittest.TestCase):
     def test_short_thread_id_keeps_prefix_and_suffix(self):
         self.assertEqual("11111111…1111", acw._short_thread_id(THREAD))
 
-    def test_status_window_pane_cell_splits_thread_and_runtime_lines(self):
+    def test_status_window_pane_cell_splits_thread_and_branch_lines(self):
         self.assertEqual(
-            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]id=1843260[/dim]",
-            acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "1843260"),
+            "0:10:aot2/%10\n[dim]11111111…1111[/dim]\n[dim]br=main[/dim]",
+            acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "main"),
         )
 
     def test_format_age_compact_omits_ago_suffix(self):
@@ -2031,10 +2031,13 @@ class WatchdUnitTests(unittest.TestCase):
                     "%7": [{"pane": "%7", "pid": "222", "thread": OTHER_THREAD, "runtime_status": "paused", "paused": "1"}],
                 }[pane],
             ):
-                with patch.object(acw, "_restart_one") as restart_one:
-                    out = io.StringIO()
-                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                        acw.cmd_resume(["formal", "aot"])
+                with patch.object(acw, "_paused_activity_for_pane", return_value="busy"):
+                    with patch.object(acw, "_daemon_rpc_continue_session") as continue_session:
+                        with patch.object(acw, "_restart_one") as restart_one:
+                            out = io.StringIO()
+                            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                                acw.cmd_resume(["formal", "aot"])
+        continue_session.assert_not_called()
         restart_one.assert_called_once_with("aot", "%7", [])
         text = out.getvalue()
         self.assertIn(f"already busy: pane=%6 thread_id={THREAD}", text)

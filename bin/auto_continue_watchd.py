@@ -29,6 +29,7 @@ import acw_ids
 import acw_housekeeping
 import acw_observe
 import acw_probe
+import acw_repo
 import acw_repair
 import acw_runtime
 import acw_runtime_store
@@ -1522,8 +1523,12 @@ def _strip_rich_markup(text: str) -> str:
     return acw_ui.strip_rich_markup(text)
 
 
-def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, pid: str) -> str:
-    return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, pid)
+def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, branch: str) -> str:
+    return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, branch)
+
+
+def _branch_for_cwd(cwd: str) -> str:
+    return acw_repo.branch_for_cwd(cwd)
 
 
 def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
@@ -1645,6 +1650,7 @@ def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[t
         last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
         paused_activity_for_pane_fn=_paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
+        branch_for_cwd_fn=_branch_for_cwd,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
     )
