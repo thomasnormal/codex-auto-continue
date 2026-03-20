@@ -652,7 +652,7 @@ def status_rows_data(
         last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
         msg_raw = message_summary_for_row_fn(row)
         pane_cwd = pane_cwd_for_pane_fn(current_pane) if current_pane else ""
-        branch = branch_for_cwd_fn(pane_cwd or row.get("cwd", ""))
+        branch = branch_for_cwd_fn(pane_cwd)
         window_pane = status_window_pane_cell_fn(
             window_label,
             current_pane,

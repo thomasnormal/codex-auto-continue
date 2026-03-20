@@ -96,37 +96,7 @@ class AcwStatusUnitTests(unittest.TestCase):
         self.assertEqual("s: 3h30m\nl: 5m\na: 1h10m", captured[0][2])
         self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=main", captured[0][0])
 
-    def test_status_rows_data_uses_branch_for_row_cwd(self):
-        rows_data = acw_status.status_rows_data(
-            [(
-                {
-                    "thread": THREAD,
-                    "state": "sqlite:session:" + THREAD,
-                    "watch": "",
-                    "runtime_id": "runtime-1",
-                    "cwd": "/repo",
-                },
-                "%11",
-                "0:11:formal",
-            )],
-            read_state_json_fn=lambda _state: {},
-            compute_state_fn=lambda _row, _session_json: "running",
-            status_row_detail_fn=lambda _row, _session_json: "",
-            thread_times_fn=lambda _thread, _compact: ("3h30m", "5m"),
-            average_continue_label_fn=lambda _row, _session_json: "",
-            format_age_fn=lambda _epoch, _compact: "5m",
-            last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Explored",
-            paused_activity_for_pane_fn=lambda _pane: "",
-            message_summary_for_row_fn=lambda _row: "continue",
-            pane_cwd_for_pane_fn=lambda _pane: "",
-            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else "-",
-            status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
-            state_summary_fn=lambda state, _row: state,
-        )
-
-        self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=main", rows_data[0][0])
-
-    def test_status_rows_data_prefers_live_pane_cwd_over_runtime_cwd(self):
+    def test_status_rows_data_uses_branch_for_live_pane_cwd(self):
         rows_data = acw_status.status_rows_data(
             [(
                 {
@@ -149,12 +119,42 @@ class AcwStatusUnitTests(unittest.TestCase):
             paused_activity_for_pane_fn=lambda _pane: "",
             message_summary_for_row_fn=lambda _row: "continue",
             pane_cwd_for_pane_fn=lambda pane: "/repo" if pane == "%11" else "",
-            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else ("wrong" if cwd == "/wrong" else "-"),
+            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else "-",
             status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
             state_summary_fn=lambda state, _row: state,
         )
 
         self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=main", rows_data[0][0])
+
+    def test_status_rows_data_does_not_fallback_to_runtime_cwd_when_pane_cwd_missing(self):
+        rows_data = acw_status.status_rows_data(
+            [(
+                {
+                    "thread": THREAD,
+                    "state": "sqlite:session:" + THREAD,
+                    "watch": "",
+                    "runtime_id": "runtime-1",
+                    "cwd": "/wrong",
+                },
+                "%11",
+                "0:11:formal",
+            )],
+            read_state_json_fn=lambda _state: {},
+            compute_state_fn=lambda _row, _session_json: "running",
+            status_row_detail_fn=lambda _row, _session_json: "",
+            thread_times_fn=lambda _thread, _compact: ("3h30m", "5m"),
+            average_continue_label_fn=lambda _row, _session_json: "",
+            format_age_fn=lambda _epoch, _compact: "5m",
+            last_agent_snippet_for_pane_fn=lambda _pane, _thread: "Explored",
+            paused_activity_for_pane_fn=lambda _pane: "",
+            message_summary_for_row_fn=lambda _row: "continue",
+            pane_cwd_for_pane_fn=lambda _pane: "",
+            branch_for_cwd_fn=lambda cwd: "main" if cwd == "/repo" else ("wrong" if cwd == "/wrong" else "-"),
+            status_window_pane_cell_fn=lambda window_label, pane, thread, branch: f"{window_label}/{pane}\n{thread}\nbr={branch}",
+            state_summary_fn=lambda state, _row: state,
+        )
+
+        self.assertEqual("0:11:formal/%11\n019cd7fb-f4c1-7613-bf98-4915dcb1970a\nbr=-", rows_data[0][0])
 
 
 if __name__ == "__main__":
