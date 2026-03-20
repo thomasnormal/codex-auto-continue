@@ -129,6 +129,12 @@ class AcwRepoUnitTests(unittest.TestCase):
         self.assertEqual(root_a, root_b)
         self.assertEqual(1, uncached.call_count)
 
+    def test_repo_root_for_path_returns_empty_on_permission_error(self):
+        with patch.object(acw_repo, "_repo_root_for_path_uncached", side_effect=PermissionError("denied")):
+            root = acw_repo.repo_root_for_path("/root/getter", ttl_secs=0.0)
+
+        self.assertEqual("", root)
+
 
 if __name__ == "__main__":
     unittest.main()

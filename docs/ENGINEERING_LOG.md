@@ -253,6 +253,8 @@
 
 ## 2026-03-20
 
+- Change: branch-path probing now treats unreadable filesystem paths as non-fatal. If pane text mentions a path like `/root/...` that the current user cannot stat, `acw` now ignores it and keeps rendering status instead of crashing.
+- Change: the Rich interactive watch refresh error path now uses a dedicated shared header helper, so a status-refresh failure no longer cascades into a second `AttributeError` while trying to render the fallback header.
 - Change: `acw_state._connect()` now retries once after a transient `sqlite3.OperationalError` during database open/pragma setup, closes the failed connection before retrying, and then raises normally if the second attempt also fails. This is aimed at short-lived `unable to open database file` races instead of masking persistent state-dir problems.
 - Change: the interactive `acw` watch loop now survives status-refresh failures. Instead of crashing out of the PTY view on a transient status exception, it shows a short-lived red feedback line and keeps refreshing.
 - Change: `acw repair <pane>` can now recover an unresolved live pane when there is exactly one saved managed session already pinned to that pane. In that case, repair restarts Codex back into the saved thread and reattaches the managed runtime rather than refusing with an unhelpful unresolved-thread error.

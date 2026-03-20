@@ -170,6 +170,12 @@ def watch_header_text() -> str:
     return _WATCH_HEADER_TEXT
 
 
+def build_rich_watch_header():
+    from rich.text import Text
+
+    return Text(watch_header_text(), style="bold cyan")
+
+
 def build_status_watch_renderable(
     rows_data: list[tuple[str, ...]],
     *,
@@ -182,7 +188,7 @@ def build_status_watch_renderable(
     from rich.text import Text
 
     renderables: list[object] = [
-        Text(watch_header_text(), style="bold cyan"),
+        build_rich_watch_header(),
     ]
     if rows_data:
         renderables.append(

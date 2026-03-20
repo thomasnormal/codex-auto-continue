@@ -133,7 +133,10 @@ def repo_root_for_path(
         if candidate == candidate.parent:
             break
         candidate = candidate.parent
-    root = _repo_root_for_path_uncached(normalized, run_fn=run_fn)
+    try:
+        root = _repo_root_for_path_uncached(normalized, run_fn=run_fn)
+    except OSError:
+        root = ""
     _REPO_ROOT_CACHE[normalized] = (now, root)
     if root:
         _REPO_ROOT_CACHE[os.path.realpath(root)] = (now, root)

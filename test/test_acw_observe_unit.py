@@ -387,6 +387,58 @@ class AcwObserveUnitTests(unittest.TestCase):
         self.assertIn("status refresh failed: unable to open database file", frames[0][1])
         self.assertIn("Sessions: 1\nrow one\n", frames[1][1])
 
+    def test_watch_status_loop_keeps_running_after_refresh_error_in_live_mode(self):
+        frames: list[object] = []
+        calls = 0
+        clock = {"now": 0.0}
+
+        class FakeInput:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def read(self, timeout: float) -> str:
+                clock["now"] += timeout
+                return ""
+
+        class FakeLive:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def update(self, renderable) -> None:
+                frames.append(renderable)
+
+        def _render_status_live(_context, _argv):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("unable to open database file")
+            return ("frame-two", "renderable-two")
+
+        context = _observe_context(status_table=lambda resolved: None)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            acw_observe.watch_status_loop(
+                context,
+                [],
+                stdout_isatty_fn=lambda: True,
+                stdin_isatty_fn=lambda: True,
+                refresh_secs=0.5,
+                stop_after_iterations=2,
+                render_status_live_frame_fn=_render_status_live,
+                live_display_factory=lambda: FakeLive(),
+                input_controller_factory=FakeInput,
+                monotonic_fn=lambda: clock["now"],
+            )
+
+        self.assertEqual(2, calls)
+        self.assertEqual(2, len(frames))
+
 
 if __name__ == "__main__":
     unittest.main()
