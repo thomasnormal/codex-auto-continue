@@ -74,7 +74,7 @@ Examples:
   {prog} edit %6
   {prog} repair --dry-run
   {prog} repair %6
-  {prog} repair --all
+  {prog} repair
   {prog} restart
   {prog} doctor
 """

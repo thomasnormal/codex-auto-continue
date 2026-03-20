@@ -375,7 +375,7 @@ def shared_daemon_error_message(
     )
     if detail:
         message += f" Detail: {detail}."
-    message += " Fix: run acw repair --all or any mutating acw command to restart the daemon."
+    message += " Fix: run acw repair or any mutating acw command to restart the daemon."
     return message
 
 

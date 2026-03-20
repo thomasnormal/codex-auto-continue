@@ -157,7 +157,7 @@ requiring a fresh `acw start`.
 `repair` is the live-state recovery workflow. With no target, `acw repair`
 defaults to a dry run and shows safe automatic repairs plus manual blockers
 without touching anything. Use `acw repair <target>` for one managed pane, or
-`acw repair --all` to apply the safe repairs across all managed panes.
+`acw repair` to apply the safe repairs across all managed panes.
 
 `cleanup` is intentionally separate from `repair`: it only removes dead saved
 session rows and stale daemon/runtime artifacts. It does not
@@ -449,7 +449,7 @@ Current real-Codex coverage includes:
 - interrupt skip and auto-resume after the next manual prompt
 - manager start for plain `codex` panes
 - manager start for `codex resume <thread-id>` panes
-- shared manager scenarios for `doctor`, `edit`, `status`, `repair --all`, daemon-death recovery via `restart`, and tmux socket recovery
+- shared manager scenarios for `doctor`, `edit`, `status`, `repair`, daemon-death recovery via `restart`, and tmux socket recovery
 
 Current local-backend coverage includes the full shared manager scenario suite,
 including `start`, `stop`, `pause`, `resume`, `restart --restart-codex`,

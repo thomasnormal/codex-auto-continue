@@ -112,8 +112,8 @@ def parse_repair_args(args: list[str]) -> tuple[str, bool, bool]:
         print("error: repair accepts either a target or --all, not both", file=sys.stderr)
         sys.exit(2)
 
-    if not target and not all_targets:
-        dry_run = True
+    if not target and not all_targets and not dry_run:
+        all_targets = True
 
     return target, dry_run, all_targets
 

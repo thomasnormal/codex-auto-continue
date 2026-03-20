@@ -696,7 +696,7 @@ class MockManagerHarness:
     ) -> acw.RuntimeModel:
         return acw_runtime.build_runtime_model(snapshot or self._build_runtime_snapshot())
 
-    def _last_agent_snippet_for_pane(self, pane: str, thread_id: str = "") -> str:
+    def _last_agent_snippet_for_pane(self, pane: str, thread_id: str = "", **_kwargs) -> str:
         del thread_id
         record = self._panes.get(pane)
         return record.last_agent if record else ""

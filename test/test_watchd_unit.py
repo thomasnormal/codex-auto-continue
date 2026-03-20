@@ -1504,6 +1504,12 @@ class WatchdUnitTests(unittest.TestCase):
 
         context.daemon_rpc_remove_session.assert_not_called()
 
+    def test_parse_repair_args_defaults_to_apply_all(self):
+        self.assertEqual(("", False, True), acw.acw_commands.parse_repair_args([]))
+
+    def test_parse_repair_args_supports_explicit_dry_run(self):
+        self.assertEqual(("", True, False), acw.acw_commands.parse_repair_args(["--dry-run"]))
+
     def test_doctor_report_recommends_restart_for_warn_watcher(self):
         model = acw._build_runtime_model(_snapshot(
             panes=(_pane_record("%7", THREAD, window_label="0:7:uvm", window_name="uvm"),),

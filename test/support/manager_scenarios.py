@@ -366,7 +366,7 @@ class ManagerScenarioMixin:
         self.assertIn("STATE:           error", status.stdout, self.harness.diagnostics())
         self.assertIn("Shared daemon error:", status.stdout, self.harness.diagnostics())
 
-    def test_manager_repair_all_recovers_shared_daemon_for_multiple_live_panes(self):
+    def test_manager_repair_without_target_recovers_shared_daemon_for_multiple_live_panes(self):
         self.harness.rename_window("formal")
         self.harness.start_codex("say exactly FORMALREAL and nothing else")
         formal_turn = self.harness.wait_for_first_completed_turn()
@@ -394,7 +394,7 @@ class ManagerScenarioMixin:
             self.harness.diagnostics(),
         )
 
-        repair = self.harness.run_manager("repair", "--all")
+        repair = self.harness.run_manager("repair")
         self.harness.wait_for_manager_watcher_started_in_pane(formal_pane, formal_turn.thread_id)
         self.harness.wait_for_manager_watcher_started_in_pane(aot_pane, aot_turn.thread_id)
 
