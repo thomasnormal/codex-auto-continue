@@ -309,8 +309,10 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
 
         status = self.harness.run_manager("status")
         expected = acw_repo.branch_for_cwd(str(ROOT), ttl_secs=0.0)
+        expected_workdir = acw_repo.shorten_workdir_label(str(ROOT))
 
         self.assertEqual(str(nongit), pane_cwd, self.harness.diagnostics())
+        self.assertIn(f"wd={expected_workdir}", status.stdout, self.harness.diagnostics())
         self.assertIn(f"br={expected}", status.stdout, self.harness.diagnostics())
 
     def test_status_prefers_explicit_branch_output_over_shared_main_repo_via_real_cli(self):

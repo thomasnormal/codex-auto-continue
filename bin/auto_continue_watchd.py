@@ -1509,6 +1509,7 @@ class _StatusRowHelpers:
     read_state_json: Callable[[str], dict[str, str]]
     last_agent_snippet_for_pane: Callable[[str, str], str]
     paused_activity_for_pane: Callable[[str], str]
+    workdir_for_pane: Callable[[str, str], str]
     branch_for_pane: Callable[[str, str], str]
 
 
@@ -1524,34 +1525,45 @@ def _strip_rich_markup(text: str) -> str:
     return acw_ui.strip_rich_markup(text)
 
 
-def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, branch: str) -> str:
-    return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, branch)
+def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, workdir: str, branch: str) -> str:
+    return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, workdir, branch)
+
+
+def _workdir_path_for_pane(pane: str, *, text: str | None = None) -> str:
+    pane_text = _capture_pane_text(pane, lines=80) if text is None else text
+    return acw_probe.workdir_hint_from_pane_text(
+        pane_text,
+        resolve_repo_root_fn=acw_repo.repo_root_for_path,
+        home_dir=str(Path.home()),
+    )
+
+
+def _workdir_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> str:
+    workdir = _workdir_path_for_pane(pane, text=text)
+    if not workdir:
+        return "-"
+    return acw_repo.shorten_workdir_label(workdir)
 
 
 def _branch_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> str:
+    workdir = _workdir_path_for_pane(pane, text=text)
+    if workdir:
+        return acw_repo.branch_for_cwd(workdir)
     pane_text = _capture_pane_text(pane, lines=80) if text is None else text
-    pane_path = acw_tmux.tmux_pane_current_path(
-        pane,
-        run_tmux_fn=run_tmux,
-    )
-    preferred_repo_root = acw_repo.repo_root_for_path(pane_path)
     branch = acw_probe.branch_hint_from_pane_text(
         pane_text,
         resolve_repo_root_fn=acw_repo.repo_root_for_path,
         branch_for_path_fn=acw_repo.branch_for_path,
         home_dir=str(Path.home()),
-        preferred_repo_root=preferred_repo_root,
+        preferred_repo_root="",
     )
-    if branch:
-        return branch
-    if preferred_repo_root:
-        return acw_repo.branch_for_cwd(preferred_repo_root)
-    return "-"
+    return branch or "-"
 
 
 def _status_row_helpers() -> _StatusRowHelpers:
     state_json_cache: dict[str, dict[str, str]] = {}
     pane_text_cache: dict[str, str] = {}
+    pane_workdir_cache: dict[str, str] = {}
     pane_branch_cache: dict[str, str] = {}
 
     def _read_state_json_cached(state_path: str) -> dict[str, str]:
@@ -1578,6 +1590,14 @@ def _status_row_helpers() -> _StatusRowHelpers:
     def _paused_activity(pane: str) -> str:
         return _paused_activity_for_pane(pane, text=_pane_text(pane))
 
+    def _workdir(pane: str, _thread_id: str) -> str:
+        cached = pane_workdir_cache.get(pane)
+        if cached is not None:
+            return cached
+        workdir = _workdir_for_pane(pane, _thread_id, text=_pane_text(pane))
+        pane_workdir_cache[pane] = workdir
+        return workdir
+
     def _branch(pane: str, _thread_id: str) -> str:
         cached = pane_branch_cache.get(pane)
         if cached is not None:
@@ -1590,6 +1610,7 @@ def _status_row_helpers() -> _StatusRowHelpers:
         read_state_json=_read_state_json_cached,
         last_agent_snippet_for_pane=_last_agent,
         paused_activity_for_pane=_paused_activity,
+        workdir_for_pane=_workdir,
         branch_for_pane=_branch,
     )
 
@@ -1744,6 +1765,7 @@ def _status_rows_data(
         last_agent_snippet_for_pane_fn=row_helpers.last_agent_snippet_for_pane,
         paused_activity_for_pane_fn=row_helpers.paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
+        workdir_for_pane_fn=row_helpers.workdir_for_pane,
         branch_for_pane_fn=row_helpers.branch_for_pane,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,

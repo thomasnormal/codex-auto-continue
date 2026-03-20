@@ -73,8 +73,8 @@ class AcwUiUnitTests(unittest.TestCase):
 
     def test_status_window_pane_cell_shows_branch_instead_of_runtime_id(self):
         self.assertEqual(
-            "0:10:aot2/%10\n[dim]019cc20c…b9ea[/dim]\n[dim]br=main[/dim]",
-            acw_ui.status_window_pane_cell("0:10:aot2", "%10", "019cc20c-1d66-7cc2-ba28-1b620213b9ea", "main"),
+            "0:10:aot2/%10\n[dim]019cc20c…b9ea[/dim]\n[dim]wd=circt-todo-sweep[/dim]\n[dim]br=main[/dim]",
+            acw_ui.status_window_pane_cell("0:10:aot2", "%10", "019cc20c-1d66-7cc2-ba28-1b620213b9ea", "circt-todo-sweep", "main"),
         )
 
 

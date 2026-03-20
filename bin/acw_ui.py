@@ -7,11 +7,13 @@ from acw_ids import is_thread_id
 from acw_ids import short_thread_id
 
 
-def status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, branch: str) -> str:
+def status_window_pane_cell(window_label: str, current_pane: str, thread_id: str, workdir: str, branch: str) -> str:
     line1 = f"{window_label}/{current_pane}" if current_pane else window_label
     lines = [line1]
     if is_thread_id(thread_id):
         lines.append(f"[dim]{short_thread_id(thread_id)}[/dim]")
+    if workdir:
+        lines.append(f"[dim]wd={workdir}[/dim]")
     if branch:
         lines.append(f"[dim]br={branch}[/dim]")
     return "\n".join(lines)

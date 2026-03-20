@@ -11,6 +11,7 @@ _BRANCH_CACHE: dict[str, tuple[float, str]] = {}
 _REPO_ROOT_CACHE: dict[str, tuple[float, str]] = {}
 _DEFAULT_BRANCH_TTL_SECS = 5.0
 _MAX_BRANCH_LABEL_LEN = 20
+_MAX_WORKDIR_LABEL_LEN = 20
 
 
 def clear_branch_cache() -> None:
@@ -25,6 +26,16 @@ def shorten_branch_label(branch: str, *, max_len: int = _MAX_BRANCH_LABEL_LEN) -
     if len(branch) <= max_len:
         return branch
     return branch[: max_len - 1] + "…"
+
+
+def shorten_workdir_label(path: str, *, max_len: int = _MAX_WORKDIR_LABEL_LEN) -> str:
+    path = (path or "").strip()
+    if not path:
+        return "-"
+    label = Path(path).name or path
+    if len(label) <= max_len:
+        return label
+    return label[: max_len - 1] + "…"
 
 
 def _branch_for_cwd_uncached(

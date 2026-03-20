@@ -355,6 +355,50 @@ class AcwProbeUnitTests(unittest.TestCase):
             ),
         )
 
+    def test_workdir_hint_from_pane_text_prefers_explicit_working_directory_line(self):
+        text = (
+            "• Continued in /home/thomas-ahle/circt-todo-sweep.\n"
+            "• Ran git -C /home/thomas-ahle/circt status --short\n"
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/circt-todo-sweep"):
+                return "/home/thomas-ahle/circt-todo-sweep"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        self.assertEqual(
+            "/home/thomas-ahle/circt-todo-sweep",
+            acw_probe.workdir_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                home_dir="/home/thomas-ahle",
+            ),
+        )
+
+    def test_workdir_hint_from_pane_text_prefers_git_c_path_when_no_working_line_present(self):
+        text = (
+            "• Ran git -C /home/thomas-ahle/circt-hopper-wt status --short --branch\n"
+            "  └ ## HEAD (no branch)\n"
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/circt-hopper-wt"):
+                return "/home/thomas-ahle/circt-hopper-wt"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        self.assertEqual(
+            "/home/thomas-ahle/circt-hopper-wt",
+            acw_probe.workdir_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                home_dir="/home/thomas-ahle",
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

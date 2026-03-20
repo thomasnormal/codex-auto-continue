@@ -587,8 +587,9 @@ def status_table(
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
     paused_activity_for_pane_fn: Callable[[str], str],
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
+    workdir_for_pane_fn: Callable[[str, str], str],
     branch_for_pane_fn: Callable[[str, str], str],
-    status_window_pane_cell_fn: Callable[[str, str, str, str], str],
+    status_window_pane_cell_fn: Callable[[str, str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
     render_status_table_fn: Callable[[list[tuple[str, str, str, str, str]], int, int], None],
     section_every: int,
@@ -605,6 +606,7 @@ def status_table(
         last_agent_snippet_for_pane_fn=last_agent_snippet_for_pane_fn,
         paused_activity_for_pane_fn=paused_activity_for_pane_fn,
         message_summary_for_row_fn=message_summary_for_row_fn,
+        workdir_for_pane_fn=workdir_for_pane_fn,
         branch_for_pane_fn=branch_for_pane_fn,
         status_window_pane_cell_fn=status_window_pane_cell_fn,
         state_summary_fn=state_summary_fn,
@@ -624,8 +626,9 @@ def status_rows_data(
     last_agent_snippet_for_pane_fn: Callable[[str, str], str],
     paused_activity_for_pane_fn: Callable[[str], str],
     message_summary_for_row_fn: Callable[[dict[str, str]], str],
+    workdir_for_pane_fn: Callable[[str, str], str],
     branch_for_pane_fn: Callable[[str, str], str],
-    status_window_pane_cell_fn: Callable[[str, str, str, str], str],
+    status_window_pane_cell_fn: Callable[[str, str, str, str, str], str],
     state_summary_fn: Callable[[str, dict[str, str]], str],
 ) -> list[tuple[str, str, str, str, str]]:
     rows_data: list[tuple[str, str, str, str, str]] = []
@@ -651,11 +654,13 @@ def status_rows_data(
         time_cell = status_time_cell(started, last_acw, average_continue)
         last_agent = last_agent_snippet_for_pane_fn(current_pane, row["thread"]) or "-"
         msg_raw = message_summary_for_row_fn(row)
+        workdir = workdir_for_pane_fn(current_pane, row["thread"])
         branch = branch_for_pane_fn(current_pane, row["thread"])
         window_pane = status_window_pane_cell_fn(
             window_label,
             current_pane,
             row["thread"],
+            workdir,
             branch,
         )
         rows_data.append(

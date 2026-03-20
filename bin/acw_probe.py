@@ -57,6 +57,15 @@ _GIT_HEAD_DECORATION_RE = re.compile(r"\(HEAD -> ([^),]+)")
 _GIT_WORKTREE_BRANCH_RE = re.compile(
     r"(?:(?:~|/)\S+)\s+[0-9a-f]{7,40}\s+\[(?P<branch>[^\]]+)\]"
 )
+_WORKDIR_LINE_RE = re.compile(
+    r"\b(?:continued|working)\s+in\s+(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)",
+    re.IGNORECASE,
+)
+_WORKTREE_FIELD_RE = re.compile(
+    r"^(?:-\s*)?worktree:\s*(?P<path>(?:~|/)\S+)$",
+    re.IGNORECASE,
+)
+_GIT_C_PATH_RE = re.compile(r"\bgit\s+-C\s+(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)")
 _PANE_PATH_TOKEN_RE = re.compile(r"(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)")
 _PROMPT_PATH_RE = re.compile(r"(?:directory:\s*|·\s*)(?P<path>(?:~|/)[^·]+?)\s*$", re.IGNORECASE)
 
@@ -144,6 +153,51 @@ def _explicit_branch_from_line(line: str) -> str:
             branch = match.group(1).strip() if match.lastindex else ""
             if branch:
                 return branch
+    return ""
+
+
+def _explicit_workdir_root_from_line(
+    line: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    normalized = line.strip()
+    for prefix in ("• ", "◦ ", "└ ", "│ "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
+            break
+
+    for regex in (_WORKDIR_LINE_RE, _WORKTREE_FIELD_RE):
+        match = regex.search(normalized)
+        if not match:
+            continue
+        candidate = _normalize_path_token(match.group("path"), home_dir)
+        resolved = resolve_repo_root_fn(candidate)
+        if resolved and not _repo_path_is_build_only(candidate, resolved):
+            return resolved
+    return ""
+
+
+def _git_c_repo_root_from_line(
+    line: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    normalized = line.strip()
+    for prefix in ("• ", "◦ ", "└ ", "│ "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
+            break
+
+    match = _GIT_C_PATH_RE.search(normalized)
+    if not match:
+        return ""
+    candidate = _normalize_path_token(match.group("path"), home_dir)
+    resolved = resolve_repo_root_fn(candidate)
+    if resolved and not _repo_path_is_build_only(candidate, resolved):
+        return resolved
     return ""
 
 
@@ -581,6 +635,50 @@ def branch_hint_from_pane_text(
         return ""
     branch = branch_for_path_fn(fallback_root)
     return branch if branch and branch != "-" else ""
+
+
+def workdir_hint_from_pane_text(
+    text: str,
+    *,
+    resolve_repo_root_fn,
+    home_dir: str,
+) -> str:
+    if not text:
+        return ""
+    normalized_lines: list[str] = []
+    for raw in reversed(text.splitlines()):
+        line = _normalize_pane_state_line(raw)
+        if not line or _PANE_CHROME_ONLY_RE.fullmatch(line):
+            continue
+        normalized_lines.append(line)
+
+    for line in normalized_lines:
+        explicit_root = _explicit_workdir_root_from_line(
+            line,
+            resolve_repo_root_fn=resolve_repo_root_fn,
+            home_dir=home_dir,
+        )
+        if explicit_root:
+            return explicit_root
+
+    for line in normalized_lines:
+        git_c_root = _git_c_repo_root_from_line(
+            line,
+            resolve_repo_root_fn=resolve_repo_root_fn,
+            home_dir=home_dir,
+        )
+        if git_c_root:
+            return git_c_root
+
+    for line in normalized_lines:
+        repo_root = _explicit_repo_root_from_line(
+            line,
+            resolve_repo_root_fn=resolve_repo_root_fn,
+            home_dir=home_dir,
+        )
+        if repo_root:
+            return repo_root
+    return ""
 
 
 def repo_root_hint_for_pane(
