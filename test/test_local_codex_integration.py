@@ -313,6 +313,23 @@ class LocalCodexCliIntegrationTests(_LocalCodexHarnessTestCase):
         self.assertEqual(str(nongit), pane_cwd, self.harness.diagnostics())
         self.assertIn(f"br={expected}", status.stdout, self.harness.diagnostics())
 
+    def test_status_prefers_explicit_branch_output_over_shared_main_repo_via_real_cli(self):
+        self.harness.rename_window("branchhint")
+        self.harness.start_codex("say exactly BRANCHHINT and nothing else")
+        turn = self.harness.wait_for_first_completed_turn()
+
+        self.harness.run_manager("start", "branchhint", "--message", "test continue")
+        self.harness.wait_for_manager_watcher_started(turn.thread_id)
+        self.harness.send_codex_prompt(
+            "emit verbatim: Switched to branch 'debug/ppa-liberty'\n"
+            f"{Path.home() / 'circt' / 'lib' / 'Support' / 'Foo.cpp'}"
+        )
+        self.harness.wait_for_pane_contains("Switched to branch 'debug/ppa-liberty'", timeout=10.0)
+
+        status = self.harness.run_manager("status")
+
+        self.assertIn("br=debug/ppa-liberty", status.stdout, self.harness.diagnostics())
+
     def test_bare_acw_refreshes_interactive_status_over_pty(self):
         self.harness.rename_window("watchlive")
         self.harness.start_codex("say exactly WATCHLIVE and nothing else")

@@ -47,6 +47,16 @@ _ASKING_HELP_RE = re.compile(
     re.IGNORECASE,
 )
 _ASKING_QUESTION_RE = re.compile(r".+\?$")
+_GIT_STATUS_BRANCH_RE = re.compile(
+    r"^##\s+(?:no commits yet on\s+)?(?P<branch>.+?)(?:\.\.\.| \[|$)",
+    re.IGNORECASE,
+)
+_GIT_SWITCHED_BRANCH_RE = re.compile(r"^Switched to branch '([^']+)'$")
+_GIT_TRACKING_BRANCH_RE = re.compile(r"^branch '([^']+)' set up to track\b")
+_GIT_HEAD_DECORATION_RE = re.compile(r"\(HEAD -> ([^),]+)")
+_GIT_WORKTREE_BRANCH_RE = re.compile(
+    r"(?:(?:~|/)\S+)\s+[0-9a-f]{7,40}\s+\[(?P<branch>[^\]]+)\]"
+)
 _PANE_PATH_TOKEN_RE = re.compile(r"(?P<path>(?:~|/)[^\s\"'`()\[\]{}<>|]+)")
 _PROMPT_PATH_RE = re.compile(r"(?:directory:\s*|·\s*)(?P<path>(?:~|/)[^·]+?)\s*$", re.IGNORECASE)
 
@@ -107,6 +117,33 @@ def _explicit_repo_root_from_line(
         resolved = resolve_repo_root_fn(candidate)
         if resolved and not _repo_path_is_build_only(candidate, resolved):
             return resolved
+    return ""
+
+
+def _explicit_branch_from_line(line: str) -> str:
+    normalized = line.strip()
+    for prefix in ("• ", "◦ ", "└ ", "│ "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
+            break
+
+    status_match = _GIT_STATUS_BRANCH_RE.match(normalized)
+    if status_match:
+        branch = status_match.group("branch").strip()
+        if branch and not branch.lower().startswith("head "):
+            return branch
+
+    for regex in (
+        _GIT_SWITCHED_BRANCH_RE,
+        _GIT_TRACKING_BRANCH_RE,
+        _GIT_HEAD_DECORATION_RE,
+        _GIT_WORKTREE_BRANCH_RE,
+    ):
+        match = regex.search(normalized)
+        if match:
+            branch = match.group(1).strip() if match.lastindex else ""
+            if branch:
+                return branch
     return ""
 
 
@@ -501,6 +538,49 @@ def repo_root_hint_from_pane_text(
         if repo_root:
             return repo_root
     return prompt_root
+
+
+def branch_hint_from_pane_text(
+    text: str,
+    *,
+    resolve_repo_root_fn,
+    branch_for_path_fn,
+    home_dir: str,
+    preferred_repo_root: str = "",
+) -> str:
+    if not text:
+        return ""
+    normalized_lines: list[str] = []
+    for raw in reversed(text.splitlines()):
+        line = _normalize_pane_state_line(raw)
+        if not line or _PANE_CHROME_ONLY_RE.fullmatch(line):
+            continue
+        normalized_lines.append(line)
+
+    for line in normalized_lines:
+        branch = _explicit_branch_from_line(line)
+        if branch:
+            return branch
+
+    fallback_root = ""
+    for line in normalized_lines:
+        repo_root = _explicit_repo_root_from_line(
+            line,
+            resolve_repo_root_fn=resolve_repo_root_fn,
+            home_dir=home_dir,
+        )
+        if not repo_root:
+            continue
+        if preferred_repo_root and repo_root != preferred_repo_root:
+            branch = branch_for_path_fn(repo_root)
+            if branch and branch != "-":
+                return branch
+        if not fallback_root:
+            fallback_root = repo_root
+    if not fallback_root:
+        return ""
+    branch = branch_for_path_fn(fallback_root)
+    return branch if branch and branch != "-" else ""
 
 
 def repo_root_hint_for_pane(

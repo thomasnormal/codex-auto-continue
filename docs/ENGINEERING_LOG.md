@@ -253,6 +253,7 @@
 
 ## 2026-03-20
 
+- Change: branch detection from live pane text now gives explicit branch lines priority over later generic repo-path hints. This fixes cases where Codex reports `Switched to branch 'debug/ppa-liberty'` but later output mentions files under another checkout whose inferred branch would otherwise mask the explicit branch change.
 - Change: branch-path probing now treats unreadable filesystem paths as non-fatal. If pane text mentions a path like `/root/...` that the current user cannot stat, `acw` now ignores it and keeps rendering status instead of crashing.
 - Change: the Rich interactive watch refresh error path now uses a dedicated shared header helper, so a status-refresh failure no longer cascades into a second `AttributeError` while trying to render the fallback header.
 - Change: `acw_state._connect()` now retries once after a transient `sqlite3.OperationalError` during database open/pragma setup, closes the failed connection before retrying, and then raises normally if the second attempt also fails. This is aimed at short-lived `unable to open database file` races instead of masking persistent state-dir problems.

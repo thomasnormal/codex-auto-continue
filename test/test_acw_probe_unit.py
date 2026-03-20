@@ -260,6 +260,101 @@ class AcwProbeUnitTests(unittest.TestCase):
             ),
         )
 
+    def test_branch_hint_from_pane_text_prefers_explicit_branch_output_over_main_repo_path(self):
+        text = (
+            "Switched to branch 'debug/ppa-liberty'\n"
+            "/home/thomas-ahle/circt/lib/Support/Foo.cpp\n"
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/circt-debug-ppa"):
+                return "/home/thomas-ahle/circt-debug-ppa"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        def branch_for_path(path: str) -> str:
+            return {
+                "/home/thomas-ahle/circt": "main",
+                "/home/thomas-ahle/circt-debug-ppa": "debug/ppa-liberty",
+            }.get(path, "-")
+
+        self.assertEqual(
+            "debug/ppa-liberty",
+            acw_probe.branch_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                branch_for_path_fn=branch_for_path,
+                home_dir="/home/thomas-ahle",
+                preferred_repo_root="/home/thomas-ahle/circt",
+            ),
+        )
+
+    def test_branch_hint_from_pane_text_prefers_nonpreferred_repo_root_over_shared_main_root(self):
+        text = (
+            "• Ran git -C /home/thomas-ahle/circt status --short\n"
+            "• Edited /home/thomas-ahle/circt-todo-sweep/lib/Conversion/ImportVerilog/Structure.cpp (+2 -1)\n"
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/circt-todo-sweep"):
+                return "/home/thomas-ahle/circt-todo-sweep"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        def branch_for_path(path: str) -> str:
+            return {
+                "/home/thomas-ahle/circt": "main",
+                "/home/thomas-ahle/circt-todo-sweep": "@afa9e32f26",
+            }.get(path, "-")
+
+        self.assertEqual(
+            "@afa9e32f26",
+            acw_probe.branch_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                branch_for_path_fn=branch_for_path,
+                home_dir="/home/thomas-ahle",
+                preferred_repo_root="/home/thomas-ahle/circt",
+            ),
+        )
+
+    def test_branch_hint_from_pane_text_prefers_explicit_branch_even_when_newer_path_is_other_repo(self):
+        text = (
+            "[thomas-ahle@thomas-ahle codex-auto-continue]$ codex 'say exactly BRANCHHINT and nothing else'\n"
+            "working...\n"
+            "• Switched to branch 'debug/ppa-liberty'\n"
+            "working...\n"
+            "• /home/thomas-ahle/circt/lib/Support/Foo.cpp\n"
+            "›\n"
+        )
+
+        def resolve_repo_root(path: str) -> str:
+            if path.startswith("/home/thomas-ahle/codex-auto-continue"):
+                return "/home/thomas-ahle/codex-auto-continue"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        def branch_for_path(path: str) -> str:
+            return {
+                "/home/thomas-ahle/codex-auto-continue": "main",
+                "/home/thomas-ahle/circt": "main",
+                "/home/thomas-ahle/circt-debug-ppa": "debug/ppa-liberty",
+            }.get(path, "-")
+
+        self.assertEqual(
+            "debug/ppa-liberty",
+            acw_probe.branch_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                branch_for_path_fn=branch_for_path,
+                home_dir="/home/thomas-ahle",
+                preferred_repo_root="/home/thomas-ahle/codex-auto-continue",
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
