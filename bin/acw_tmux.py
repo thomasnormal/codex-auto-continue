@@ -527,3 +527,14 @@ def resolve_start_pane_target(
         file=sys.stderr,
     )
     raise SystemExit(1)
+
+
+def tmux_pane_current_path(
+    pane: str,
+    *,
+    run_tmux_fn: Callable[..., str | None],
+) -> str:
+    if not pane:
+        return ""
+    path = run_tmux_fn("display-message", "-p", "-t", pane, "#{pane_current_path}") or ""
+    return path.strip()
