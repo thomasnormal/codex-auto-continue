@@ -818,6 +818,7 @@ def apply_repair_step(
     step: Any,
     *,
     cmd_start_fn,
+    cmd_restart_fn,
     stop_pane_watchers_keep_session_fn,
 ) -> None:
     def remove_source_session() -> None:
@@ -834,6 +835,12 @@ def apply_repair_step(
     if step.kind == "start_watcher":
         context.print_progress(f"repair: starting runtime on pane={step.target}")
         cmd_start_fn([step.target, step.thread_id, "--message", step.message])
+        remove_source_session()
+        return
+
+    if step.kind == "restart_codex_session":
+        context.print_progress(f"repair: restarting Codex on pane={step.target}")
+        cmd_restart_fn([step.target, step.thread_id, "--restart-codex", "--message", step.message])
         remove_source_session()
         return
 
@@ -876,6 +883,7 @@ def cmd_repair(
     argv: list[str],
     *,
     cmd_start_fn,
+    cmd_restart_fn,
     stop_pane_watchers_keep_session_fn,
 ) -> None:
     target, dry_run, _all_targets = parse_repair_args(argv)
@@ -924,6 +932,7 @@ def cmd_repair(
             context,
             step,
             cmd_start_fn=cmd_start_fn,
+            cmd_restart_fn=cmd_restart_fn,
             stop_pane_watchers_keep_session_fn=stop_pane_watchers_keep_session_fn,
         )
     print(f"repair: applied {len(auto_steps)} step(s)")

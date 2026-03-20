@@ -251,6 +251,13 @@
 - Change: removed `bin/auto_continue_watchd.sh`. The Python entrypoint is now the only supported manager interface, which removes one more compatibility layer and keeps smoke/docs aligned with the real implementation.
 - Change: made `restart` with no target mean "restart all running watchers". This avoids shell glob expansion pitfalls from `restart *` while keeping the wildcard form as an explicit synonym.
 
+## 2026-03-20
+
+- Change: `acw_state._connect()` now retries once after a transient `sqlite3.OperationalError` during database open/pragma setup, closes the failed connection before retrying, and then raises normally if the second attempt also fails. This is aimed at short-lived `unable to open database file` races instead of masking persistent state-dir problems.
+- Change: the interactive `acw` watch loop now survives status-refresh failures. Instead of crashing out of the PTY view on a transient status exception, it shows a short-lived red feedback line and keeps refreshing.
+- Change: `acw repair <pane>` can now recover an unresolved live pane when there is exactly one saved managed session already pinned to that pane. In that case, repair restarts Codex back into the saved thread and reattaches the managed runtime rather than refusing with an unhelpful unresolved-thread error.
+- Verification: live `acw repair %13` on the default tmux server successfully restarted Codex into saved thread `019ced27-3250-77e2-8b0c-5decb404f00a`, and `acw doctor %13` returned `RESULT: ok` afterward.
+
 ## 2026-03-06
 
 - Realization: `acw` had already started moving toward thread-keyed state (`acw_session.<thread>.json`), but runtime behavior still allowed ambiguous startup (`thread-id=auto`).

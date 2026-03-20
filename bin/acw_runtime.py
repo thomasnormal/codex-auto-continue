@@ -254,6 +254,13 @@ def runtime_session_for_thread(model: RuntimeModel, thread_id: str) -> SavedSess
     return model.sessions_by_thread.get(thread_id.lower())
 
 
+def exact_session_for_pane(model: RuntimeModel, pane: str) -> SavedSessionRecord | None:
+    matches = [session for session in model.snapshot.sessions if session.pane == pane]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def recoverable_named_session_for_pane(
     model: RuntimeModel,
     pane: str,

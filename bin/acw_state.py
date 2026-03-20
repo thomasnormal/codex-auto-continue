@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from acw_ids import is_thread_id
@@ -61,6 +62,9 @@ _DAEMON_SCOPE_DEFAULTS: dict[str, object] = {
     "heartbeat_ts": "",
     "started_ts": "",
 }
+
+
+_CONNECT_RETRY_DELAY_SECS = 0.05
 def state_db_path(state_dir: str) -> str:
     return os.path.join(state_dir, STATE_DB_FILENAME)
 
@@ -85,17 +89,34 @@ def _connect(state_dir: str) -> sqlite3.Connection:
     db_path = state_db_path(state_dir)
     db_key = os.path.realpath(db_path)
     needs_init = db_key not in _INITIALIZED_DB_PATHS or not Path(db_path).exists()
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    if needs_init:
-        _ensure_schema(conn)
-        _maybe_enable_wal(conn)
-        _maybe_migrate_legacy_json(conn, state_dir)
-        _maybe_migrate_legacy_sqlite_tables(conn)
-        _INITIALIZED_DB_PATHS.add(db_key)
-    return conn
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(2):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            if needs_init:
+                _ensure_schema(conn)
+                _maybe_enable_wal(conn)
+                _maybe_migrate_legacy_json(conn, state_dir)
+                _maybe_migrate_legacy_sqlite_tables(conn)
+                _INITIALIZED_DB_PATHS.add(db_key)
+            return conn
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            if attempt == 0:
+                time.sleep(_CONNECT_RETRY_DELAY_SECS)
+                continue
+            raise
+    assert last_error is not None
+    raise last_error
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:

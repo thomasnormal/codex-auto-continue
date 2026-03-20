@@ -450,12 +450,25 @@ def _interactive_watch_loop(
     base_text = ""
 
     def refresh_base() -> None:
-        nonlocal base_frame_key, base_renderable, base_text, next_refresh
-        if use_live:
-            base_frame_key, base_renderable = render_status_live_frame_fn(context, argv)
-        else:
-            base_text = render_status_text_fn(context, argv)
-            base_frame_key = base_text
+        nonlocal base_frame_key, base_renderable, base_text, next_refresh, feedback, feedback_expires_at
+        try:
+            if use_live:
+                base_frame_key, base_renderable = render_status_live_frame_fn(context, argv)
+            else:
+                base_text = render_status_text_fn(context, argv)
+                base_frame_key = base_text
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            message = f"status refresh failed: {exc}"
+            feedback = WatchCommandFeedback(message, "red")
+            feedback_expires_at = monotonic_fn() + _WATCH_FEEDBACK_TTL_SECS
+            if use_live:
+                base_frame_key = f"error:{message}"
+                base_renderable = acw_ui.build_rich_watch_header()
+            else:
+                base_text = ""
+                base_frame_key = f"error:{message}"
         next_refresh = monotonic_fn() + refresh_secs
 
     def render_current(live: Any | None = None) -> None:

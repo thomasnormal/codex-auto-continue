@@ -28,6 +28,7 @@ class RepairContext:
     runtime_watchers_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_panes_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_session_for_thread: Callable[[Any, str], Any | None]
+    exact_session_for_pane: Callable[[Any, str], Any | None]
     recoverable_named_session_for_pane: Callable[[Any, str], Any | None]
     runtime_session_name_conflict: Callable[[Any, Any | None], str]
 
@@ -107,6 +108,21 @@ def repair_steps_for_pane(
             pane_record.detected_thread_detail
             or f"could not determine thread_id for pane={pane} from the live Codex process"
         )
+        exact_session = context.exact_session_for_pane(model, pane)
+        if exact_session and exact_session.message:
+            return [
+                RepairStep(
+                    kind="restart_codex_session",
+                    target=pane,
+                    summary=(
+                        f"restart Codex on pane {pane} into saved thread "
+                        f"{context.short_thread_id(exact_session.thread_id)} and reattach the managed runtime"
+                    ),
+                    auto_apply=True,
+                    thread_id=exact_session.thread_id,
+                    message=exact_session.message,
+                )
+            ]
         return [
             RepairStep(
                 kind="manual",

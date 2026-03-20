@@ -1211,6 +1211,7 @@ def _apply_repair_step(step: RepairStep) -> None:
         _command_context(),
         step,
         cmd_start_fn=cmd_start,
+        cmd_restart_fn=cmd_restart,
         stop_pane_watchers_keep_session_fn=_stop_pane_watchers_keep_session,
     )
 
@@ -1220,6 +1221,7 @@ def cmd_repair(argv: list[str]) -> None:
         _command_context(),
         argv,
         cmd_start_fn=cmd_start,
+        cmd_restart_fn=cmd_restart,
         stop_pane_watchers_keep_session_fn=_stop_pane_watchers_keep_session,
     )
 
@@ -1405,6 +1407,10 @@ def _runtime_session_for_thread(model: RuntimeModel, thread_id: str) -> SavedSes
     return acw_runtime.runtime_session_for_thread(model, thread_id)
 
 
+def _exact_session_for_pane(model: RuntimeModel, pane: str) -> SavedSessionRecord | None:
+    return acw_runtime.exact_session_for_pane(model, pane)
+
+
 def _recoverable_named_session_for_pane(model: RuntimeModel, pane: str) -> SavedSessionRecord | None:
     return acw_runtime.recoverable_named_session_for_pane(model, pane, context=_runtime_context())
 
@@ -1524,19 +1530,29 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
 
 def _branch_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> str:
     pane_text = _capture_pane_text(pane, lines=80) if text is None else text
-    repo_root = acw_probe.repo_root_hint_from_pane_text(
+    pane_path = acw_tmux.tmux_pane_current_path(
+        pane,
+        run_tmux_fn=run_tmux,
+    )
+    preferred_repo_root = acw_repo.repo_root_for_path(pane_path)
+    branch = acw_probe.branch_hint_from_pane_text(
         pane_text,
         resolve_repo_root_fn=acw_repo.repo_root_for_path,
+        branch_for_path_fn=acw_repo.branch_for_path,
         home_dir=str(Path.home()),
+        preferred_repo_root=preferred_repo_root,
     )
-    if not repo_root:
-        return "-"
-    return acw_repo.branch_for_cwd(repo_root)
+    if branch:
+        return branch
+    if preferred_repo_root:
+        return acw_repo.branch_for_cwd(preferred_repo_root)
+    return "-"
 
 
 def _status_row_helpers() -> _StatusRowHelpers:
     state_json_cache: dict[str, dict[str, str]] = {}
     pane_text_cache: dict[str, str] = {}
+    pane_branch_cache: dict[str, str] = {}
 
     def _read_state_json_cached(state_path: str) -> dict[str, str]:
         cached = state_json_cache.get(state_path)
@@ -1563,7 +1579,12 @@ def _status_row_helpers() -> _StatusRowHelpers:
         return _paused_activity_for_pane(pane, text=_pane_text(pane))
 
     def _branch(pane: str, _thread_id: str) -> str:
-        return _branch_for_pane(pane, _thread_id, text=_pane_text(pane))
+        cached = pane_branch_cache.get(pane)
+        if cached is not None:
+            return cached
+        branch = _branch_for_pane(pane, _thread_id, text=_pane_text(pane))
+        pane_branch_cache[pane] = branch
+        return branch
 
     return _StatusRowHelpers(
         read_state_json=_read_state_json_cached,
@@ -1856,6 +1877,7 @@ def _repair_context() -> acw_repair.RepairContext:
         runtime_watchers_for_thread=_runtime_watchers_for_thread,
         runtime_panes_for_thread=_runtime_panes_for_thread,
         runtime_session_for_thread=_runtime_session_for_thread,
+        exact_session_for_pane=_exact_session_for_pane,
         recoverable_named_session_for_pane=_recoverable_named_session_for_pane,
         runtime_session_name_conflict=_runtime_session_name_conflict,
     )

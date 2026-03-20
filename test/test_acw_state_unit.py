@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
+import sqlite3
 
 import sys
 
@@ -53,6 +54,27 @@ class AcwStateUnitTests(unittest.TestCase):
         enable_wal.assert_called_once_with(fake_conn1)
         migrate_json.assert_called_once_with(fake_conn1, td)
         migrate_sqlite.assert_called_once_with(fake_conn1)
+
+    def test_connect_retries_once_after_operational_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(acw_state.state_db_path(td)).touch()
+            bad_conn = MagicMock()
+            good_conn = MagicMock()
+            bad_conn.execute.side_effect = sqlite3.OperationalError("unable to open database file")
+
+            with patch.object(acw_state.sqlite3, "connect", side_effect=[bad_conn, good_conn]):
+                with patch.object(acw_state, "_ensure_schema") as ensure_schema:
+                    with patch.object(acw_state, "_maybe_enable_wal") as enable_wal:
+                        with patch.object(acw_state, "_maybe_migrate_legacy_json") as migrate_json:
+                            with patch.object(acw_state, "_maybe_migrate_legacy_sqlite_tables") as migrate_sqlite:
+                                conn = acw_state._connect(td)
+
+        self.assertIs(good_conn, conn)
+        bad_conn.close.assert_called_once()
+        ensure_schema.assert_called_once_with(good_conn)
+        enable_wal.assert_called_once_with(good_conn)
+        migrate_json.assert_called_once_with(good_conn, td)
+        migrate_sqlite.assert_called_once_with(good_conn)
 
 
 if __name__ == "__main__":

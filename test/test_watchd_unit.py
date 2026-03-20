@@ -37,6 +37,7 @@ def _session_record(
     *,
     name: str = "formal",
     message: str = "continue",
+    pane: str = "",
     state_file: str = "/state/acw_session.json",
     health: str = "",
     health_detail: str = "",
@@ -47,6 +48,7 @@ def _session_record(
         thread_id=thread_id.lower(),
         name=name,
         message=message,
+        pane=pane,
         state_file=state_file,
         health=health,
         health_detail=health_detail,
@@ -601,8 +603,9 @@ class WatchdUnitTests(unittest.TestCase):
 
         read_state_json.assert_called_once_with("sqlite:session:" + THREAD)
         capture_pane_text.assert_called_once_with("%11", lines=80)
-        repo_root.assert_called_once()
-        branch_for_cwd.assert_called_once_with("/home/thomas-ahle/circt")
+        self.assertGreaterEqual(repo_root.call_count, 2)
+        branch_for_cwd.assert_called_once()
+        self.assertEqual("/home/thomas-ahle/circt", branch_for_cwd.call_args.args[0])
 
     def test_format_age_compact_omits_ago_suffix(self):
         with patch.object(acw.time, "time", return_value=10_000.0):
@@ -1331,6 +1334,26 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertTrue(steps[0].auto_apply)
         self.assertEqual("continue by plan", steps[0].message)
 
+    def test_repair_steps_restart_codex_for_unresolved_pane_with_exact_saved_session(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%13",
+                "",
+                window_label="0:13:audit",
+                window_name="audit",
+                detected_thread_detail="could not determine thread_id for pane=%13 from the live Codex process",
+                has_codex_process=True,
+            ),),
+            sessions=(_session_record(THREAD, name="audit", pane="%13", message="continue audit"),),
+        ))
+
+        steps = acw._repair_steps_for_pane(model, "%13")
+
+        self.assertEqual(["restart_codex_session"], [step.kind for step in steps])
+        self.assertTrue(steps[0].auto_apply)
+        self.assertEqual(THREAD, steps[0].thread_id)
+        self.assertEqual("continue audit", steps[0].message)
+
     def test_repair_steps_flag_duplicate_thread_across_panes_as_manual(self):
         model = acw._build_runtime_model(_snapshot(
             panes=(
@@ -1499,10 +1522,40 @@ class WatchdUnitTests(unittest.TestCase):
                 context,
                 step,
                 cmd_start_fn=MagicMock(side_effect=RuntimeError("boom")),
+                cmd_restart_fn=MagicMock(),
                 stop_pane_watchers_keep_session_fn=MagicMock(),
             )
 
         context.daemon_rpc_remove_session.assert_not_called()
+
+    def test_apply_repair_step_restarts_codex_for_known_session(self):
+        context = SimpleNamespace(
+            daemon_rpc_remove_session=MagicMock(),
+            print_progress=lambda message: None,
+            run_tmux=lambda *args, **kwargs: "audit\n",
+            write_session_state=MagicMock(),
+            current_tmux_scope=lambda: "default",
+            message_text=lambda text: text,
+        )
+        step = acw.RepairStep(
+            kind="restart_codex_session",
+            target="%13",
+            summary="restart Codex on pane %13 into saved thread",
+            auto_apply=True,
+            thread_id=THREAD,
+            message="continue audit",
+        )
+        cmd_restart = MagicMock()
+
+        acw.acw_commands.apply_repair_step(
+            context,
+            step,
+            cmd_start_fn=MagicMock(),
+            cmd_restart_fn=cmd_restart,
+            stop_pane_watchers_keep_session_fn=MagicMock(),
+        )
+
+        cmd_restart.assert_called_once_with(["%13", THREAD, "--restart-codex", "--message", "continue audit"])
 
     def test_parse_repair_args_defaults_to_apply_all(self):
         self.assertEqual(("", False, True), acw.acw_commands.parse_repair_args([]))
