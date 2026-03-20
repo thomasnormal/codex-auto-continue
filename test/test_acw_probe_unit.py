@@ -174,6 +174,35 @@ class AcwProbeUnitTests(unittest.TestCase):
             ),
         )
 
+    def test_repo_root_hint_from_pane_text_stops_after_first_valid_path_from_right(self):
+        text = (
+            "• Ran /usr/lib64/ccache/clang++ -I/home/thomas-ahle/circt/llvm/llvm/include "
+            "-I/home/thomas-ahle/circt-debug-ppa/include "
+            "-c /home/thomas-ahle/circt-debug-ppa/tools/circt-synth/circt-synth.cpp\n"
+        )
+        seen: list[str] = []
+
+        def resolve_repo_root(path: str) -> str:
+            seen.append(path)
+            if path.startswith("/home/thomas-ahle/circt-debug-ppa"):
+                return "/home/thomas-ahle/circt-debug-ppa"
+            if path.startswith("/home/thomas-ahle/circt"):
+                return "/home/thomas-ahle/circt"
+            return ""
+
+        self.assertEqual(
+            "/home/thomas-ahle/circt-debug-ppa",
+            acw_probe.repo_root_hint_from_pane_text(
+                text,
+                resolve_repo_root_fn=resolve_repo_root,
+                home_dir="/home/thomas-ahle",
+            ),
+        )
+        self.assertEqual(
+            ["/home/thomas-ahle/circt-debug-ppa/tools/circt-synth/circt-synth.cpp"],
+            seen,
+        )
+
     def test_repo_root_hint_from_pane_text_ignores_more_recent_build_dir_repo_paths(self):
         text = (
             "main_build = Path('/home/thomas-ahle/circt/build_debugger_plan')\n"

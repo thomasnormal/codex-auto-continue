@@ -82,22 +82,14 @@ def _repo_root_for_path_uncached(
     candidate = _normalize_repo_path(path)
     if candidate is None:
         return ""
-    try:
-        rc = run_fn(
-            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return ""
-    if rc.returncode != 0:
-        return ""
-    root = rc.stdout.strip()
-    if not root:
-        return ""
-    normalized = _normalize_repo_path(root)
-    return str(normalized) if normalized is not None else ""
+    current = candidate
+    while True:
+        git_marker = current / ".git"
+        if git_marker.exists():
+            return str(current)
+        if current == current.parent:
+            return ""
+        current = current.parent
 
 
 def branch_for_cwd(
@@ -133,8 +125,18 @@ def repo_root_for_path(
     cached = _REPO_ROOT_CACHE.get(normalized)
     if cached and ttl_secs > 0 and now - cached[0] < ttl_secs:
         return cached[1]
+    candidate = Path(normalized)
+    while True:
+        ancestor_cached = _REPO_ROOT_CACHE.get(str(candidate))
+        if ancestor_cached and ttl_secs > 0 and now - ancestor_cached[0] < ttl_secs:
+            return ancestor_cached[1]
+        if candidate == candidate.parent:
+            break
+        candidate = candidate.parent
     root = _repo_root_for_path_uncached(normalized, run_fn=run_fn)
     _REPO_ROOT_CACHE[normalized] = (now, root)
+    if root:
+        _REPO_ROOT_CACHE[os.path.realpath(root)] = (now, root)
     return root
 
 

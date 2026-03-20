@@ -581,6 +581,29 @@ class WatchdUnitTests(unittest.TestCase):
             acw._status_window_pane_cell("0:10:aot2", "%10", THREAD, "main"),
         )
 
+    def test_status_row_helpers_cache_state_and_pane_text_per_refresh(self):
+        pane_text = "\n".join(
+            [
+                "• Ran /home/thomas-ahle/circt/lib/Conversion/Foo.cpp",
+                "› continue",
+            ]
+        )
+        with patch.object(acw, "_read_state_json", return_value={"health": "ok"}) as read_state_json:
+            with patch.object(acw, "_capture_pane_text", return_value=pane_text) as capture_pane_text:
+                with patch.object(acw.acw_repo, "repo_root_for_path", return_value="/home/thomas-ahle/circt") as repo_root:
+                    with patch.object(acw.acw_repo, "branch_for_cwd", return_value="main") as branch_for_cwd:
+                        helpers = acw._status_row_helpers()
+                        self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
+                        self.assertEqual({"health": "ok"}, helpers.read_state_json("sqlite:session:" + THREAD))
+                        self.assertEqual("Ran /home/thomas-ahle/circt/lib/Conversion/Foo.cpp", helpers.last_agent_snippet_for_pane("%11", THREAD))
+                        self.assertEqual("waiting", helpers.paused_activity_for_pane("%11"))
+                        self.assertEqual("main", helpers.branch_for_pane("%11", THREAD))
+
+        read_state_json.assert_called_once_with("sqlite:session:" + THREAD)
+        capture_pane_text.assert_called_once_with("%11", lines=80)
+        repo_root.assert_called_once()
+        branch_for_cwd.assert_called_once_with("/home/thomas-ahle/circt")
+
     def test_format_age_compact_omits_ago_suffix(self):
         with patch.object(acw.time, "time", return_value=10_000.0):
             self.assertEqual("1h02m", acw._format_age(10_000.0 - 3720.0, compact=True))

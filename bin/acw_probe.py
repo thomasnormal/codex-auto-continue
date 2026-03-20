@@ -93,13 +93,12 @@ def _explicit_repo_root_from_line(
 ) -> str:
     if line.lstrip().startswith("› "):
         return ""
-    repo_root = ""
-    for match in _PANE_PATH_TOKEN_RE.finditer(line):
+    for match in reversed(list(_PANE_PATH_TOKEN_RE.finditer(line))):
         candidate = _normalize_path_token(match.group("path"), home_dir)
         resolved = resolve_repo_root_fn(candidate)
         if resolved and not _repo_path_is_build_only(candidate, resolved):
-            repo_root = resolved
-    return repo_root
+            return resolved
+    return ""
 
 
 def _freeze_multimap(mapping: dict[str, list[str]]) -> dict[str, tuple[str, ...]]:

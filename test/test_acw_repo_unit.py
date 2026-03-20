@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,8 +84,6 @@ class AcwRepoUnitTests(unittest.TestCase):
 
             def fake_run(args, **_kwargs):
                 calls.append(args)
-                if args[3:6] == ["rev-parse", "--show-toplevel"]:
-                    return subprocess.CompletedProcess(args, 0, stdout=str(repo.resolve()) + "\n", stderr="")
                 return subprocess.CompletedProcess(args, 0, stdout="main\n", stderr="")
 
             branch = acw_repo.branch_for_path(str(file_path), ttl_secs=0.0, run_fn=fake_run)
@@ -92,11 +91,43 @@ class AcwRepoUnitTests(unittest.TestCase):
         self.assertEqual("main", branch)
         self.assertEqual(
             [
-                ["git", "-C", str(nested.resolve()), "rev-parse", "--show-toplevel"],
                 ["git", "-C", str(repo.resolve()), "symbolic-ref", "--quiet", "--short", "HEAD"],
             ],
             calls,
         )
+
+    def test_repo_root_for_path_reuses_cached_repo_root_from_ancestor(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            nested_a = repo / "lib" / "Conversion"
+            nested_b = repo / "test" / "Conversion"
+            nested_a.mkdir(parents=True)
+            nested_b.mkdir(parents=True)
+            file_a = nested_a / "A.cpp"
+            file_b = nested_b / "B.cpp"
+            file_a.write_text("// a\n", encoding="utf-8")
+            file_b.write_text("// b\n", encoding="utf-8")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+
+            with patch.object(
+                acw_repo,
+                "_repo_root_for_path_uncached",
+                wraps=acw_repo._repo_root_for_path_uncached,
+            ) as uncached:
+                root_a = acw_repo.repo_root_for_path(
+                    str(file_a),
+                    ttl_secs=10.0,
+                    time_fn=lambda: 100.0,
+                )
+                root_b = acw_repo.repo_root_for_path(
+                    str(file_b),
+                    ttl_secs=10.0,
+                    time_fn=lambda: 101.0,
+                )
+
+        self.assertEqual(str(repo.resolve()), root_a)
+        self.assertEqual(root_a, root_b)
+        self.assertEqual(1, uncached.call_count)
 
 
 if __name__ == "__main__":

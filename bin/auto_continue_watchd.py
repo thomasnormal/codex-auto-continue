@@ -14,7 +14,9 @@ import sys
 import tempfile
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import acw_bootstrap
 import acw_codex
@@ -1314,37 +1316,21 @@ def _extract_last_agent_snippet(text: str) -> str:
     return acw_probe.extract_last_agent_snippet(text)
 
 
-def _last_agent_snippet_for_pane(pane: str, thread_id: str = "") -> str:
-    return acw_probe.last_agent_snippet_for_pane(pane, thread_id, run_tmux, STATE_DIR)
-
-
 def _capture_pane_text(pane: str, *, lines: int = 200) -> str:
     return run_tmux("capture-pane", "-t", pane, "-p", "-S", f"-{lines}") or ""
 
 
-def _paused_activity_for_pane(pane: str) -> str:
-    return acw_probe.paused_activity_for_pane(pane, run_tmux)
+def _last_agent_snippet_for_pane(pane: str, thread_id: str = "", *, text: str | None = None) -> str:
+    pane_text = _capture_pane_text(pane, lines=40) if text is None else text
+    snippet = acw_probe.extract_last_agent_snippet(pane_text)
+    if snippet:
+        return snippet
+    return acw_probe.thread_title(thread_id, state_dir=STATE_DIR)
 
 
-SavedSessionRecord = acw_runtime.SavedSessionRecord
-LiveWatcherRecord = acw_runtime.LiveWatcherRecord
-LivePaneRecord = acw_runtime.LivePaneRecord
-RuntimeSnapshot = acw_runtime.RuntimeSnapshot
-RuntimeModel = acw_runtime.RuntimeModel
-
-
-def _runtime_context() -> acw_runtime.RuntimeContext:
-    return acw_runtime.RuntimeContext(
-        load_sessions=_load_sessions,
-        watcher_rows=watcher_rows,
-        run_tmux=run_tmux,
-        load_process_snapshot=_load_process_snapshot,
-        pane_thread_probe=_pane_thread_probe,
-        is_pane_id=is_pane_id,
-        is_thread_id=is_thread_id,
-        short_thread_id=_short_thread_id,
-        normalize_tmux_socket=_tmux_scope_key,
-    )
+def _paused_activity_for_pane(pane: str, *, text: str | None = None) -> str:
+    pane_text = _capture_pane_text(pane, lines=40) if text is None else text
+    return acw_probe.paused_activity_from_pane_text(pane_text)
 
 
 def _saved_session_target_context() -> acw_targets.TargetContext:
@@ -1512,6 +1498,14 @@ def _state_summary(state: str, sj: dict[str, str]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _StatusRowHelpers:
+    read_state_json: Callable[[str], dict[str, str]]
+    last_agent_snippet_for_pane: Callable[[str, str], str]
+    paused_activity_for_pane: Callable[[str], str]
+    branch_for_pane: Callable[[str, str], str]
+
+
 _MAX_MSG_LINES = 3
 _STATUS_SECTION_EVERY = 3
 
@@ -1528,16 +1522,76 @@ def _status_window_pane_cell(window_label: str, current_pane: str, thread_id: st
     return acw_ui.status_window_pane_cell(window_label, current_pane, thread_id, branch)
 
 
-def _branch_for_pane(pane: str, _thread_id: str) -> str:
-    repo_root = acw_probe.repo_root_hint_for_pane(
-        pane,
-        run_tmux,
+def _branch_for_pane(pane: str, _thread_id: str, *, text: str | None = None) -> str:
+    pane_text = _capture_pane_text(pane, lines=80) if text is None else text
+    repo_root = acw_probe.repo_root_hint_from_pane_text(
+        pane_text,
         resolve_repo_root_fn=acw_repo.repo_root_for_path,
         home_dir=str(Path.home()),
     )
     if not repo_root:
         return "-"
     return acw_repo.branch_for_cwd(repo_root)
+
+
+def _status_row_helpers() -> _StatusRowHelpers:
+    state_json_cache: dict[str, dict[str, str]] = {}
+    pane_text_cache: dict[str, str] = {}
+
+    def _read_state_json_cached(state_path: str) -> dict[str, str]:
+        cached = state_json_cache.get(state_path)
+        if cached is not None:
+            return cached
+        loaded = _read_state_json(state_path)
+        state_json_cache[state_path] = loaded
+        return loaded
+
+    def _pane_text(pane: str) -> str:
+        if not pane:
+            return ""
+        cached = pane_text_cache.get(pane)
+        if cached is not None:
+            return cached
+        loaded = _capture_pane_text(pane, lines=80)
+        pane_text_cache[pane] = loaded
+        return loaded
+
+    def _last_agent(pane: str, thread_id: str) -> str:
+        return _last_agent_snippet_for_pane(pane, thread_id, text=_pane_text(pane))
+
+    def _paused_activity(pane: str) -> str:
+        return _paused_activity_for_pane(pane, text=_pane_text(pane))
+
+    def _branch(pane: str, _thread_id: str) -> str:
+        return _branch_for_pane(pane, _thread_id, text=_pane_text(pane))
+
+    return _StatusRowHelpers(
+        read_state_json=_read_state_json_cached,
+        last_agent_snippet_for_pane=_last_agent,
+        paused_activity_for_pane=_paused_activity,
+        branch_for_pane=_branch,
+    )
+
+
+SavedSessionRecord = acw_runtime.SavedSessionRecord
+LiveWatcherRecord = acw_runtime.LiveWatcherRecord
+LivePaneRecord = acw_runtime.LivePaneRecord
+RuntimeSnapshot = acw_runtime.RuntimeSnapshot
+RuntimeModel = acw_runtime.RuntimeModel
+
+
+def _runtime_context() -> acw_runtime.RuntimeContext:
+    return acw_runtime.RuntimeContext(
+        load_sessions=_load_sessions,
+        watcher_rows=watcher_rows,
+        run_tmux=run_tmux,
+        load_process_snapshot=_load_process_snapshot,
+        pane_thread_probe=_pane_thread_probe,
+        is_pane_id=is_pane_id,
+        is_thread_id=is_thread_id,
+        short_thread_id=_short_thread_id,
+        normalize_tmux_socket=_tmux_scope_key,
+    )
 
 
 def _status_flex_widths(term_w: int, fixed_col_widths: list[int]) -> tuple[int, int]:
@@ -1563,11 +1617,16 @@ def _status_sort_key(item: tuple[dict[str, str], str, str]) -> tuple[tuple[int, 
     )
 
 
-def _status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> list[str]:
+def _status_recommendations(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    helpers: _StatusRowHelpers | None = None,
+) -> list[str]:
+    row_helpers = helpers or _status_row_helpers()
     return acw_status.status_recommendations(
         resolved,
         compute_state_fn=_compute_state,
-        read_state_json_fn=_read_state_json,
+        read_state_json_fn=row_helpers.read_state_json,
         status_target_for_row_fn=_status_target_for_row,
         quote_target_fn=shlex.quote,
     )
@@ -1627,13 +1686,13 @@ def _status_invariant_messages(resolved: list[tuple[dict[str, str], str, str]]) 
 def _print_status_recommendations(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     acw_status.print_status_recommendations(
         resolved,
-        status_recommendations_fn=_status_recommendations,
+        status_recommendations_fn=lambda rows: _status_recommendations(rows, helpers=_status_row_helpers()),
         status_invariant_messages_fn=_status_invariant_messages,
     )
 
 
 def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
-    rows_data = _status_rows_data(resolved)
+    rows_data = _status_rows_data(resolved, helpers=_status_row_helpers())
     acw_ui.render_status_table(
         rows_data,
         section_every=_STATUS_SECTION_EVERY,
@@ -1641,10 +1700,15 @@ def _status_table(resolved: list[tuple[dict[str, str], str, str]]) -> None:
     )
 
 
-def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[tuple[str, str, str, str, str, str]]:
+def _status_rows_data(
+    resolved: list[tuple[dict[str, str], str, str]],
+    *,
+    helpers: _StatusRowHelpers | None = None,
+) -> list[tuple[str, str, str, str, str, str]]:
+    row_helpers = helpers or _status_row_helpers()
     return acw_status.status_rows_data(
         resolved,
-        read_state_json_fn=_read_state_json,
+        read_state_json_fn=row_helpers.read_state_json,
         compute_state_fn=_compute_state,
         status_row_detail_fn=_status_row_detail,
         thread_times_fn=lambda thread_id, compact: _thread_times(thread_id, compact=compact),
@@ -1656,18 +1720,19 @@ def _status_rows_data(resolved: list[tuple[dict[str, str], str, str]]) -> list[t
             format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
         ),
         format_age_fn=lambda epoch, compact: _format_age(epoch, compact=compact),
-        last_agent_snippet_for_pane_fn=_last_agent_snippet_for_pane,
-        paused_activity_for_pane_fn=_paused_activity_for_pane,
+        last_agent_snippet_for_pane_fn=row_helpers.last_agent_snippet_for_pane,
+        paused_activity_for_pane_fn=row_helpers.paused_activity_for_pane,
         message_summary_for_row_fn=_message_summary_for_row,
-        branch_for_pane_fn=_branch_for_pane,
+        branch_for_pane_fn=row_helpers.branch_for_pane,
         status_window_pane_cell_fn=_status_window_pane_cell,
         state_summary_fn=_state_summary,
     )
 
 
 def _status_watch_frame(resolved: list[tuple[dict[str, str], str, str]]) -> tuple[str, object]:
-    rows_data = _status_rows_data(resolved)
-    recommendations = _status_recommendations(resolved)
+    helpers = _status_row_helpers()
+    rows_data = _status_rows_data(resolved, helpers=helpers)
+    recommendations = _status_recommendations(resolved, helpers=helpers)
     invariant_messages = _status_invariant_messages(resolved)
     frame_key = repr((rows_data, recommendations, invariant_messages))
     renderable = acw_ui.build_status_watch_renderable(

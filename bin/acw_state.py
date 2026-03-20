@@ -13,6 +13,7 @@ SESSION_REF_PREFIX = "sqlite:session:"
 _JSON_MIGRATION_KEY = "json_migration_v1"
 _SQLITE_MIGRATION_KEY = "sqlite_agent_model_v1"
 _SQLITE_WAL_KEY = "sqlite_wal_v1"
+_INITIALIZED_DB_PATHS: set[str] = set()
 
 _AGENT_DEFAULTS: dict[str, object] = {
     "agent_id": "",
@@ -64,6 +65,10 @@ def state_db_path(state_dir: str) -> str:
     return os.path.join(state_dir, STATE_DB_FILENAME)
 
 
+def clear_connection_init_cache() -> None:
+    _INITIALIZED_DB_PATHS.clear()
+
+
 def session_state_ref(thread_id: str) -> str:
     return f"{SESSION_REF_PREFIX}{thread_id.lower()}"
 
@@ -77,14 +82,19 @@ def thread_id_from_state_ref(ref: str) -> str:
 
 def _connect(state_dir: str) -> sqlite3.Connection:
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(state_db_path(state_dir), timeout=5.0)
+    db_path = state_db_path(state_dir)
+    db_key = os.path.realpath(db_path)
+    needs_init = db_key not in _INITIALIZED_DB_PATHS or not Path(db_path).exists()
+    conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    _ensure_schema(conn)
-    _maybe_enable_wal(conn)
-    _maybe_migrate_legacy_json(conn, state_dir)
-    _maybe_migrate_legacy_sqlite_tables(conn)
+    if needs_init:
+        _ensure_schema(conn)
+        _maybe_enable_wal(conn)
+        _maybe_migrate_legacy_json(conn, state_dir)
+        _maybe_migrate_legacy_sqlite_tables(conn)
+        _INITIALIZED_DB_PATHS.add(db_key)
     return conn
 
 
