@@ -77,6 +77,11 @@ def handle_window_renamed(
         return
     window_id = argv[0]
     new_name = argv[1]
+    automatic_rename = (
+        run_tmux_fn("display-message", "-p", "-t", window_id, "#{automatic-rename}") or ""
+    ).strip().lower()
+    if automatic_rename in {"1", "on", "yes"}:
+        return
     listing = run_tmux_fn("list-panes", "-t", window_id, "-F", "#{pane_id}")
     if not listing:
         return

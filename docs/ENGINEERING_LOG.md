@@ -1,5 +1,9 @@
 # Engineering Log
 
+## 2026-03-21
+
+- Fix: tmux `window-renamed` hook updates now ignore windows with `automatic-rename` enabled. This prevents transient editor-driven names like `COMMIT_EDITMSG` from being persisted as the saved managed-session name, which had been breaking `repair` and `restart` identity checks for otherwise healthy panes such as `formal`.
+
 ## 2026-03-20
 
 - Change: `acw status` now shows both `wd=...` and `br=...` in the `WINDOW/PANE` cell. Both are derived from explicit live pane-text evidence instead of tmux cwd, process cwd, or Codex SQLite thread metadata, all of which proved stale for long-lived resumed sessions working in worktrees.

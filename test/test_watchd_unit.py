@@ -1778,6 +1778,8 @@ class WatchdUnitTests(unittest.TestCase):
 
     def test_window_renamed_hook_updates_session_name(self):
         def fake_tmux(*args):
+            if args[:3] == ("display-message", "-p", "-t") and args[3] == "@3":
+                return "off\n"
             if args[:3] == ("list-panes", "-t", "@3"):
                 return "%9\n"
             return None
@@ -1788,6 +1790,21 @@ class WatchdUnitTests(unittest.TestCase):
                     acw.cmd_window_renamed(["@3", "new-name"])
 
         write_state.assert_called_once_with(THREAD, {"thread_id": THREAD, "name": "new-name"})
+
+    def test_window_renamed_hook_ignores_automatic_rename_windows(self):
+        def fake_tmux(*args):
+            if args[:3] == ("display-message", "-p", "-t") and args[3] == "@3":
+                return "on\n"
+            if args[:3] == ("list-panes", "-t", "@3"):
+                return "%9\n"
+            return None
+
+        with patch.object(acw, "run_tmux", side_effect=fake_tmux):
+            with patch.object(acw, "watcher_rows", return_value=[{"thread": THREAD}]):
+                with patch.object(acw, "_write_session_state") as write_state:
+                    acw.cmd_window_renamed(["@3", "COMMIT_EDITMSG"])
+
+        write_state.assert_not_called()
 
     def test_cleanup_rejects_target(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
