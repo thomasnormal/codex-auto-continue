@@ -69,6 +69,7 @@ class RuntimeModel:
     watchers_by_thread: dict[str, tuple[LiveWatcherRecord, ...]]
     sessions_by_thread: dict[str, SavedSessionRecord]
     sessions_by_name: dict[str, tuple[SavedSessionRecord, ...]]
+    effective_session_names: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,29 @@ def _freeze_multimap(mapping: dict[str, list[object]]) -> dict[str, tuple[object
     return {key: tuple(values) for key, values in mapping.items()}
 
 
+_TRANSIENT_SESSION_NAMES = {
+    "COMMIT_EDITMSG",
+    "MERGE_MSG",
+    "TAG_EDITMSG",
+    "SQUASH_MSG",
+    "git-rebase-todo",
+}
+
+
+def is_transient_session_name(name: str) -> bool:
+    return name.strip() in _TRANSIENT_SESSION_NAMES
+
+
+def effective_session_name(
+    session: SavedSessionRecord,
+    pane: LivePaneRecord | None,
+) -> str:
+    session_name = session.name.strip()
+    if pane and pane.window_name.strip() and is_transient_session_name(session_name):
+        return pane.window_name.strip()
+    return session_name
+
+
 def build_runtime_model(
     snapshot: RuntimeSnapshot | None = None,
     *,
@@ -202,6 +226,7 @@ def build_runtime_model(
     watchers_by_thread: dict[str, list[LiveWatcherRecord]] = defaultdict(list)
     sessions_by_thread: dict[str, SavedSessionRecord] = {}
     sessions_by_name: dict[str, list[SavedSessionRecord]] = defaultdict(list)
+    effective_session_names: dict[str, str] = {}
 
     for pane in snapshot.panes:
         if pane.pane_id:
@@ -224,8 +249,14 @@ def build_runtime_model(
             sessions_by_thread[session.thread_id] = session
         elif not context and session.thread_id:
             sessions_by_thread[session.thread_id] = session
-        if session.name:
-            sessions_by_name[session.name].append(session)
+        pane = panes_by_id.get(session.pane) if session.pane else None
+        if not pane:
+            pane_candidates = panes_by_thread.get(session.thread_id, [])
+            pane = pane_candidates[0] if len(pane_candidates) == 1 else None
+        session_name = effective_session_name(session, pane)
+        effective_session_names[session.thread_id] = session_name
+        if session_name:
+            sessions_by_name[session_name].append(session)
 
     return RuntimeModel(
         snapshot=snapshot,
@@ -235,6 +266,7 @@ def build_runtime_model(
         watchers_by_thread=_freeze_multimap(watchers_by_thread),  # type: ignore[arg-type]
         sessions_by_thread=sessions_by_thread,
         sessions_by_name=_freeze_multimap(sessions_by_name),  # type: ignore[arg-type]
+        effective_session_names=effective_session_names,
     )
 
 
@@ -298,13 +330,16 @@ def runtime_session_name_conflict(
     *,
     context: RuntimeContext,
 ) -> str:
-    if not session or not session.name:
+    if not session:
         return ""
-    named = model.sessions_by_name.get(session.name, ())
+    session_name = model.effective_session_names.get(session.thread_id, session.name)
+    if not session_name:
+        return ""
+    named = model.sessions_by_name.get(session_name, ())
     if len(named) <= 1:
         return ""
     threads = ", ".join(context.short_thread_id(item.thread_id) for item in named)
-    return f"agent name '{session.name}' is shared by threads {threads}"
+    return f"agent name '{session_name}' is shared by threads {threads}"
 
 
 def strict_thread_for_pane(
@@ -416,7 +451,13 @@ def watcher_anomalies(
         conflict = runtime_session_name_conflict(model, session, context=context)
         if conflict:
             anomalies.append(conflict)
-        if pane and session.name and pane.window_name and session.name != pane.window_name:
+        effective_name = model.effective_session_names.get(session.thread_id, session.name)
+        if (
+            pane
+            and effective_name
+            and pane.window_name
+            and effective_name != pane.window_name
+        ):
             anomalies.append(f"session name '{session.name}' != window '{pane.window_name}'")
 
     return anomalies
@@ -471,6 +512,7 @@ def build_status_entries_from_snapshot(
         anomalies = watcher_anomalies(model, watcher, context=context)
 
         window_label = pane.window_label if pane else (session.name or "-")
+        session_name = model.effective_session_names.get(session.thread_id, session.name) if session else ""
         entries.append(
             (
                 {
@@ -480,8 +522,8 @@ def build_status_entries_from_snapshot(
                     "cwd": watcher.cwd,
                     "pane": watcher.pane,
                     "thread": watcher.thread_id,
-                    "name": session.name if session else "",
-                    "session_name": session.name if session else "",
+                    "name": session_name,
+                    "session_name": session_name,
                     "state": session.state_file if session else watcher.state_file,
                     "watch": watcher.watch_log,
                     "msg_inline": session.message if session and session.message else watcher.message_inline,
@@ -509,6 +551,7 @@ def build_status_entries_from_snapshot(
             continue
         claimed_session_threads.add(session.thread_id)
         anomalies = unwatched_pane_anomalies(model, pane, context=context)
+        session_name = model.effective_session_names.get(session.thread_id, session.name)
         entries.append(
             (
                 {
@@ -518,8 +561,8 @@ def build_status_entries_from_snapshot(
                     "cwd": "",
                     "pane": pane.pane_id,
                     "thread": pane.detected_thread,
-                    "name": session.name if session else "",
-                    "session_name": session.name if session else "",
+                    "name": session_name,
+                    "session_name": session_name,
                     "state": session.state_file if session else "",
                     "watch": "",
                     "msg_inline": session.message if session and session.message else "",
@@ -545,8 +588,8 @@ def build_status_entries_from_snapshot(
                     "cwd": "",
                     "pane": "",
                     "thread": session.thread_id,
-                    "name": session.name,
-                    "session_name": session.name,
+                    "name": model.effective_session_names.get(session.thread_id, session.name),
+                    "session_name": model.effective_session_names.get(session.thread_id, session.name),
                     "state": session.state_file,
                     "watch": "",
                     "msg_inline": session.message,

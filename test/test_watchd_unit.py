@@ -930,6 +930,46 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 2", text)
         self.assertIn("Invariant error: agent name 'formal' maps to multiple threads", text)
 
+    def test_status_summary_ignores_transient_saved_name_when_live_window_names_differ(self):
+        snapshot = _snapshot(
+            panes=(
+                _pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),
+                _pane_record("%32", OTHER_THREAD, window_label="0:16:si3", window_name="si3"),
+            ),
+            watchers=(
+                _watcher_record("%6", THREAD, pid="606"),
+                _watcher_record("%32", OTHER_THREAD, pid="3232"),
+            ),
+            sessions=(
+                _session_record(THREAD, name="COMMIT_EDITMSG"),
+                _session_record(OTHER_THREAD, name="COMMIT_EDITMSG", state_file="/state/acw_session.other.json"),
+            ),
+        )
+        with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value="Ran tests"):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
+        text = out.getvalue()
+        self.assertIn("0:6:formal/%6", text)
+        self.assertIn("0:16:si3/%32", text)
+        self.assertNotIn("agent name 'COMMIT_EDITMSG' maps to multiple threads", text)
+
+    def test_resolve_restart_target_uses_live_window_name_when_saved_name_is_transient(self):
+        model = acw._build_runtime_model(
+            _snapshot(
+                panes=(_pane_record("%6", THREAD, window_label="0:6:formal", window_name="formal"),),
+                sessions=(_session_record(THREAD, name="COMMIT_EDITMSG", pane="%6"),),
+            )
+        )
+
+        pane = acw._resolve_restart_pane_target("formal", model=model)
+
+        self.assertEqual("%6", pane)
+
     def test_status_summary_prints_doctor_recommendation_for_warn(self):
         snapshot = _snapshot(
             panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),
