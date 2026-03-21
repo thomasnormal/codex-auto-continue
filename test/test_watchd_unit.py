@@ -1384,6 +1384,85 @@ class WatchdUnitTests(unittest.TestCase):
         remove_runtime.assert_called_once_with(THREAD, "")
         self.assertIn("failed to remove runtime state", err.getvalue())
 
+    def test_daemon_main_retries_after_sqlite_operational_error(self):
+        class DummyServer:
+            def close(self):
+                return None
+
+        class DummyTail:
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = os.path.join(td, "acw_daemon.pid")
+            socket_file = os.path.join(td, "acw_daemon.sock")
+            sleep_calls: list[float] = []
+
+            with patch.object(acw.acw_rpc, "listen", return_value=DummyServer()):
+                with patch.object(acw, "daemon_pid_file_for_scope", return_value=pid_file):
+                    with patch.object(acw, "daemon_socket_file_for_scope", return_value=socket_file):
+                        with patch.object(acw, "_DaemonCodexLogTail", return_value=DummyTail()):
+                            with patch.object(acw, "_write_daemon_scope_state"):
+                                with patch.object(acw, "_daemon_process_rpc_requests", return_value=0):
+                                    with patch.object(
+                                        acw,
+                                        "_daemon_reconcile_once",
+                                        side_effect=[
+                                            sqlite3.OperationalError("database is locked"),
+                                            KeyboardInterrupt,
+                                        ],
+                                    ):
+                                        with patch.object(
+                                            acw.time,
+                                            "sleep",
+                                            side_effect=lambda secs: sleep_calls.append(secs),
+                                        ):
+                                            err = io.StringIO()
+                                            with redirect_stderr(err):
+                                                with self.assertRaises(KeyboardInterrupt):
+                                                    acw._daemon_main([])
+
+        self.assertEqual([acw.DAEMON_POLL_INTERVAL_SECS], sleep_calls)
+        self.assertIn("warning: transient daemon error:", err.getvalue())
+
+    def test_daemon_main_cleanup_warning_ignores_oserror_writing_stderr(self):
+        class DummyServer:
+            def close(self):
+                return None
+
+        class DummyTail:
+            def close(self):
+                return None
+
+        class BrokenStderr(io.StringIO):
+            def write(self, _text):
+                raise OSError(28, "No space left on device")
+
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = os.path.join(td, "acw_daemon.pid")
+            socket_file = os.path.join(td, "acw_daemon.sock")
+
+            def fail_reconcile(_scope, *, log_tail, runtimes):
+                del log_tail
+                runtimes[THREAD] = object()
+                raise KeyboardInterrupt
+
+            with patch.object(acw.acw_rpc, "listen", return_value=DummyServer()):
+                with patch.object(acw, "daemon_pid_file_for_scope", return_value=pid_file):
+                    with patch.object(acw, "daemon_socket_file_for_scope", return_value=socket_file):
+                        with patch.object(acw, "_DaemonCodexLogTail", return_value=DummyTail()):
+                            with patch.object(acw, "_write_daemon_scope_state"):
+                                with patch.object(acw, "_daemon_process_rpc_requests", return_value=0):
+                                    with patch.object(acw, "_daemon_reconcile_once", side_effect=fail_reconcile):
+                                        with patch.object(
+                                            acw,
+                                            "_remove_runtime_state",
+                                            side_effect=sqlite3.OperationalError("unable to open database file"),
+                                        ):
+                                            with redirect_stderr(BrokenStderr()):
+                                                with self.assertRaises(KeyboardInterrupt):
+                                                    acw._daemon_main([])
+
     def test_repair_steps_restart_duplicate_watchers_on_same_pane(self):
         model = acw._build_runtime_model(_snapshot(
             panes=(_pane_record("%7", THREAD, window_label="0:7:formal", window_name="formal"),),

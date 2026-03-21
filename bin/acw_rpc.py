@@ -14,6 +14,13 @@ class RpcError(RuntimeError):
         self.detail = detail
 
 
+def _close_quietly(handle) -> None:
+    try:
+        handle.close()
+    except OSError:
+        pass
+
+
 def listen(socket_path: str) -> socket.socket:
     path = Path(socket_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,8 +117,11 @@ def serve_pending(
         writer = conn.makefile("w", encoding="utf-8")
 
         def send(kind: str, **payload: object) -> None:
-            writer.write(json.dumps({"kind": kind, **payload}) + "\n")
-            writer.flush()
+            try:
+                writer.write(json.dumps({"kind": kind, **payload}) + "\n")
+                writer.flush()
+            except OSError:
+                return
 
         try:
             line = reader.readline()
@@ -133,7 +143,7 @@ def serve_pending(
         except Exception as exc:  # pragma: no cover - defensive daemon-side failure reporting
             send("error", message=str(exc) or exc.__class__.__name__, detail=traceback.format_exc())
         finally:
-            writer.close()
-            reader.close()
-            conn.close()
+            _close_quietly(writer)
+            _close_quietly(reader)
+            _close_quietly(conn)
     return handled

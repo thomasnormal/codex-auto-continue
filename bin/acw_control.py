@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
 import signal
@@ -765,6 +766,19 @@ def daemon_process_rpc_requests(
     )
 
 
+def _safe_stderr_print(message: str) -> None:
+    try:
+        print(message, file=sys.stderr)
+    except OSError:
+        pass
+
+
+def _is_retryable_daemon_error(exc: BaseException) -> bool:
+    if isinstance(exc, sqlite3.Error):
+        return True
+    return isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EPIPE}
+
+
 def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:
     socket_path = ""
     rest = list(argv)
@@ -804,30 +818,39 @@ def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:
 
     try:
         while True:
-            context.daemon_process_rpc_requests(
-                rpc_server,
-                scope=scope,
-                log_tail=log_tail,
-                runtimes=runtimes,
-            )
-            active_count = context.daemon_reconcile_once(
-                scope,
-                log_tail=log_tail,
-                runtimes=runtimes,
-            )
-            context.daemon_process_rpc_requests(
-                rpc_server,
-                scope=scope,
-                log_tail=log_tail,
-                runtimes=runtimes,
-            )
-            context.write_daemon_scope_state(
-                daemon_pid=str(os.getpid()),
-                socket_path=str(socket_file),
-                heartbeat_ts=context.watch_now_ts(),
-                started_ts=started_ts,
-                scope=scope,
-            )
+            try:
+                context.daemon_process_rpc_requests(
+                    rpc_server,
+                    scope=scope,
+                    log_tail=log_tail,
+                    runtimes=runtimes,
+                )
+                active_count = context.daemon_reconcile_once(
+                    scope,
+                    log_tail=log_tail,
+                    runtimes=runtimes,
+                )
+                context.daemon_process_rpc_requests(
+                    rpc_server,
+                    scope=scope,
+                    log_tail=log_tail,
+                    runtimes=runtimes,
+                )
+                context.write_daemon_scope_state(
+                    daemon_pid=str(os.getpid()),
+                    socket_path=str(socket_file),
+                    heartbeat_ts=context.watch_now_ts(),
+                    started_ts=started_ts,
+                    scope=scope,
+                )
+            except BaseException as exc:
+                if isinstance(exc, KeyboardInterrupt):
+                    raise
+                if not _is_retryable_daemon_error(exc):
+                    raise
+                _safe_stderr_print(f"warning: transient daemon error: {exc}")
+                context.time_module.sleep(context.daemon_poll_interval_secs)
+                continue
 
             if active_count == 0:
                 if idle_since == 0.0:
@@ -846,9 +869,8 @@ def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:
             try:
                 context.remove_runtime_state(thread_id, scope)
             except sqlite3.Error as exc:
-                print(
-                    f"warning: failed to remove runtime state for thread_id={thread_id}: {exc}",
-                    file=sys.stderr,
+                _safe_stderr_print(
+                    f"warning: failed to remove runtime state for thread_id={thread_id}: {exc}"
                 )
         pid_file.unlink(missing_ok=True)
 

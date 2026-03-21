@@ -3,6 +3,8 @@
 ## 2026-03-21
 
 - Fix: tmux `window-renamed` hook updates now ignore windows with `automatic-rename` enabled. This prevents transient editor-driven names like `COMMIT_EDITMSG` from being persisted as the saved managed-session name, which had been breaking `repair` and `restart` identity checks for otherwise healthy panes such as `formal`.
+- Fix: hardened the shared `acw` daemon against transient storage/control-path failures. The main daemon loop now treats `sqlite3.Error` and retryable `OSError` values such as `ENOSPC` / `EPIPE` as transient, logs a warning, sleeps one poll interval, and keeps running instead of tearing down the whole control plane. Cleanup warning paths also now ignore `stderr` write failures so a full disk cannot crash the daemon while it is already unwinding an earlier SQLite failure.
+- Fix: daemon RPC serving now swallows broken-pipe/close errors from disconnected clients. A client disappearing mid-progress update is no longer allowed to crash the shared daemon loop or turn one pane-local failure into a global outage.
 
 ## 2026-03-20
 
