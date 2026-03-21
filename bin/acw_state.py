@@ -794,29 +794,41 @@ def remove_runtime_state(thread_id: str, *, state_dir: str, scope: str = "") -> 
 def read_runtime_rows(*, state_dir: str, scope: str) -> list[dict[str, object]]:
     conn = _connect(state_dir)
     try:
+        scope_row = conn.execute(
+            """
+            SELECT tmux_socket, daemon_pid, socket_path, heartbeat_ts, started_ts
+            FROM daemon_scopes
+            WHERE tmux_socket = ?
+            """,
+            (scope,),
+        ).fetchone()
+        scope_state = _daemon_scope_from_row(scope_row)
+        scope_daemon_pid = str(scope_state.get("daemon_pid", "")).strip()
+        scope_pid_alive = False
+        if scope_daemon_pid.isdigit():
+            try:
+                os.kill(int(scope_daemon_pid), 0)
+                scope_pid_alive = True
+            except OSError:
+                scope_pid_alive = False
         rows = conn.execute(
             _runtime_query() + " WHERE a.tmux_socket = ? ORDER BY a.pane, a.thread_id",
             (scope,),
         ).fetchall()
         result: list[dict[str, object]] = []
-        stale_agent_ids: list[str] = []
         for row in rows:
             runtime = _runtime_from_row(row)
             daemon_pid = str(runtime.get("daemon_pid", "")).strip()
-            if daemon_pid and daemon_pid.isdigit():
+            if scope_daemon_pid:
+                if daemon_pid != scope_daemon_pid or not scope_pid_alive:
+                    continue
+            elif daemon_pid and daemon_pid.isdigit():
                 try:
                     os.kill(int(daemon_pid), 0)
                 except OSError:
-                    stale_agent_ids.append(str(runtime["agent_id"]).strip())
                     continue
             runtime["paused"] = "1" if runtime["paused"] else ""
             result.append(runtime)
-        if stale_agent_ids:
-            with conn:
-                conn.executemany(
-                    "DELETE FROM agent_runtimes WHERE agent_id = ?",
-                    [(agent_id,) for agent_id in stale_agent_ids],
-                )
         return result
     finally:
         conn.close()

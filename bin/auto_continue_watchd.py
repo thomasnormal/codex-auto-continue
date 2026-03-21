@@ -793,6 +793,17 @@ def _daemon_refresh_session_health(
     )
 
 
+def _daemon_refresh_session_location(runtime: _DaemonSessionRuntime) -> None:
+    acw_daemon.daemon_refresh_session_location(
+        runtime,
+        capture_pane_text=_capture_pane_text,
+        resolve_repo_root_fn=acw_repo.repo_root_for_path,
+        branch_for_cwd=acw_repo.branch_for_cwd,
+        home_dir=str(Path.home()),
+        write_session_state=_write_session_state,
+    )
+
+
 def _daemon_runtime_events(
     runtime: _DaemonSessionRuntime,
     events_by_thread: dict[str, list[_LogwatchCodexLogEvent]],
@@ -831,6 +842,7 @@ def _daemon_reconcile_context() -> acw_control.DaemonReconcileContext:
         daemon_process_session_events=_daemon_process_session_events,
         daemon_runtime_events=_daemon_runtime_events,
         daemon_refresh_session_health=_daemon_refresh_session_health,
+        daemon_refresh_session_location=_daemon_refresh_session_location,
         daemon_runtime_payload=_daemon_runtime_payload,
         write_runtime_state=_write_runtime_state,
         append_log=_watch_append_log,
@@ -1617,16 +1629,6 @@ def _status_row_helpers() -> _StatusRowHelpers:
                 detected_branch = acw_repo.branch_for_cwd(detected_workdir)
                 if detected_branch == "-":
                     detected_branch = ""
-                updates: dict[str, str] = {}
-                if saved_workdir != detected_workdir:
-                    updates["last_proven_workdir"] = detected_workdir
-                if saved_branch != detected_branch:
-                    updates["last_proven_branch"] = detected_branch
-                if updates:
-                    _write_session_state(thread_id, updates)
-                    merged = dict(session_state)
-                    merged.update(updates)
-                    session_state_cache[thread_id] = merged
                 result = (detected_workdir, detected_branch)
             elif saved_workdir:
                 result = (saved_workdir, saved_branch)

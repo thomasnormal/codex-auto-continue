@@ -94,6 +94,52 @@ class AcwStateUnitTests(unittest.TestCase):
         migrate_json.assert_called_once_with(good_conn, td)
         migrate_sqlite.assert_called_once_with(good_conn)
 
+    def test_read_runtime_rows_does_not_delete_dead_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            acw_state.write_session_state(
+                THREAD,
+                {
+                    "thread_id": THREAD,
+                    "pane": "%7",
+                    "name": "formal",
+                    "message": "continue",
+                    "tmux_socket": "",
+                },
+                state_dir=td,
+            )
+            acw_state.write_runtime_state(
+                THREAD,
+                {
+                    "runtime_id": "runtime-7",
+                    "daemon_pid": "12345",
+                    "pane": "%7",
+                    "state": acw_state.session_state_ref(THREAD),
+                    "watch": "/tmp/watch.log",
+                    "cwd": "/repo",
+                    "msg_inline": "continue",
+                    "paused": False,
+                    "runtime_status": "running",
+                    "runtime_detail": "",
+                    "generation": 1,
+                    "worker_label": "runtime-7",
+                    "heartbeat_ts": "2026-03-21 12:00:00",
+                },
+                state_dir=td,
+                scope="",
+            )
+
+            with patch.object(acw_state.os, "kill", side_effect=OSError(3, "No such process")):
+                rows = acw_state.read_runtime_rows(state_dir=td, scope="")
+
+            conn = acw_state._connect(td)
+            try:
+                runtime_count = conn.execute("SELECT COUNT(*) FROM agent_runtimes").fetchone()[0]
+            finally:
+                conn.close()
+
+        self.assertEqual([], rows)
+        self.assertEqual(1, runtime_count)
+
 
 if __name__ == "__main__":
     unittest.main()

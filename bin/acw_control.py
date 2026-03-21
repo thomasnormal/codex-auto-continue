@@ -58,6 +58,7 @@ class DaemonReconcileContext:
     daemon_process_session_events: Callable[[Any, list[Any]], None]
     daemon_runtime_events: Callable[[Any, dict[str, list[Any]]], list[Any]]
     daemon_refresh_session_health: Callable[..., None]
+    daemon_refresh_session_location: Callable[[Any], None]
     daemon_runtime_payload: Callable[[Any], dict]
     write_runtime_state: Callable[[str, dict, str | None], None]
     append_log: Callable[[Path, str], None]
@@ -510,11 +511,16 @@ def daemon_reconcile_once(
 
     now = context.time_module.time()
     for thread_id, runtime in runtimes.items():
+        runtime_events = context.daemon_runtime_events(runtime, events_by_thread)
         try:
             context.daemon_process_session_events(
                 runtime,
-                context.daemon_runtime_events(runtime, events_by_thread),
+                runtime_events,
             )
+            last_location_check = float(getattr(runtime, "last_location_check", 0.0) or 0.0)
+            if runtime_events or now - last_location_check > 15.0:
+                runtime.last_location_check = now
+                context.daemon_refresh_session_location(runtime)
             if not runtime.paused and now - runtime.last_health_check > 30.0:
                 runtime.last_health_check = now
                 context.daemon_refresh_session_health(
@@ -774,9 +780,29 @@ def _safe_stderr_print(message: str) -> None:
 
 
 def _is_retryable_daemon_error(exc: BaseException) -> bool:
-    if isinstance(exc, sqlite3.Error):
+    if isinstance(exc, sqlite3.OperationalError):
+        error_name = str(getattr(exc, "sqlite_errorname", "")).strip().upper()
+        error_code = getattr(exc, "sqlite_errorcode", None)
+        if error_name in {"SQLITE_BUSY", "SQLITE_LOCKED"}:
+            return True
+        if error_code in {getattr(sqlite3, "SQLITE_BUSY", 5), getattr(sqlite3, "SQLITE_LOCKED", 6)}:
+            return True
+        text = str(exc).lower()
+        return any(
+            needle in text
+            for needle in (
+                "database is locked",
+                "database schema is locked",
+                "database table is locked",
+            )
+        )
+    if isinstance(exc, BrokenPipeError):
         return True
-    return isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EPIPE}
+    return isinstance(exc, OSError) and exc.errno in {
+        errno.EPIPE,
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+    }
 
 
 def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:

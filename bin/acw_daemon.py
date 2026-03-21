@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import acw_loop
+import acw_probe
 
 
 @dataclass
@@ -47,6 +48,8 @@ class SessionRuntime:
     pending_startup_event: object | None = None
     loop_signature: str = ""
     loop_score: int = 0
+    proven_branch: str = ""
+    last_location_check: float = 0.0
 
 
 def continue_count_for_watch_log(watch_log: str) -> int:
@@ -143,6 +146,8 @@ def daemon_session_runtime(
     continue_count = _coerce_int(state.get("continue_count", 0))
     if continue_count <= 0:
         continue_count = continue_count_for_watch_log(watch_log)
+    last_proven_workdir = str(state.get("last_proven_workdir", "")).strip()
+    last_proven_branch = str(state.get("last_proven_branch", "")).strip()
     runtime = SessionRuntime(
         thread_id=session.thread_id,
         pane=session.pane,
@@ -152,7 +157,7 @@ def daemon_session_runtime(
         runtime_id=next_runtime_id(),
         state_file=state_file,
         watch_log=watch_log,
-        cwd=project_cwd,
+        cwd=last_proven_workdir or project_cwd,
         paused=session.paused,
         runtime_status="paused" if session.paused else "running",
         runtime_detail=session.health_detail if session.paused else "",
@@ -164,6 +169,7 @@ def daemon_session_runtime(
         watcher_start=time.time(),
         loop_signature=str(state.get("loop_signature", "")).strip(),
         loop_score=_coerce_int(state.get("loop_score", 0)),
+        proven_branch=last_proven_branch,
     )
     write_session_state(
         session.thread_id,
@@ -350,6 +356,40 @@ def daemon_check_loop(
         write_session_state=write_session_state,
         append_log=append_log,
         now_ts=now_ts,
+    )
+    return True
+
+
+def daemon_refresh_session_location(
+    runtime: SessionRuntime,
+    *,
+    capture_pane_text,
+    resolve_repo_root_fn,
+    branch_for_cwd,
+    home_dir: str,
+    write_session_state,
+) -> bool:
+    pane_text = capture_pane_text(runtime.pane)
+    workdir, source = acw_probe.workdir_proof_from_pane_text(
+        pane_text,
+        resolve_repo_root_fn=resolve_repo_root_fn,
+        home_dir=home_dir,
+    )
+    if not workdir or source not in {"explicit", "git_c"}:
+        return False
+    branch = branch_for_cwd(workdir)
+    if branch == "-":
+        branch = ""
+    if workdir == runtime.cwd and branch == runtime.proven_branch:
+        return False
+    runtime.cwd = workdir
+    runtime.proven_branch = branch
+    write_session_state(
+        runtime.thread_id,
+        {
+            "last_proven_workdir": workdir,
+            "last_proven_branch": branch,
+        },
     )
     return True
 

@@ -93,10 +93,11 @@ def call(
         raise RpcError("daemon closed control connection without returning a result")
     finally:
         if writer is not None:
-            writer.close()
+            _close_quietly(writer)
         if reader is not None:
-            reader.close()
-        sock.close()
+            _close_quietly(reader)
+        if sock is not None:
+            _close_quietly(sock)
 
 
 def serve_pending(

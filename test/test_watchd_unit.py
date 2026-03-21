@@ -614,13 +614,7 @@ class WatchdUnitTests(unittest.TestCase):
                                 self.assertEqual("circt-ddr3-debug", helpers.workdir_for_pane("%11", THREAD))
                                 self.assertEqual("ddr3-debug-20260320", helpers.branch_for_pane("%11", THREAD))
                                 self.assertEqual(1, read_session_state.call_count)
-                                write_session_state.assert_called_once_with(
-                                    THREAD,
-                                    {
-                                        "last_proven_workdir": "/home/thomas-ahle/circt-ddr3-debug",
-                                        "last_proven_branch": "ddr3-debug-20260320",
-                                    },
-                                )
+                                write_session_state.assert_not_called()
 
         read_state_json.assert_called_once_with("sqlite:session:" + THREAD)
         capture_pane_text.assert_called_once_with("%11", lines=acw._STATUS_PANE_CAPTURE_LINES)
@@ -1465,6 +1459,44 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual([acw.DAEMON_POLL_INTERVAL_SECS], sleep_calls)
         self.assertIn("warning: transient daemon error:", err.getvalue())
 
+    def test_daemon_main_does_not_retry_after_sqlite_integrity_error(self):
+        class DummyServer:
+            def close(self):
+                return None
+
+        class DummyTail:
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = os.path.join(td, "acw_daemon.pid")
+            socket_file = os.path.join(td, "acw_daemon.sock")
+            sleep_calls: list[float] = []
+
+            with patch.object(acw.acw_rpc, "listen", return_value=DummyServer()):
+                with patch.object(acw, "daemon_pid_file_for_scope", return_value=pid_file):
+                    with patch.object(acw, "daemon_socket_file_for_scope", return_value=socket_file):
+                        with patch.object(acw, "_DaemonCodexLogTail", return_value=DummyTail()):
+                            with patch.object(acw, "_write_daemon_scope_state"):
+                                with patch.object(acw, "_daemon_process_rpc_requests", return_value=0):
+                                    with patch.object(
+                                        acw,
+                                        "_daemon_reconcile_once",
+                                        side_effect=sqlite3.IntegrityError("constraint failed"),
+                                    ):
+                                        with patch.object(
+                                            acw.time,
+                                            "sleep",
+                                            side_effect=lambda secs: sleep_calls.append(secs),
+                                        ):
+                                            err = io.StringIO()
+                                            with redirect_stderr(err):
+                                                with self.assertRaises(sqlite3.IntegrityError):
+                                                    acw._daemon_main([])
+
+        self.assertEqual([], sleep_calls)
+        self.assertNotIn("warning: transient daemon error:", err.getvalue())
+
     def test_daemon_main_cleanup_warning_ignores_oserror_writing_stderr(self):
         class DummyServer:
             def close(self):
@@ -1502,6 +1534,41 @@ class WatchdUnitTests(unittest.TestCase):
                                             with redirect_stderr(BrokenStderr()):
                                                 with self.assertRaises(KeyboardInterrupt):
                                                     acw._daemon_main([])
+
+    def test_daemon_refresh_session_location_persists_strong_workdir(self):
+        runtime = acw._DaemonSessionRuntime(
+            thread_id=THREAD,
+            pane="%11",
+            message="continue",
+            tmux_socket="",
+            generation=1,
+            runtime_id="runtime-11",
+            state_file="/state/acw_session.json",
+            watch_log="/state/watch.log",
+            cwd="/home/thomas-ahle/circt",
+        )
+        pane_text = "• I’m now working in /home/thomas-ahle/circt-ddr3-debug on the dedicated worktree."
+
+        with patch.object(acw, "_capture_pane_text", return_value=pane_text):
+            with patch.object(
+                acw.acw_repo,
+                "repo_root_for_path",
+                side_effect=lambda path: "/home/thomas-ahle/circt-ddr3-debug"
+                if path.startswith("/home/thomas-ahle/circt-ddr3-debug")
+                else "",
+            ):
+                with patch.object(acw.acw_repo, "branch_for_cwd", return_value="ddr3-debug-20260320"):
+                    with patch.object(acw, "_write_session_state") as write_session_state:
+                        acw._daemon_refresh_session_location(runtime)
+
+        self.assertEqual("/home/thomas-ahle/circt-ddr3-debug", runtime.cwd)
+        write_session_state.assert_called_once_with(
+            THREAD,
+            {
+                "last_proven_workdir": "/home/thomas-ahle/circt-ddr3-debug",
+                "last_proven_branch": "ddr3-debug-20260320",
+            },
+        )
 
     def test_repair_steps_restart_duplicate_watchers_on_same_pane(self):
         model = acw._build_runtime_model(_snapshot(
