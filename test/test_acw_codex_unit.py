@@ -73,6 +73,54 @@ class AcwCodexUnitTests(unittest.TestCase):
                 with patch.object(acw_codex, "_thread_from_state_db_pid", return_value=THREAD):
                     self.assertEqual(THREAD, acw_codex.thread_from_codex_pid("222"))
 
+    def test_thread_from_state_db_pid_prefers_newest_logs_db_mapping(self):
+        newer_thread = "019cfffe-ec07-7b82-b11f-13070a79b958"
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+
+            conn = sqlite3.connect(state_dir / "state_5.sqlite")
+            try:
+                conn.execute(
+                    "create table logs ("
+                    "thread_id text, "
+                    "process_uuid text, "
+                    "ts integer, "
+                    "ts_nanos integer)"
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    (THREAD, "pid:222:stale", 100, 1),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            conn = sqlite3.connect(state_dir / "logs_1.sqlite")
+            try:
+                conn.execute(
+                    "create table logs ("
+                    "thread_id text, "
+                    "process_uuid text, "
+                    "ts integer, "
+                    "ts_nanos integer)"
+                )
+                conn.execute(
+                    "insert into logs(thread_id, process_uuid, ts, ts_nanos) values (?, ?, ?, ?)",
+                    (newer_thread, "pid:222:live", 200, 5),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.assertEqual(
+                newer_thread,
+                acw_codex._thread_from_state_db_pid(
+                    "222",
+                    state_dir,
+                    process_start_epoch_fn=lambda _pid: 0.0,
+                ),
+            )
+
     def test_tmux_send_interrupts_after_text_before_enter(self):
         calls = []
 

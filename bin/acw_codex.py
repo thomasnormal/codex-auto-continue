@@ -70,6 +70,18 @@ def _state_db_candidates(state_dir: Path):
         yield fake_db
 
 
+def _log_db_candidates(state_dir: Path):
+    seen: set[Path] = set()
+    for path in sorted(state_dir.glob("logs_*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path not in seen:
+            seen.add(path)
+            yield path
+    for path in _state_db_candidates(state_dir):
+        if path not in seen:
+            seen.add(path)
+            yield path
+
+
 def parse_codex_log_event(line: str) -> Optional[tuple[str, str, str]]:
     m = EVENT_RE.search(line)
     if m:
@@ -415,14 +427,16 @@ def _thread_from_state_db_pid(
     started_at = process_start_epoch_fn(pid)
     min_ts = int(started_at) if started_at is not None else None
 
-    for db_path in _state_db_candidates(state_dir):
+    best_thread: Optional[str] = None
+    best_order: tuple[int, int] = (-1, -1)
+    for db_path in _log_db_candidates(state_dir):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:
             continue
         try:
             query = (
-                "select thread_id "
+                "select thread_id, ts, ts_nanos "
                 "from logs "
                 "where process_uuid like ? and thread_id is not null and thread_id != '' "
             )
@@ -440,9 +454,15 @@ def _thread_from_state_db_pid(
         if not row:
             continue
         thread_id = str(row[0]).lower()
-        if is_thread_id(thread_id):
-            return thread_id
-    return None
+        if not is_thread_id(thread_id):
+            continue
+        ts = int(row[1]) if len(row) > 1 and row[1] is not None else -1
+        ts_nanos = int(row[2]) if len(row) > 2 and row[2] is not None else -1
+        order = (ts, ts_nanos)
+        if order > best_order:
+            best_thread = thread_id
+            best_order = order
+    return best_thread
 
 
 def _thread_id_from_cmdline_fields(fields: list[str]) -> Optional[str]:

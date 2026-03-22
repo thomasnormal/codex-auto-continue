@@ -1696,6 +1696,28 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual("start_watcher", steps[0].kind)
         self.assertEqual(THREAD, steps[0].source_thread_id)
 
+    def test_repair_plan_rebinds_wrong_thread_runtime_using_same_pane_saved_message(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%27", THIRD_THREAD, window_label="0:12:ppa", window_name="ppa"),),
+            watchers=(_watcher_record("%27", THREAD, pid="455099", message_inline="old inline"),),
+            sessions=(
+                _session_record(
+                    THREAD,
+                    name="ppa",
+                    pane="%27",
+                    message="continue working on the ppa plan",
+                ),
+            ),
+        ))
+
+        steps = acw._repair_steps_for_pane(model, "%27")
+
+        self.assertEqual(1, len(steps))
+        self.assertEqual("restart_watcher", steps[0].kind)
+        self.assertEqual(THIRD_THREAD, steps[0].thread_id)
+        self.assertEqual("continue working on the ppa plan", steps[0].message)
+        self.assertIn("rebind the runtime on pane %27", steps[0].summary)
+
     def test_repair_plan_includes_recoverable_dead_named_session_in_no_target_mode(self):
         model = acw._build_runtime_model(_snapshot(
             panes=(_pane_record("%50", THIRD_THREAD, window_label="0:50:bugs", window_name="bugs"),),

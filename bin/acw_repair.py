@@ -57,9 +57,15 @@ def repair_message_for_pane(
             continue
         if watcher.message_inline:
             return context.message_text(watcher.message_inline)
+    exact = context.exact_session_for_pane(model, pane)
+    if exact and exact.thread_id != live_thread and exact.message:
+        return exact.message
     recovered = context.recoverable_named_session_for_pane(model, pane)
     if recovered and recovered.message:
         return recovered.message
+    pane_watchers = context.runtime_watchers_for_pane(model, pane)
+    if len(pane_watchers) == 1 and pane_watchers[0].message_inline:
+        return context.message_text(pane_watchers[0].message_inline)
     return ""
 
 
@@ -178,7 +184,11 @@ def repair_steps_for_pane(
         ]
 
     session = context.runtime_session_for_thread(model, live_thread)
+    exact_session = None if session else context.exact_session_for_pane(model, pane)
     recovered_session = None if session else context.recoverable_named_session_for_pane(model, pane)
+    adoptable_session = recovered_session
+    if exact_session and exact_session.thread_id != live_thread:
+        adoptable_session = exact_session
     if session:
         conflict = context.runtime_session_name_conflict(model, session)
         if conflict:
@@ -205,18 +215,18 @@ def repair_steps_for_pane(
                     message=message,
                 )
             ]
-        if recovered_session and message:
+        if adoptable_session and message:
             return [
                 RepairStep(
                     kind="start_watcher",
                     target=pane,
                     summary=(
-                        f"adopt saved session '{recovered_session.name}' from dead thread "
-                        f"{context.short_thread_id(recovered_session.thread_id)} onto pane {pane} and start one managed runtime"
+                        f"adopt saved session '{adoptable_session.name}' from thread "
+                        f"{context.short_thread_id(adoptable_session.thread_id)} onto pane {pane} and start one managed runtime"
                     ),
                     auto_apply=True,
                     thread_id=live_thread,
-                    source_thread_id=recovered_session.thread_id,
+                    source_thread_id=adoptable_session.thread_id,
                     message=message,
                 )
             ]
@@ -256,7 +266,7 @@ def repair_steps_for_pane(
                 summary=f"replace duplicate runtime entries on pane {pane} with one managed runtime for thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
-                source_thread_id=recovered_session.thread_id if recovered_session else "",
+                source_thread_id=adoptable_session.thread_id if adoptable_session else "",
                 message=message,
             )
         ]
@@ -279,7 +289,7 @@ def repair_steps_for_pane(
                 summary=f"restart the runtime on pane {pane} with the live thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
-                source_thread_id=recovered_session.thread_id if recovered_session else "",
+                source_thread_id=adoptable_session.thread_id if adoptable_session else "",
                 message=message,
             )
         ]
@@ -305,24 +315,24 @@ def repair_steps_for_pane(
                 summary=f"rebind the runtime on pane {pane} to the live thread {context.short_thread_id(live_thread)}",
                 auto_apply=True,
                 thread_id=live_thread,
-                source_thread_id=recovered_session.thread_id if recovered_session else "",
+                source_thread_id=adoptable_session.thread_id if adoptable_session else "",
                 message=message,
             )
         ]
 
     if not session:
-        if recovered_session and message:
+        if adoptable_session and message:
             return [
                 RepairStep(
                     kind="recreate_session",
                     target=pane,
                     summary=(
-                        f"adopt saved session '{recovered_session.name}' from dead thread "
-                        f"{context.short_thread_id(recovered_session.thread_id)} onto pane {pane}"
+                        f"adopt saved session '{adoptable_session.name}' from thread "
+                        f"{context.short_thread_id(adoptable_session.thread_id)} onto pane {pane}"
                     ),
                     auto_apply=True,
                     thread_id=live_thread,
-                    source_thread_id=recovered_session.thread_id,
+                    source_thread_id=adoptable_session.thread_id,
                     message=message,
                     generation=watcher.generation,
                     paused=watcher.paused,

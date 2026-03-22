@@ -1,5 +1,10 @@
 # Engineering Log
 
+## 2026-03-22
+
+- Fix: thread detection for live Codex processes now consults `logs_*.sqlite` as well as legacy `state_*.sqlite` log tables, and it picks the freshest PID/thread observation by `(ts, ts_nanos)` instead of returning the first matching database row. This fixes long-lived resumed panes whose process argv still points at an old thread while the live Codex process has already moved to a newer thread and is logging under that new id.
+- Fix: `repair` now treats a unique saved session already pinned to the same pane as adoptable state when the runtime is bound to the wrong thread. That lets `acw repair <pane>` rebind a live pane onto its newly detected thread while preserving the existing continue message and removing the old saved session only after the rebind succeeds.
+
 ## 2026-03-21
 
 - Fix: `acw status` and interactive watch no longer write `last_proven_workdir` / `last_proven_branch` during rendering. Proven worktree metadata is now daemon-owned state: the shared daemon refreshes it from strong live pane evidence and persists it on the single-writer path instead of letting read-only observation contend with runtime updates.
