@@ -250,8 +250,8 @@ class ManagerScenarioMixin:
         self.assertIsNone(self.harness.manager_session_row(first_turn.thread_id), self.harness.diagnostics())
 
         status = self.harness.run_manager("status")
-        self.assertNotIn("stopcase", status.stdout, self.harness.diagnostics())
-        self.assertNotIn(first_turn.thread_id, status.stdout, self.harness.diagnostics())
+        # After stop, the pane still runs Codex so it shows as unmanaged
+        self.assertIn("unmanaged", status.stdout, self.harness.diagnostics())
 
     def test_manager_stop_without_target_forgets_all_managed_sessions(self):
         self.harness.rename_window("formal")
@@ -289,8 +289,8 @@ class ManagerScenarioMixin:
         self.assertIsNone(self.harness.manager_runtime_row(aot_turn.thread_id), self.harness.diagnostics())
 
         status = self.harness.run_manager("status")
-        self.assertNotIn("formal", status.stdout, self.harness.diagnostics())
-        self.assertNotIn("aot", status.stdout, self.harness.diagnostics())
+        # After stop, panes still run Codex so they show as unmanaged
+        self.assertIn("unmanaged", status.stdout, self.harness.diagnostics())
 
     def test_manager_status_details_reads_live_sqlite_state_ref(self):
         self.harness.rename_window("details")

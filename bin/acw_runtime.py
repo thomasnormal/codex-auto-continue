@@ -574,6 +574,42 @@ def build_status_entries_from_snapshot(
             )
         )
 
+    for pane in snapshot.panes:
+        if pane.pane_id in watched_panes:
+            continue
+        if not pane.has_codex_process:
+            continue
+        if pane.detected_thread and context.is_thread_id(pane.detected_thread):
+            if runtime_session_for_thread(model, pane.detected_thread):
+                continue  # already covered above as unwatched_pane
+        window_name = pane.window_label or pane.window_name or ""
+        entries.append(
+            (
+                {
+                    "entity_kind": "unmanaged_pane",
+                    "runtime_id": "",
+                    "pid": "",
+                    "cwd": "",
+                    "pane": pane.pane_id,
+                    "thread": pane.detected_thread or "",
+                    "name": window_name,
+                    "session_name": "",
+                    "state": "",
+                    "watch": "",
+                    "msg_inline": "",
+                    "paused": "",
+                    "runtime_status": "",
+                    "runtime_detail": "",
+                    "generation": "",
+                    "worker_label": "",
+                    "anomalies": (),
+                    "anomaly_detail": "",
+                },
+                pane.pane_id,
+                pane.window_label or pane.window_name or "",
+            )
+        )
+
     for session in snapshot.sessions:
         if session.thread_id in claimed_session_threads:
             continue

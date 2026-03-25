@@ -208,6 +208,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Usage:", text)
         self.assertIn("Commands:", text)
         self.assertIn("doctor", text)
+        self.assertIn("recover", text)
         self.assertIn("Examples:", text)
         self.assertEqual("", err.getvalue())
 
@@ -895,7 +896,7 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("0:6:formal/%6", text)
         self.assertIn("0:10:aot2/%10", text)
         self.assertIn("Invariant error: thread 11111111…1111 has managed runtimes on panes %10, %6", text)
-        self.assertIn("Hint: run acw repair --dry-run for live invariant fixes.", text)
+        self.assertIn("Hint: run acw repair for live invariant fixes.", text)
 
     def test_status_summary_flags_duplicate_agent_name_on_multiple_threads(self):
         snapshot = _snapshot(
@@ -985,7 +986,7 @@ class WatchdUnitTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("Recommendation: run acw doctor %7", text)
 
-    def test_status_summary_prints_cleanup_hint_for_dead_sessions(self):
+    def test_status_summary_prints_recover_and_cleanup_hint_for_dead_sessions(self):
         snapshot = _snapshot(sessions=(_session_record(THREAD, name="formal"),))
         with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
             with patch.object(acw, "_read_state_json", return_value={"health": "ok"}):
@@ -995,7 +996,10 @@ class WatchdUnitTests(unittest.TestCase):
                             out = io.StringIO()
                             with redirect_stdout(out):
                                 acw.cmd_status([])
-        self.assertIn("Hint: run acw cleanup to remove dead sessions.", out.getvalue())
+        self.assertIn(
+            "Hint: run acw recover to restart dead sessions, or acw cleanup to remove them.",
+            out.getvalue(),
+        )
 
     def test_status_summary_prefers_repair_for_pane_local_invariant_errors(self):
         snapshot = _snapshot(
@@ -1903,7 +1907,7 @@ class WatchdUnitTests(unittest.TestCase):
             rendered,
         )
 
-    def test_status_summary_skips_unmanaged_unresolved_live_codex_pane(self):
+    def test_status_summary_shows_unmanaged_unresolved_live_codex_pane(self):
         snapshot = _snapshot(
             panes=(_pane_record(
                 "%7",
@@ -1923,8 +1927,8 @@ class WatchdUnitTests(unittest.TestCase):
                             with redirect_stdout(out):
                                 acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Sessions: 0", text)
-        self.assertIn("(none)", text)
+        self.assertIn("Sessions: 1", text)
+        self.assertIn("unmanaged", text)
 
     def test_doctor_plain_output_shows_recommended_command(self):
         report = acw.DoctorReport(
@@ -2210,18 +2214,21 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertIn("Sessions: 1", text)
         self.assertIn("formal", text)
 
-    def test_status_skips_unmanaged_live_codex_pane_without_saved_session(self):
+    def test_status_shows_unmanaged_live_codex_pane_without_saved_session(self):
         snapshot = _snapshot(
-            panes=(_pane_record("%9", THREAD, window_label="0:9:acw", window_name="acw"),),
+            panes=(_pane_record("%9", THREAD, window_label="0:9:acw", window_name="acw", has_codex_process=True),),
         )
         with patch.object(acw, "_build_runtime_snapshot", return_value=snapshot):
-            out = io.StringIO()
-            with redirect_stdout(out):
-                acw.cmd_status([])
+            with patch.object(acw, "_read_state_json", return_value={}):
+                with patch.object(acw, "_thread_times", return_value=("-", "-")):
+                    with patch.object(acw, "_last_agent_snippet_for_pane", return_value=""):
+                        with patch.object(acw, "_is_pid_stopped", return_value=False):
+                            out = io.StringIO()
+                            with redirect_stdout(out):
+                                acw.cmd_status([])
         text = out.getvalue()
-        self.assertIn("Sessions: 0", text)
-        self.assertIn("(none)", text)
-        self.assertNotIn("acw/%9", text)
+        self.assertIn("Sessions: 1", text)
+        self.assertIn("unmanaged", text)
 
     def test_status_shows_unwatched_live_codex_pane_when_saved_session_exists(self):
         snapshot = _snapshot(
@@ -2620,6 +2627,139 @@ class WatchdUnitTests(unittest.TestCase):
         self.assertEqual(1, ctx.exception.code)
         stop_watchers.assert_not_called()
         self.assertIn("could not determine thread_id for pane=%7", err.getvalue())
+
+    def test_recover_target_restarts_saved_dead_session_on_saved_pane(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%50",
+                "",
+                window_label="0:50:bugs",
+                window_name="bugs",
+                has_codex_process=False,
+            ),),
+            sessions=(_session_record(THREAD, name="bugs", pane="%50", message="continue through docs"),),
+        ))
+
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_daemon_rpc_restart_codex") as restart_codex:
+                with patch.object(
+                    acw,
+                    "_daemon_rpc_upsert_session",
+                    return_value={
+                        "thread": THREAD,
+                        "pane": "%50",
+                        "runtime_status": "running",
+                        "runtime_id": "runtime-9999",
+                        "daemon_pid": "9999",
+                    },
+                ) as upsert:
+                    out = io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                        acw.cmd_recover(["bugs"])
+
+        restart_codex.assert_called_once_with("%50", THREAD)
+        upsert.assert_called_once_with(
+            THREAD,
+            pane="%50",
+            name="bugs",
+            message="continue through docs",
+            paused=False,
+            generation=1,
+        )
+        text = out.getvalue()
+        self.assertIn("recover: preparing pane=%50", text)
+        self.assertIn(f"recover: relaunching Codex in pane=%50 thread_id={THREAD}", text)
+        self.assertIn("recover: starting runtime for pane=%50", text)
+        self.assertIn(f"recovered: pane=%50 thread_id={THREAD} daemon_pid=9999", text)
+
+    def test_recover_target_fails_without_saved_pane(self):
+        model = acw._build_runtime_model(_snapshot(
+            sessions=(_session_record(THREAD, name="bugs", message="continue through docs"),),
+        ))
+
+        err = io.StringIO()
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    acw.cmd_recover(["bugs"])
+
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn("has no saved pane", err.getvalue())
+
+    def test_recover_target_fails_when_saved_pane_runs_other_thread(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record("%50", OTHER_THREAD, window_label="0:50:bugs", window_name="bugs"),),
+            sessions=(_session_record(THREAD, name="bugs", pane="%50", message="continue through docs"),),
+        ))
+
+        err = io.StringIO()
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    acw.cmd_recover(["bugs"])
+
+        self.assertEqual(1, ctx.exception.code)
+        self.assertIn("is already running thread", err.getvalue())
+        self.assertIn("use acw restart or acw repair", err.getvalue())
+
+    def test_recover_without_target_recovers_both_sessions_including_missing_pane(self):
+        model = acw._build_runtime_model(_snapshot(
+            panes=(_pane_record(
+                "%50",
+                "",
+                window_label="0:50:bugs",
+                window_name="bugs",
+                has_codex_process=False,
+            ),),
+            sessions=(
+                _session_record(THREAD, name="bugs", pane="%50", message="continue through docs"),
+                _session_record(OTHER_THREAD, name="aot", pane="%60", message="continue aot"),
+            ),
+        ))
+
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_daemon_rpc_restart_codex") as restart_codex:
+                with patch.object(
+                    acw,
+                    "_daemon_rpc_upsert_session",
+                    return_value={
+                        "thread": THREAD,
+                        "pane": "%50",
+                        "runtime_status": "running",
+                        "runtime_id": "runtime-9999",
+                        "daemon_pid": "9999",
+                    },
+                ) as upsert:
+                    with patch.object(acw, "run_tmux", return_value="%58\n"):
+                        with patch.object(acw, "_read_session_state", return_value={"name": "aot"}):
+                            with patch.object(acw, "_write_session_state"):
+                                out = io.StringIO()
+                                err = io.StringIO()
+                                with redirect_stdout(out), redirect_stderr(err):
+                                    acw.cmd_recover([])
+
+        self.assertEqual(restart_codex.call_count, 2)
+        self.assertEqual(upsert.call_count, 2)
+
+    def test_recover_without_target_skips_sessions_with_managed_runtime_state_on_saved_pane(self):
+        model = acw._build_runtime_model(_snapshot(
+            watchers=(_watcher_record("%60", OTHER_THREAD, pid="2222"),),
+            sessions=(
+                _session_record(THREAD, name="bugs", pane="%60", message="continue through docs"),
+            ),
+        ))
+
+        with patch.object(acw, "_build_runtime_model", return_value=model):
+            with patch.object(acw, "_daemon_rpc_restart_codex") as restart_codex:
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    acw.cmd_recover([])
+
+        restart_codex.assert_not_called()
+        self.assertEqual("", err.getvalue())
+        self.assertIn("recover: skipped 1 session(s) that are not auto-recoverable", out.getvalue())
+        self.assertIn("managed runtime state", out.getvalue())
 
     def test_codex_top_level_descendants_returns_direct_child_of_shell(self):
         graph = (

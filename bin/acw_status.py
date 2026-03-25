@@ -18,6 +18,7 @@ _STATE_STYLES = {
     "warn": "dark_orange",
     "error": "bold red",
     "dead": "dim",
+    "unmanaged": "dim",
 }
 
 
@@ -142,6 +143,8 @@ def compute_state(
 ) -> str:
     if row.get("entity_kind") == "dead_session":
         return "dead"
+    if row.get("entity_kind") == "unmanaged_pane":
+        return "unmanaged"
     if row.get("anomalies"):
         return "error"
     runtime_status = row.get("runtime_status", "")
