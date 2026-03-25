@@ -368,6 +368,7 @@ def daemon_refresh_session_location(
     branch_for_cwd,
     home_dir: str,
     write_session_state,
+    pane_current_path=None,
 ) -> bool:
     pane_text = capture_pane_text(runtime.pane)
     workdir, source = acw_probe.workdir_proof_from_pane_text(
@@ -376,7 +377,13 @@ def daemon_refresh_session_location(
         home_dir=home_dir,
     )
     if not workdir or source not in {"explicit", "git_c"}:
-        return False
+        if pane_current_path is not None:
+            workdir = pane_current_path(runtime.pane)
+            # tmux may append " (deleted)" to stale paths
+            if workdir.endswith(" (deleted)"):
+                workdir = workdir[: -len(" (deleted)")]
+        if not workdir:
+            return False
     branch = branch_for_cwd(workdir)
     if branch == "-":
         branch = ""

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -17,6 +18,80 @@ from typing import Callable
 import acw_daemon
 import acw_rpc
 import acw_runtime
+
+
+# ---------------------------------------------------------------------------
+# Disk space monitor
+# ---------------------------------------------------------------------------
+
+DISK_CHECK_INTERVAL_SECS = 60.0
+DISK_FREE_THRESHOLD = 0.10  # 10% free
+DISK_ALERT_COOLDOWN_SECS = 600.0  # don't re-alert within 10 minutes
+
+
+def _check_disk_space(
+    runtimes: dict[str, Any],
+    *,
+    last_check: float,
+    last_alert: float,
+    now: float,
+    path: str = os.path.expanduser("~"),
+) -> tuple[float, float]:
+    """Check disk space and alert agents if free space is critically low.
+
+    Returns updated (last_check, last_alert) timestamps.
+    """
+    if now - last_check < DISK_CHECK_INTERVAL_SECS:
+        return last_check, last_alert
+
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return now, last_alert
+
+    free_ratio = usage.free / usage.total
+    if free_ratio >= DISK_FREE_THRESHOLD:
+        return now, last_alert
+
+    if last_alert > 0.0 and now - last_alert < DISK_ALERT_COOLDOWN_SECS:
+        return now, last_alert
+
+    free_gb = usage.free / (1024 ** 3)
+    total_gb = usage.total / (1024 ** 3)
+    pct_used = 100.0 * (1.0 - free_ratio)
+    msg = (
+        f"DISK SPACE WARNING: {free_gb:.1f}GB free of {total_gb:.0f}GB "
+        f"({pct_used:.0f}% used). "
+        f"Please help free up space — delete stale build artifacts, "
+        f"worktrees, or large temporary files in your working directory."
+    )
+
+    alerted_panes: set[str] = set()
+    for runtime in runtimes.values():
+        pane = getattr(runtime, "pane", "")
+        if not pane or pane in alerted_panes:
+            continue
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", pane, "-l", msg],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["tmux", "send-keys", "-t", pane, "C-m"],
+                capture_output=True, timeout=5,
+            )
+            alerted_panes.add(pane)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    if alerted_panes:
+        _safe_stderr_print(
+            f"disk-monitor: alerted {len(alerted_panes)} pane(s), "
+            f"{free_gb:.1f}GB free ({pct_used:.0f}% used)"
+        )
+        return now, now
+
+    return now, last_alert
 
 
 @dataclass(frozen=True)
@@ -831,6 +906,8 @@ def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:
     rpc_server = acw_rpc.listen(str(socket_file))
     pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
     idle_since = 0.0
+    disk_last_check = 0.0
+    disk_last_alert = 0.0
     log_tail = context.daemon_log_tail_cls(log_path=context.codex_log_path)
     runtimes: dict[str, Any] = {}
     started_ts = context.watch_now_ts()
@@ -868,6 +945,12 @@ def daemon_main(argv: list[str], *, context: DaemonMainContext) -> None:
                     heartbeat_ts=context.watch_now_ts(),
                     started_ts=started_ts,
                     scope=scope,
+                )
+                disk_last_check, disk_last_alert = _check_disk_space(
+                    runtimes,
+                    last_check=disk_last_check,
+                    last_alert=disk_last_alert,
+                    now=context.time_module.time(),
                 )
             except BaseException as exc:
                 if isinstance(exc, KeyboardInterrupt):

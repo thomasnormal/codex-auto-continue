@@ -79,6 +79,18 @@ def repair_steps_for_pane(
     watchers = list(context.runtime_watchers_for_pane(model, pane))
 
     if not pane_record:
+        session = context.exact_session_for_pane(model, pane)
+        if session and session.thread_id:
+            return [
+                RepairStep(
+                    kind="recover_missing_pane",
+                    target=pane,
+                    summary=f"pane {pane} is missing from tmux; recreate window '{session.name}' and recover thread {context.short_thread_id(session.thread_id)}",
+                    auto_apply=True,
+                    thread_id=session.thread_id,
+                    message=session.message,
+                )
+            ]
         if watchers:
             return [
                 RepairStep(

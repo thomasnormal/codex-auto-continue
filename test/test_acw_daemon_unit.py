@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import sys
@@ -201,6 +203,145 @@ class AcwDaemonUnitTests(unittest.TestCase):
                 for thread_id, data in writes
             )
         )
+
+
+import acw_control  # noqa: E402
+
+
+class DiskSpaceMonitorTests(unittest.TestCase):
+    def _make_runtimes(self, panes, paused=None):
+        paused = paused or {}
+        return {
+            f"thread-{i}": SimpleNamespace(pane=pane, paused=paused.get(pane, False))
+            for i, pane in enumerate(panes)
+        }
+
+    def test_skips_check_before_interval(self):
+        last_check, last_alert = acw_control._check_disk_space(
+            {},
+            last_check=100.0,
+            last_alert=0.0,
+            now=110.0,  # only 10s since last check, interval is 60s
+        )
+        self.assertEqual(last_check, 100.0)  # unchanged
+
+    def test_no_alert_when_enough_space(self):
+        tmux_calls = []
+        orig_run = subprocess.run
+
+        def fake_run(*args, **kwargs):
+            tmux_calls.append(args)
+
+        with unittest.mock.patch("acw_control.shutil.disk_usage") as mock_du, \
+             unittest.mock.patch("acw_control.subprocess.run", fake_run):
+            mock_du.return_value = SimpleNamespace(
+                total=500 * 1024**3, free=100 * 1024**3, used=400 * 1024**3,
+            )  # 20% free
+            last_check, last_alert = acw_control._check_disk_space(
+                self._make_runtimes(["%1"]),
+                last_check=0.0,
+                last_alert=0.0,
+                now=100.0,
+            )
+
+        self.assertEqual(last_check, 100.0)  # updated
+        self.assertEqual(last_alert, 0.0)  # no alert
+        self.assertEqual(tmux_calls, [])
+
+    def test_alerts_all_panes_when_low(self):
+        tmux_calls = []
+
+        def fake_run(cmd, **kwargs):
+            tmux_calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
+        with unittest.mock.patch("acw_control.shutil.disk_usage") as mock_du, \
+             unittest.mock.patch("acw_control.subprocess.run", fake_run):
+            mock_du.return_value = SimpleNamespace(
+                total=500 * 1024**3, free=20 * 1024**3, used=480 * 1024**3,
+            )  # 4% free
+            last_check, last_alert = acw_control._check_disk_space(
+                self._make_runtimes(["%1", "%5"]),
+                last_check=0.0,
+                last_alert=0.0,
+                now=100.0,
+            )
+
+        self.assertEqual(last_check, 100.0)
+        self.assertEqual(last_alert, 100.0)
+        # 2 panes x 2 tmux calls each (send-keys -l + C-m)
+        self.assertEqual(len(tmux_calls), 4)
+        # Verify both panes were targeted
+        targeted_panes = {c[3] for c in tmux_calls if "send-keys" in c}
+        self.assertEqual(targeted_panes, {"%1", "%5"})
+
+    def test_alerts_paused_agents_too(self):
+        tmux_calls = []
+
+        def fake_run(cmd, **kwargs):
+            tmux_calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
+        with unittest.mock.patch("acw_control.shutil.disk_usage") as mock_du, \
+             unittest.mock.patch("acw_control.subprocess.run", fake_run):
+            mock_du.return_value = SimpleNamespace(
+                total=500 * 1024**3, free=20 * 1024**3, used=480 * 1024**3,
+            )
+            last_check, last_alert = acw_control._check_disk_space(
+                self._make_runtimes(["%1", "%5"], paused={"%5": True}),
+                last_check=0.0,
+                last_alert=0.0,
+                now=100.0,
+            )
+
+        targeted_panes = {c[3] for c in tmux_calls if "send-keys" in c}
+        self.assertEqual(targeted_panes, {"%1", "%5"})
+
+    def test_respects_cooldown(self):
+        tmux_calls = []
+
+        def fake_run(cmd, **kwargs):
+            tmux_calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
+        with unittest.mock.patch("acw_control.shutil.disk_usage") as mock_du, \
+             unittest.mock.patch("acw_control.subprocess.run", fake_run):
+            mock_du.return_value = SimpleNamespace(
+                total=500 * 1024**3, free=20 * 1024**3, used=480 * 1024**3,
+            )
+            last_check, last_alert = acw_control._check_disk_space(
+                self._make_runtimes(["%1"]),
+                last_check=0.0,
+                last_alert=500.0,  # alerted 100s ago
+                now=600.0,  # within 600s cooldown
+            )
+
+        self.assertEqual(last_alert, 500.0)  # unchanged — cooldown
+        self.assertEqual(tmux_calls, [])
+
+    def test_deduplicates_panes(self):
+        tmux_calls = []
+
+        def fake_run(cmd, **kwargs):
+            tmux_calls.append(cmd)
+            return SimpleNamespace(returncode=0)
+
+        runtimes = {
+            "thread-1": SimpleNamespace(pane="%1", paused=False),
+            "thread-2": SimpleNamespace(pane="%1", paused=False),  # same pane
+        }
+
+        with unittest.mock.patch("acw_control.shutil.disk_usage") as mock_du, \
+             unittest.mock.patch("acw_control.subprocess.run", fake_run):
+            mock_du.return_value = SimpleNamespace(
+                total=500 * 1024**3, free=20 * 1024**3, used=480 * 1024**3,
+            )
+            acw_control._check_disk_space(
+                runtimes, last_check=0.0, last_alert=0.0, now=100.0,
+            )
+
+        # Only 2 calls (send-keys + C-m) despite 2 runtimes on same pane
+        self.assertEqual(len(tmux_calls), 2)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ class CommandContext:
     build_runtime_model: Callable[[], Any]
     watcher_rows: Callable[[str], list[dict[str, str]]]
     runtime_watchers_for_pane: Callable[[Any, str], tuple[Any, ...]]
+    runtime_watchers_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_panes_for_thread: Callable[[Any, str], tuple[Any, ...]]
     runtime_session_for_thread: Callable[[Any, str], Any | None]
     recoverable_named_session_for_pane: Callable[[Any, str], Any | None]
@@ -451,6 +452,225 @@ def cmd_pause(context: CommandContext, argv: list[str]) -> None:
         print("not running")
 
 
+def dead_sessions(context: CommandContext, model: Any) -> list[Any]:
+    sessions: list[Any] = []
+    for session in model.snapshot.sessions:
+        if context.runtime_watchers_for_thread(model, session.thread_id):
+            continue
+        if context.runtime_panes_for_thread(model, session.thread_id):
+            continue
+        sessions.append(session)
+    return sessions
+
+
+def resolve_recover_session(context: CommandContext, target: str, model: Any) -> Any:
+    dead = dead_sessions(context, model)
+    if context.is_thread_id(target):
+        key = target.lower()
+        matches = [session for session in dead if session.thread_id == key]
+        live_matches = [session for session in model.snapshot.sessions if session.thread_id == key and session not in matches]
+    elif context.is_pane_id(target):
+        matches = [session for session in dead if session.pane == target]
+        live_matches = [session for session in model.snapshot.sessions if session.pane == target and session not in matches]
+    else:
+        matches = [session for session in dead if session.name == target]
+        live_matches = [session for session in model.snapshot.sessions if session.name == target and session not in matches]
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        joined = ", ".join(context.short_thread_id(session.thread_id) for session in matches)
+        print(f"error: dead saved session target '{target}' is ambiguous across threads: {joined}", file=sys.stderr)
+        sys.exit(1)
+    if live_matches:
+        print(f"error: target '{target}' is not a dead saved session", file=sys.stderr)
+        print("hint: use acw restart or acw repair for live-pane recovery", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"error: no dead saved session found for '{target}'", file=sys.stderr)
+    print("hint: use acw status to inspect dead sessions, or acw cleanup to remove stale ones", file=sys.stderr)
+    sys.exit(1)
+
+
+def recover_session_issue(context: CommandContext, session: Any, model: Any) -> tuple[str, str]:
+    pane = session.pane.strip()
+    if not pane:
+        return (
+            f"dead saved session {context.short_thread_id(session.thread_id)} has no saved pane",
+            "create or choose a live pane, then use acw start or acw restart there",
+        )
+
+    if context.runtime_watchers_for_thread(model, session.thread_id) or context.runtime_panes_for_thread(model, session.thread_id):
+        return (
+            f"saved session {context.short_thread_id(session.thread_id)} is not dead anymore",
+            "use acw restart or acw repair for live-pane recovery",
+        )
+
+    pane_watchers = list(context.runtime_watchers_for_pane(model, pane))
+    if pane_watchers:
+        runtime_ids = ", ".join(sorted(row.pid or "?" for row in pane_watchers))
+        return (
+            f"pane {pane} already has managed runtime state ({runtime_ids})",
+            "use acw restart, acw repair, or acw cleanup instead of recovering it",
+        )
+
+    pane_record = model.panes_by_id.get(pane)
+    if not pane_record:
+        # Missing pane — recover_one will recreate the tmux window.
+        return "", ""
+
+    live_thread = (
+        pane_record.detected_thread.lower()
+        if context.is_thread_id(pane_record.detected_thread)
+        else ""
+    )
+    if live_thread and live_thread != session.thread_id:
+        return (
+            f"pane {pane} is already running thread {context.short_thread_id(live_thread)}",
+            "use acw restart or acw repair against that live pane instead",
+        )
+
+    return "", ""
+
+
+def _recover_create_pane(context: CommandContext, thread_id: str, name: str = "") -> str:
+    """Create a new tmux window for a dead session whose pane is missing."""
+    existing = context.read_session_state(thread_id)
+    workdir = str(existing.get("last_proven_workdir", "")).strip()
+    window_name = name or str(existing.get("name", ""))
+    args = ["new-window", "-d", "-P", "-F", "#{pane_id}"]
+    if window_name:
+        args += ["-n", window_name]
+    if workdir:
+        args += ["-c", workdir]
+    result = context.run_tmux(*args)
+    if not result or not result.strip():
+        print("error: failed to create tmux window", file=sys.stderr)
+        sys.exit(1)
+    pane = result.strip()
+    context.print_progress(f"recover: created window '{window_name}' pane={pane}")
+    context.write_session_state(thread_id, {**existing, "pane": pane})
+    return pane
+
+
+def recover_one(context: CommandContext, target: str, session: Any) -> None:
+    model = context.build_runtime_model()
+    detail, hint = recover_session_issue(context, session, model)
+
+    pane = session.pane.strip()
+    pane_missing = pane and pane not in model.panes_by_id
+
+    if detail and not pane_missing:
+        print(f"error: {detail}", file=sys.stderr)
+        print(f"hint: {hint}", file=sys.stderr)
+        sys.exit(1)
+
+    pane_record = None
+    if pane_missing:
+        pane = _recover_create_pane(context, session.thread_id, session.name)
+    else:
+        pane_record = model.panes_by_id[pane]
+
+    if target not in {pane, session.thread_id, session.name}:
+        context.print_progress(
+            f"resolved: target={target} pane={pane} thread_id={session.thread_id}"
+        )
+
+    context.print_progress(f"recover: preparing pane={pane}")
+    context.print_progress(f"recover: relaunching Codex in pane={pane} thread_id={session.thread_id}")
+    context.daemon_rpc_restart_codex(pane, session.thread_id)
+
+    existing_session = context.read_session_state(session.thread_id)
+    next_generation = context.current_session_generation(existing_session) + 1
+    window_name = (
+        pane_record.window_name.strip() if pane_record else ""
+    ) or (session.name or "")
+
+    context.print_progress(f"recover: starting runtime for pane={pane}")
+    row = context.daemon_rpc_upsert_session(
+        session.thread_id,
+        pane=pane,
+        name=window_name,
+        message=session.message,
+        paused=False,
+        generation=next_generation,
+    )
+    daemon_pid = row.get("daemon_pid", "")
+    context.print_progress(f"recovered: pane={pane} thread_id={session.thread_id} daemon_pid={daemon_pid}")
+
+
+def cmd_recover(context: CommandContext, argv: list[str]) -> None:
+    if any(arg.startswith("--") for arg in argv):
+        print("error: recover does not accept options", file=sys.stderr)
+        sys.exit(2)
+    if len(argv) > 1:
+        print(
+            "error: recover accepts at most one target; use 'acw recover' with no target to recover all dead sessions",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    model = context.build_runtime_model()
+    if argv:
+        session = resolve_recover_session(context, argv[0], model)
+        recover_one(context, argv[0], session)
+        return
+
+    sessions = dead_sessions(context, model)
+    if not sessions:
+        print("no dead sessions to recover")
+        return
+
+    recovered = 0
+    failed = 0
+    failed_details: list[str] = []
+    skipped_details: list[str] = []
+    for session in sessions:
+        target = session.name or session.pane or session.thread_id
+        current_model = context.build_runtime_model()
+        detail, _hint = recover_session_issue(context, session, current_model)
+        if detail:
+            skipped_details.append(f"{target}: {detail}")
+            continue
+        context.print_progress(f"--- recovering {target} ---")
+        captured_err = io.StringIO()
+        printed_err = False
+        try:
+            old_stderr = sys.stderr
+            sys.stderr = captured_err
+            recover_one(context, target, session)
+        except SystemExit as exc:
+            failed += 1
+            detail_text = captured_err.getvalue()
+            if detail_text:
+                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
+                printed_err = True
+            detail = system_exit_detail(exc, detail_text)
+            failed_details.append(f"{target}: {detail}")
+            print(f"error: recover failed for session={target}: {detail}", file=old_stderr)
+            continue
+        finally:
+            sys.stderr = old_stderr
+            detail_text = captured_err.getvalue()
+            if detail_text and not printed_err:
+                print(detail_text, file=old_stderr, end="" if detail_text.endswith("\n") else "\n")
+        recovered += 1
+
+    if skipped_details:
+        print(f"recover: skipped {len(skipped_details)} session(s) that are not auto-recoverable")
+        for detail in skipped_details[:5]:
+            print(f"recover: skipped detail: {detail}")
+        if len(skipped_details) > 5:
+            print(f"recover: skipped detail: ... and {len(skipped_details) - 5} more")
+
+    if failed:
+        print(f"recover: {failed} session(s) failed")
+        for detail in failed_details:
+            print(f"recover: failure detail: {detail}")
+
+    if recovered == 0:
+        print("no dead sessions recovered")
+
 def restart_one(context: CommandContext, target: str, pane: str, rest: list[str]) -> None:
     if pane != target:
         context.print_progress(f"resolved: target={target} pane={pane}")
@@ -844,6 +1064,25 @@ def apply_repair_step(
         remove_source_session()
         return
 
+    if step.kind == "recover_missing_pane":
+        context.print_progress(f"repair: recovering missing pane={step.target}")
+        existing = context.read_session_state(step.thread_id)
+        stop_pane_watchers_keep_session_fn(step.target)
+        new_pane = _recover_create_pane(context, step.thread_id)
+        context.print_progress(f"repair: relaunching Codex in pane={new_pane}")
+        context.daemon_rpc_restart_codex(new_pane, step.thread_id)
+        next_gen = context.current_session_generation(existing) + 1
+        window_name = str(existing.get("name", ""))
+        context.daemon_rpc_upsert_session(
+            step.thread_id,
+            pane=new_pane,
+            name=window_name,
+            message=step.message,
+            paused=False,
+            generation=next_gen,
+        )
+        return
+
     if step.kind == "stop_watchers_keep_session":
         context.print_progress(
             f"repair: stopping runtime entries on pane={step.target} while keeping saved session state"
@@ -909,25 +1148,22 @@ def cmd_repair(
         print_repair_plan(steps, dry_run=True)
         return
 
-    if target and manual_steps:
-        for step in manual_steps:
-            print(f"error: {step.summary}", file=sys.stderr)
-        print(
-            f"hint: run 'acw repair {shlex.quote(target)} --dry-run' to inspect the blocked repair plan",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    applied = 0
+    skipped = 0
 
-    if not auto_steps:
-        print("repair: no safe automatic repairs available")
-        for step in manual_steps:
-            print(f"MANUAL: {step.summary}")
-        if manual_steps:
-            sys.exit(1)
-        return
-
-    context.print_progress(f"repair: applying {len(auto_steps)} step(s)")
     for step in auto_steps:
+        prefix = "AUTO" if step.auto_apply else "MANUAL"
+        print(f"{prefix}: {step.summary}")
+        if interactive:
+            try:
+                answer = input("apply? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if answer and answer not in ("y", "yes"):
+                skipped += 1
+                continue
         apply_repair_step(
             context,
             step,
@@ -935,10 +1171,15 @@ def cmd_repair(
             cmd_restart_fn=cmd_restart_fn,
             stop_pane_watchers_keep_session_fn=stop_pane_watchers_keep_session_fn,
         )
-    print(f"repair: applied {len(auto_steps)} step(s)")
+        applied += 1
+
+    if applied:
+        print(f"repair: applied {applied} step(s)")
+    if skipped:
+        print(f"repair: skipped {skipped} step(s)")
 
     if manual_steps:
-        print(f"repair: {len(manual_steps)} issue(s) still require manual action")
+        print(f"repair: {len(manual_steps)} issue(s) require manual action")
         for step in manual_steps:
             print(f"MANUAL: {step.summary}")
         sys.exit(1)

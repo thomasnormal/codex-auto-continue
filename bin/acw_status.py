@@ -521,13 +521,13 @@ def status_invariant_messages(
                 messages.append(msg)
 
     if dead_rows:
-        msg = "Hint: run acw cleanup to remove dead sessions."
+        msg = "Hint: run acw recover to restart dead sessions, or acw cleanup to remove them."
         if msg not in seen:
             seen.add(msg)
             messages.append(msg)
 
     if live_issue_found:
-        msg = "Hint: run acw repair --dry-run for live invariant fixes."
+        msg = "Hint: run acw repair for live invariant fixes."
         if msg not in seen:
             seen.add(msg)
             messages.append(msg)

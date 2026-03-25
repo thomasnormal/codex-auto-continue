@@ -793,6 +793,10 @@ def _daemon_refresh_session_health(
     )
 
 
+def _pane_current_path(pane: str) -> str:
+    return acw_tmux.tmux_pane_current_path(pane, run_tmux_fn=run_tmux)
+
+
 def _daemon_refresh_session_location(runtime: _DaemonSessionRuntime) -> None:
     acw_daemon.daemon_refresh_session_location(
         runtime,
@@ -801,6 +805,7 @@ def _daemon_refresh_session_location(runtime: _DaemonSessionRuntime) -> None:
         branch_for_cwd=acw_repo.branch_for_cwd,
         home_dir=str(Path.home()),
         write_session_state=_write_session_state,
+        pane_current_path=_pane_current_path,
     )
 
 
@@ -1077,6 +1082,10 @@ def cmd_resume(argv: list[str]) -> None:
         restart_panes_fn=_restart_panes,
         restart_one_fn=_restart_one,
     )
+
+
+def cmd_recover(argv: list[str]) -> None:
+    acw_commands.cmd_recover(_command_context(), argv)
 
 
 def _restart_panes(panes: list[str]) -> None:
@@ -1900,6 +1909,11 @@ def _run_watch_command(argv: list[str]) -> None:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "restart": cmd_restart,
+        "stop": cmd_stop,
+        "recover": cmd_recover,
+        "repair": cmd_repair,
+        "cleanup": cmd_cleanup,
+        "doctor": cmd_doctor,
     }
     handler = commands.get(subcmd)
     if handler is None:
@@ -1959,6 +1973,7 @@ def _command_context() -> acw_commands.CommandContext:
         build_runtime_model=_build_runtime_model,
         watcher_rows=watcher_rows,
         runtime_watchers_for_pane=_runtime_watchers_for_pane,
+        runtime_watchers_for_thread=_runtime_watchers_for_thread,
         runtime_panes_for_thread=_runtime_panes_for_thread,
         runtime_session_for_thread=_runtime_session_for_thread,
         recoverable_named_session_for_pane=_recoverable_named_session_for_pane,
@@ -2143,6 +2158,7 @@ def main() -> None:
         "stop": cmd_stop,
         "pause": cmd_pause,
         "resume": cmd_resume,
+        "recover": cmd_recover,
         "restart": cmd_restart,
         "repair": cmd_repair,
         "cleanup": cmd_cleanup,

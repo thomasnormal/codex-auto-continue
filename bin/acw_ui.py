@@ -135,18 +135,21 @@ def build_status_table_renderable(
 
     term_w = shutil.get_terminal_size((120, 24)).columns
     headers = ("WINDOW/PANE", "STATE", "TIME")
+    fixed_col_caps = (15, 10, 10)
     col_widths = [len(header) for header in headers]
     for row in rows_data:
         normalized = _normalize_status_row(row)
         for idx in range(3):
             text = strip_rich_markup(normalized[idx].split("\n")[0])
             col_widths[idx] = max(col_widths[idx], len(text))
+    for idx, cap in enumerate(fixed_col_caps):
+        col_widths[idx] = min(col_widths[idx], cap)
     last_agent_col_w, msg_col_w = status_flex_widths(term_w, col_widths)
 
     table = Table(show_lines=False, expand=True)
-    table.add_column("WINDOW/PANE", no_wrap=True)
-    table.add_column("STATE", no_wrap=True)
-    table.add_column("TIME", no_wrap=True)
+    table.add_column("WINDOW/PANE", no_wrap=False, max_width=fixed_col_caps[0])
+    table.add_column("STATE", no_wrap=False, max_width=fixed_col_caps[1])
+    table.add_column("TIME", no_wrap=True, max_width=fixed_col_caps[2])
     table.add_column("LAST AGENT MESSAGE", ratio=2, max_width=last_agent_col_w)
     table.add_column("CONTINUE MESSAGE", ratio=1, max_width=msg_col_w)
 

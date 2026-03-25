@@ -64,7 +64,8 @@ class ObserveContext:
 
 _WATCH_COMMAND_HELP = (
     "Commands: s/start <target> [thread-id] [--message TEXT], "
-    "e/edit <target>, p/pause [target], u/resume [target], r/restart [target]"
+    "e/edit <target>, p/pause [target], u/resume [target], r/restart [target], "
+    "stop [target], recover [target], repair [target], cleanup, doctor [target]"
 )
 _WATCH_FEEDBACK_TTL_SECS = 10.0
 
@@ -153,7 +154,7 @@ def parse_watch_command(command_text: str) -> list[str]:
         "r": "restart",
     }
     cmd = aliases.get(cmd, cmd)
-    if cmd not in {"help", "start", "edit", "pause", "resume", "restart"}:
+    if cmd not in {"help", "start", "edit", "pause", "resume", "restart", "stop", "recover", "repair", "cleanup", "doctor"}:
         raise ValueError(f"unsupported command '{tokens[0]}'; {_WATCH_COMMAND_HELP.lower()}")
     tokens[0] = cmd
     return tokens
