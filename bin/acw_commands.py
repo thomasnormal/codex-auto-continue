@@ -1183,3 +1183,43 @@ def cmd_repair(
         for step in manual_steps:
             print(f"MANUAL: {step.summary}")
         sys.exit(1)
+
+
+def cmd_broadcast(
+    context: CommandContext,
+    argv: list[str],
+    *,
+    submit_key: str = "Tab",
+) -> None:
+    import subprocess
+
+    if not argv:
+        print("error: broadcast requires a message", file=sys.stderr)
+        print("usage: acw broadcast <message>", file=sys.stderr)
+        sys.exit(2)
+    message = " ".join(argv)
+
+    sessions = context.load_session_records()
+    panes_sent: set[str] = set()
+    for session in sessions:
+        pane = session.pane.strip() if hasattr(session, "pane") else ""
+        if not pane or pane in panes_sent:
+            continue
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", pane, "C-u"],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["tmux", "send-keys", "-lt", pane, message],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["tmux", "send-keys", "-t", pane, submit_key],
+                capture_output=True, timeout=5,
+            )
+            panes_sent.add(pane)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            print(f"warning: failed to send to pane {pane}: {exc}", file=sys.stderr)
+
+    print(f"broadcast: sent to {len(panes_sent)} pane(s)")

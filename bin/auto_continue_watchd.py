@@ -1912,6 +1912,7 @@ def _run_watch_command(argv: list[str]) -> None:
         "stop": cmd_stop,
         "recover": cmd_recover,
         "repair": cmd_repair,
+        "broadcast": cmd_broadcast,
         "cleanup": cmd_cleanup,
         "doctor": cmd_doctor,
     }
@@ -2105,6 +2106,10 @@ def cmd_doctor(argv: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def cmd_broadcast(argv: list[str]) -> None:
+    acw_commands.cmd_broadcast(_command_context(), argv)
+
+
 def cmd_cleanup(argv: list[str]) -> None:
     """Cleanup stale files."""
     if argv:
@@ -2161,6 +2166,7 @@ def main() -> None:
         "recover": cmd_recover,
         "restart": cmd_restart,
         "repair": cmd_repair,
+        "broadcast": cmd_broadcast,
         "cleanup": cmd_cleanup,
         "status": cmd_status,
         "edit": cmd_edit,

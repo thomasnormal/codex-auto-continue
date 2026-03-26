@@ -41,9 +41,11 @@ def build_help_text(prog: str) -> str:
   {prog} stop [target]
   {prog} pause [target]
   {prog} resume [target ...]
+  {prog} recover [target]
   {prog} restart [target]
   {prog} edit <target>
   {prog} repair [target] [--dry-run|--all]
+  {prog} broadcast <message>
   {prog} cleanup
   {prog} doctor [target]
 
@@ -54,9 +56,11 @@ Commands:
   stop      Stop one managed session, one pane's runtimes, or all managed sessions, and forget their saved sessions.
   pause     Pause one managed session, or all managed sessions when no target is given.
   resume    Restart one or more paused managed sessions. When explicitly targeted, it can also send the saved continue message immediately to an idle waiting managed session.
+  recover   Recover a dead saved session onto its saved pane by relaunching `codex resume <thread-id>` there. With no target it attempts all dead saved sessions.
   restart   Restart one managed session or all live panes, including recoverable dead sessions, when no target is given. Use --restart-codex on a single target to relaunch Codex with the same thread.
   edit      Edit the stored continue message for a running managed session, then restart it.
   repair    Inspect or apply safe live-state repairs using the invariant model. With no target it defaults to --dry-run; use --all to apply safe repairs across all panes.
+  broadcast Send a message to all managed agent panes.
   cleanup   Remove dead saved sessions and stale daemon/runtime files.
   doctor    Check tmux reachability, Codex auth/state, and optional pane/thread health.
 
@@ -70,6 +74,8 @@ Examples:
   {prog} start %6 --message "continue"
   {prog} start uvm 019cb235-bc2c-7920-8832-f2d5656fead8
   {prog} resume formal aot
+  {prog} recover
+  {prog} recover bugs
   {prog} restart bugs --restart-codex
   {prog} edit %6
   {prog} repair --dry-run
@@ -111,7 +117,7 @@ def main(
         print_help_fn(file=sys.stdout)
         raise SystemExit(0)
 
-    if subcmd in ("start", "stop", "restart", "edit", "repair", "cleanup"):
+    if subcmd in ("start", "stop", "recover", "restart", "edit", "repair", "cleanup"):
         cleanup_stale_files_fn()
 
     if subcmd in commands:
