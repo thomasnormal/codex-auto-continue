@@ -121,6 +121,43 @@ class AcwCodexUnitTests(unittest.TestCase):
                 ),
             )
 
+    def test_tmux_send_does_not_retype_prompt_after_enter_failure(self):
+        calls = []
+
+        def fake_run_tmux(args, capture_output=True):
+            calls.append(list(args))
+            failed = args[-1] == "C-m"
+            return subprocess.CompletedProcess(args, int(failed), "", "Enter failed" if failed else "")
+
+        result = acw_codex.tmux_send(
+            "%11", "continue", 0,
+            run_tmux_fn=fake_run_tmux,
+            cancel_mode_if_needed_fn=lambda _pane: None,
+        )
+        self.assertEqual("error", result.status)
+        self.assertIn("send-enter rc=1", result.detail)
+        self.assertEqual([
+            ["send-keys", "-t", "%11", "-l", "continue"],
+            ["send-keys", "-t", "%11", "C-m"],
+        ], calls)
+
+    def test_tmux_send_preserves_text_sent_after_initial_write_retry(self):
+        calls = []
+
+        def fake_run_tmux(args, capture_output=True):
+            calls.append(list(args))
+            failed = len(calls) == 1 or args[-1] == "C-m"
+            return subprocess.CompletedProcess(args, int(failed), "", "failed" if failed else "")
+
+        result = acw_codex.tmux_send(
+            "%11", "continue", 0,
+            run_tmux_fn=fake_run_tmux,
+            cancel_mode_if_needed_fn=lambda _pane: None,
+        )
+        self.assertEqual("error", result.status)
+        self.assertTrue(result.text_sent)
+        self.assertEqual(3, len(calls))
+
     def test_tmux_send_interrupts_after_text_before_enter(self):
         calls = []
 
