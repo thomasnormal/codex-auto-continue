@@ -44,6 +44,7 @@ _DEFAULT_THREAD_WORKDIR_TTL_SECS = 1.0
 class TmuxSendResult:
     status: Literal["ok", "error", "interrupted"]
     detail: str = ""
+    text_sent: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,24 +186,24 @@ def _tmux_send_once(
 
     reason = _interrupt_reason(interrupt_checker)
     if reason:
-        return TmuxSendResult("interrupted", reason)
+        return TmuxSendResult("interrupted", reason, text_sent=True)
 
     if enter_delay_secs > 0.0:
         time.sleep(enter_delay_secs)
     reason = _interrupt_reason(interrupt_checker)
     if reason:
-        return TmuxSendResult("interrupted", reason)
+        return TmuxSendResult("interrupted", reason, text_sent=True)
 
     send_enter = run_tmux_fn(["send-keys", "-t", pane, "C-m"])
     if send_enter.returncode == 0:
-        return TmuxSendResult("ok")
+        return TmuxSendResult("ok", text_sent=True)
 
     detail_parts = [f"send-enter rc={send_enter.returncode}"]
     for stream_name, stream in (("stderr", send_enter.stderr), ("stdout", send_enter.stdout)):
         text = (stream or "").strip()
         if text:
             detail_parts.append(f"send-enter {stream_name}={text}")
-    return TmuxSendResult("error", "; ".join(detail_parts))
+    return TmuxSendResult("error", "; ".join(detail_parts), text_sent=True)
 
 
 def tmux_send(
@@ -226,7 +227,7 @@ def tmux_send(
         interrupt_checker=interrupt_checker,
         run_tmux_fn=run_tmux_fn,
     )
-    if result.status != "error":
+    if result.status != "error" or result.text_sent:
         return result
 
     cancel_mode_if_needed_fn(pane)
@@ -240,8 +241,8 @@ def tmux_send(
     if retry.status != "error":
         return retry
     if result.detail and retry.detail:
-        return TmuxSendResult("error", f"{result.detail}; retry: {retry.detail}")
-    return TmuxSendResult("error", retry.detail or result.detail)
+        return TmuxSendResult("error", f"{result.detail}; retry: {retry.detail}", text_sent=retry.text_sent)
+    return TmuxSendResult("error", retry.detail or result.detail, text_sent=retry.text_sent)
 
 
 def _process_start_epoch(pid: str) -> Optional[float]:

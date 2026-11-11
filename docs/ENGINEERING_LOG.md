@@ -1,5 +1,11 @@
 # Engineering Log
 
+## 2026-11-11
+
+- Regression: when literal prompt insertion succeeded but sending `C-m` failed, `tmux_send` retried the entire send and inserted the prompt twice. A deterministic regression test reproduced the duplicate calls before the fix.
+- Fix: carry `text_sent` in the send result and return the Enter failure without retrying the prompt. Failures before successful text insertion keep the existing retry behavior.
+- Validation: 190 targeted and existing unit tests passed. `test/smoke.sh` passed with Python 3.11. Python 3.10 smoke fails on the existing `StrEnum` import; that separate compatibility issue is outside this patch. Real Codex/tmux integration was not run because tmux is unavailable on the test host.
+
 ## 2026-03-22
 
 - Fix: thread detection for live Codex processes now consults `logs_*.sqlite` as well as legacy `state_*.sqlite` log tables, and it picks the freshest PID/thread observation by `(ts, ts_nanos)` instead of returning the first matching database row. This fixes long-lived resumed panes whose process argv still points at an old thread while the live Codex process has already moved to a newer thread and is logging under that new id.
